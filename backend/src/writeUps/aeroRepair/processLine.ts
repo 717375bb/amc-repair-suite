@@ -1,0 +1,396 @@
+import path from 'node:path';
+import { insertWriteUpAction, insertWriteUpDockMove, insertWriteUpIssueDecision, openDb } from '../../db/db.js';
+import type { MxiClient } from '../../mxiWriter/mxiClient.js';
+import { verifyLineStillEligible } from './batchDiscovery.js';
+import { appendDiscoveryLogRows, type CompletedRow, type ExceptionRow } from './discoveryLog.js';
+import { issueGeneratedOrder, moveOutboundShipmentToDock, readOrderRealState } from './issueOrder.js';
+import { runAeroRepairWriteUp } from './writeUp.js';
+
+export const LOG_FILE_PATH = path.join('data', 'aero-repair-writeup-log.xlsx');
+const REVIEWED_BY = 'batch-execute-automated';
+
+/**
+ * Extracted from aeroRepairBatchExecuteCli.ts so aeroRepairContinueAdHocCli.ts
+ * (the one-time manual-continuation proof command) can drive the exact
+ * same real flow — write-up through Issue Order and Move to Dock, same
+ * independent-verification discipline throughout — rather than
+ * duplicating it and risking the two paths drifting apart.
+ */
+export type ProcessLineResult =
+  | { status: 'completed'; orderNumber: string; stationCode: string; routingLocation: string; shipmentId: string | null }
+  | { status: 'no_longer_eligible' }
+  | { status: 'no_tasks_assigned'; stationCode: string }
+  | { status: 'multiple_candidate_tasks'; stationCode: string; candidateNames: string[] }
+  | { status: 'ad_hoc_pending_manual_continuation'; serialNumber: string; taskName: string }
+  | { status: 'unrecognized_station'; stationCode: string }
+  | { status: 'zero_usage' }
+  | { status: 'unassigned_task_present'; taskDetail: string }
+  | { status: 'automation_error'; step: string; errorMessage: string; stationCode: string | null };
+
+export async function processLine(
+  db: ReturnType<typeof openDb>,
+  client: MxiClient,
+  env: string,
+  partNumber: string,
+  serialNumber: string,
+): Promise<ProcessLineResult> {
+  const stillEligible = await verifyLineStillEligible(client, partNumber, serialNumber);
+  if (!stillEligible) {
+    // REAL GAP FOUND AND FIXED: this used to return without ever calling
+    // insertWriteUpAction, same as no_tasks_assigned/multiple_candidate_tasks
+    // below — meaning every "No Longer Eligible" skip (10 real ones found
+    // across three days) existed ONLY in the xlsx log, invisible to any DB
+    // query. Now recorded here too, so the DB alone is a complete record.
+    insertWriteUpAction(db, {
+      vendor: 'aeroRepair',
+      partNumber,
+      targetEnv: env,
+      outcome: 'no_longer_eligible',
+      stationCode: null,
+      routedLocation: null,
+      filledFieldsJson: JSON.stringify({ serialNumber }, null, 2),
+      errorMessage: null,
+      orderNumber: null,
+    });
+    return { status: 'no_longer_eligible' };
+  }
+
+  const writeUpOutcome = await runAeroRepairWriteUp(client, partNumber, serialNumber);
+
+  if (writeUpOutcome.status === 'no_tasks_assigned') {
+    // REAL GAP FOUND AND FIXED: same as no_longer_eligible above — this
+    // outcome (60 real occurrences) was previously xlsx-only.
+    insertWriteUpAction(db, {
+      vendor: 'aeroRepair',
+      partNumber,
+      targetEnv: env,
+      outcome: 'no_tasks_assigned',
+      stationCode: null,
+      routedLocation: null,
+      filledFieldsJson: JSON.stringify({ serialNumber }, null, 2),
+      errorMessage: null,
+      orderNumber: null,
+    });
+    return { status: 'no_tasks_assigned', stationCode: '(unknown)' };
+  }
+  if (writeUpOutcome.status === 'multiple_candidate_tasks') {
+    // REAL GAP FOUND AND FIXED: same as above — previously xlsx-only.
+    insertWriteUpAction(db, {
+      vendor: 'aeroRepair',
+      partNumber,
+      targetEnv: env,
+      outcome: 'multiple_candidate_tasks',
+      stationCode: null,
+      routedLocation: null,
+      filledFieldsJson: JSON.stringify(
+        { serialNumber, candidateNames: writeUpOutcome.candidateNames },
+        null,
+        2,
+      ),
+      errorMessage: null,
+      orderNumber: null,
+    });
+    return {
+      status: 'multiple_candidate_tasks',
+      stationCode: '(unknown)',
+      candidateNames: writeUpOutcome.candidateNames,
+    };
+  }
+  if (writeUpOutcome.status === 'ad_hoc_pending_manual_continuation') {
+    // A real mutation happened (the Ad-Hoc task was genuinely created) —
+    // unlike no_tasks_assigned/multiple_candidate_tasks (both read-only),
+    // this gets a real write_up_actions row, same as every other real
+    // write this module makes.
+    insertWriteUpAction(db, {
+      vendor: 'aeroRepair',
+      partNumber,
+      targetEnv: env,
+      outcome: 'ad_hoc_pending_manual_continuation',
+      stationCode: null,
+      routedLocation: null,
+      filledFieldsJson: JSON.stringify(
+        { serialNumber: writeUpOutcome.serialNumber, taskName: writeUpOutcome.taskName },
+        null,
+        2,
+      ),
+      errorMessage: null,
+      orderNumber: null,
+    });
+    return {
+      status: 'ad_hoc_pending_manual_continuation',
+      serialNumber: writeUpOutcome.serialNumber,
+      taskName: writeUpOutcome.taskName,
+    };
+  }
+  if (writeUpOutcome.status === 'unrecognized_station') {
+    insertWriteUpAction(db, {
+      vendor: 'aeroRepair',
+      partNumber,
+      targetEnv: env,
+      outcome: 'unrecognized_station',
+      stationCode: writeUpOutcome.stationCode,
+      routedLocation: null,
+      filledFieldsJson: null,
+      errorMessage: null,
+      orderNumber: null,
+    });
+    return { status: 'unrecognized_station', stationCode: writeUpOutcome.stationCode };
+  }
+  if (writeUpOutcome.status === 'zero_usage') {
+    insertWriteUpAction(db, {
+      vendor: 'aeroRepair',
+      partNumber,
+      targetEnv: env,
+      outcome: 'zero_usage',
+      stationCode: null,
+      routedLocation: null,
+      filledFieldsJson: JSON.stringify({ serialNumber: writeUpOutcome.serialNumber }, null, 2),
+      errorMessage: null,
+      orderNumber: null,
+    });
+    return { status: 'zero_usage' };
+  }
+  if (writeUpOutcome.status === 'unassigned_task_present') {
+    insertWriteUpAction(db, {
+      vendor: 'aeroRepair',
+      partNumber,
+      targetEnv: env,
+      outcome: 'unassigned_task_present',
+      stationCode: null,
+      routedLocation: null,
+      filledFieldsJson: JSON.stringify(
+        { serialNumber: writeUpOutcome.serialNumber, taskDetail: writeUpOutcome.taskDetail },
+        null,
+        2,
+      ),
+      errorMessage: null,
+      orderNumber: null,
+    });
+    return { status: 'unassigned_task_present', taskDetail: writeUpOutcome.taskDetail };
+  }
+  if (writeUpOutcome.status === 'error') {
+    // GAP FOUND AND FIXED: this used to log filledFieldsJson: null for
+    // every error, so a write_up_actions 'error' row could never be
+    // attributed to a specific line without cross-referencing the xlsx log
+    // separately. writeUpOutcome now carries serialNumber (see writeUp.ts),
+    // so it's recorded here the same way every other non-'error' outcome
+    // already records identifying context.
+    insertWriteUpAction(db, {
+      vendor: 'aeroRepair',
+      partNumber,
+      targetEnv: env,
+      outcome: 'error',
+      stationCode: null,
+      routedLocation: null,
+      filledFieldsJson: JSON.stringify({ serialNumber: writeUpOutcome.serialNumber }, null, 2),
+      errorMessage: writeUpOutcome.errorMessage,
+      orderNumber: null,
+    });
+    return { status: 'automation_error', step: 'write-up', errorMessage: writeUpOutcome.errorMessage, stationCode: null };
+  }
+
+  // status === 'filled'
+  const { fields } = writeUpOutcome;
+  const stationCode = fields.routing.status === 'routed' ? fields.routing.stationCode : null;
+  const routedLocation = fields.routing.status === 'routed' ? fields.routing.location : null;
+  const dbOutcome = fields.generatedOrderNumber && fields.authorizationRequested ? 'pending_issue' : 'filled';
+
+  const writeUpActionId = insertWriteUpAction(db, {
+    vendor: 'aeroRepair',
+    partNumber,
+    targetEnv: env,
+    outcome: dbOutcome,
+    stationCode,
+    routedLocation,
+    filledFieldsJson: JSON.stringify(fields, null, 2),
+    errorMessage: null,
+    orderNumber: fields.generatedOrderNumber,
+  });
+
+  if (!fields.generatedOrderNumber || !fields.authorizationRequested) {
+    return {
+      status: 'automation_error',
+      step: 'write-up',
+      errorMessage: 'Write-up completed but no order number was generated or authorization was not requested.',
+      stationCode,
+    };
+  }
+  const orderNumber = fields.generatedOrderNumber;
+
+  // Issue Order — no pause, per the relaxed-gate decision. Independently
+  // re-verified regardless of what issueGeneratedOrder itself reported,
+  // same discipline as the manual approve-issue CLI.
+  const issueResult = await issueGeneratedOrder(client, orderNumber);
+  const page = await client.getAuthenticatedPage();
+  const { orderStatus } = await readOrderRealState(page, orderNumber, client.todoListUrl);
+  const genuinelyIssued = orderStatus === 'ISSUED';
+
+  const writeUpIssueDecisionId = insertWriteUpIssueDecision(db, {
+    writeUpActionId,
+    orderNumber,
+    targetEnv: env,
+    action: 'approved_issue',
+    issueStatus: genuinelyIssued ? 'success' : 'failed',
+    errorMessage: issueResult.status === 'success' ? null : issueResult.errorMessage,
+    reviewedBy: REVIEWED_BY,
+  });
+
+  if (!genuinelyIssued) {
+    return {
+      status: 'automation_error',
+      step: 'issue-order',
+      errorMessage: `Order ${orderNumber} not confirmed ISSUED (real status: ${orderStatus ?? '(not found)'}; issueGeneratedOrder reported: ${issueResult.status}${issueResult.errorMessage ? ' — ' + issueResult.errorMessage : ''}).`,
+      stationCode,
+    };
+  }
+
+  // Move to Dock — same flow, no pause.
+  const dockResult = await moveOutboundShipmentToDock(client, orderNumber);
+
+  insertWriteUpDockMove(db, {
+    writeUpIssueDecisionId,
+    orderNumber,
+    targetEnv: env,
+    shipmentId: dockResult.shipmentId,
+    moveStatus: dockResult.status,
+    errorMessage: dockResult.status === 'success' || dockResult.status === 'already_docked_externally' ? null : dockResult.errorMessage,
+  });
+
+  if (dockResult.status === 'failed' || dockResult.status === 'no_outbound_shipment_found') {
+    return {
+      status: 'automation_error',
+      step: 'move-to-dock',
+      errorMessage: dockResult.errorMessage ?? dockResult.status,
+      stationCode,
+    };
+  }
+
+  return {
+    status: 'completed',
+    orderNumber,
+    stationCode: stationCode ?? '(unknown)',
+    routingLocation: routedLocation ?? '(unknown)',
+    shipmentId: dockResult.shipmentId,
+  };
+}
+
+/**
+ * Shared per-line result -> xlsx row logging, extracted alongside
+ * processLine for the same reuse reason. Logs immediately (not
+ * accumulated), same as the original batch-execute loop.
+ */
+export async function logProcessLineResult(
+  target: { partNumber: string; serialNumber: string },
+  result: ProcessLineResult,
+  env: string,
+): Promise<void> {
+  const dateFound = new Date().toISOString();
+  const completed: CompletedRow[] = [];
+  const exceptions: ExceptionRow[] = [];
+
+  if (result.status === 'completed') {
+    console.log(`COMPLETED: order ${result.orderNumber}, routed to ${result.routingLocation}, docked (shipment ${result.shipmentId ?? '(n/a)'}).`);
+    completed.push({
+      orderNumber: result.orderNumber,
+      partNumber: target.partNumber,
+      serialNumber: target.serialNumber,
+      station: result.stationCode,
+      routingDestination: result.routingLocation,
+      date: dateFound,
+    });
+  } else if (result.status === 'no_longer_eligible') {
+    console.log('SKIPPED: no longer eligible (claimed by another process since discovery).');
+    exceptions.push({
+      partNumber: target.partNumber,
+      serialNumber: target.serialNumber,
+      station: '(unknown)',
+      dateFound,
+      issueType: 'No Longer Eligible (claimed by another process)',
+      details: `Fresh re-check immediately before processing found this line no longer eligible — an order now exists for it, or it is no longer present in the open-inventory grid.`,
+      suggestedAction: 'No action needed — this is expected on a shared production system. Another process or user has already claimed this line.',
+    });
+  } else if (result.status === 'no_tasks_assigned') {
+    console.log('SKIPPED: no tasks assigned (re-discovered live, not just from the earlier scan).');
+    exceptions.push({
+      partNumber: target.partNumber,
+      serialNumber: target.serialNumber,
+      station: result.stationCode,
+      dateFound,
+      issueType: 'No Task Assigned',
+      details: `Line has no assigned tasks on the default Assigned Tasks tab (found live during batch execution, not just discovery).`,
+      suggestedAction:
+        'Manually assign a task to this work package before a write-up can be created, or confirm no repair is needed.',
+    });
+  } else if (result.status === 'multiple_candidate_tasks') {
+    console.log(`SKIPPED: ${result.candidateNames.length} candidate tasks found, flagging for human review (not guessing among them).`);
+    exceptions.push({
+      partNumber: target.partNumber,
+      serialNumber: target.serialNumber,
+      station: result.stationCode,
+      dateFound,
+      issueType: 'Multiple Candidate Tasks',
+      details: `Line has ${result.candidateNames.length} real candidate task definitions, not yet formally assigned: ${result.candidateNames.join('; ')}`,
+      suggestedAction: 'Manually determine which task (if any) applies and assign it before a write-up can be created — automation refuses to guess among multiple candidates.',
+    });
+  } else if (result.status === 'ad_hoc_pending_manual_continuation') {
+    const envFlag = env === 'production' ? ' --env production' : '';
+    const continueCommand = `npm run aero-repair:continue-ad-hoc -- ${target.partNumber} ${result.serialNumber}${envFlag}`;
+    console.log(`PAUSED: Ad-Hoc task created ("${result.taskName}") — pending one-time manual proof.`);
+    console.log(`Run to continue: ${continueCommand}`);
+    exceptions.push({
+      partNumber: target.partNumber,
+      serialNumber: target.serialNumber,
+      station: '(unknown)',
+      dateFound,
+      issueType: 'Ad-Hoc Task Created - Pending Manual Continuation',
+      details: `Created Ad-Hoc task "${result.taskName}" but paused before Auth Flow/Issue Order/Move to Dock — this specific recovery path's continuation has not yet been proven end-to-end. A real task was created; nothing further was submitted.`,
+      suggestedAction: `Run \`${continueCommand}\` to manually continue this one order and prove the path for real. Once that succeeds, subsequent single-candidate cases will run fully automatically.`,
+    });
+  } else if (result.status === 'unrecognized_station') {
+    console.log(`SKIPPED: unrecognized station "${result.stationCode}".`);
+    exceptions.push({
+      partNumber: target.partNumber,
+      serialNumber: target.serialNumber,
+      station: result.stationCode,
+      dateFound,
+      issueType: 'Unrecognized Station',
+      details: `Line is at station "${result.stationCode}", which has no entry in the 12-station Aero Repair routing table.`,
+      suggestedAction: "This part's current station isn't in the automated routing table — manually determine the correct Aero Repair location.",
+    });
+  } else if (result.status === 'zero_usage') {
+    console.log('SKIPPED: Current Usage shows all-zero CYCLES/HOURS (TSN/TSO/TSI) — likely a maintenance-records data problem.');
+    exceptions.push({
+      partNumber: target.partNumber,
+      serialNumber: target.serialNumber,
+      station: '(unknown)',
+      dateFound,
+      issueType: 'Zero Usage - Records Error',
+      details: 'Current Usage table shows CYCLES and HOURS both at exactly 0 for TSN/TSO/TSI — a real part in active repair inventory should not show zero usage across the board.',
+      suggestedAction: 'Notify the maintenance records team to correct this part\'s usage data before a write-up can be created for it.',
+    });
+  } else if (result.status === 'unassigned_task_present') {
+    console.log('SKIPPED: a real unassigned task is present on this line.');
+    exceptions.push({
+      partNumber: target.partNumber,
+      serialNumber: target.serialNumber,
+      station: '(unknown)',
+      dateFound,
+      issueType: 'Unassigned Task Present',
+      details: `Unassigned Tasks sub-tab shows a real task, not the confirmed empty state: ${result.taskDetail}`,
+      suggestedAction: 'Can be manually assigned by a CRA in the meantime — auto-assignment for this case is not yet built.',
+    });
+  } else {
+    console.error(`AUTOMATION ERROR at step "${result.step}": ${result.errorMessage}`);
+    exceptions.push({
+      partNumber: target.partNumber,
+      serialNumber: target.serialNumber,
+      station: result.stationCode ?? '(unknown)',
+      dateFound,
+      issueType: 'Automation Error',
+      details: `Failed at step "${result.step}": ${result.errorMessage}`,
+      suggestedAction: 'Review manually in MXI and determine real state before retrying — do not assume nothing happened.',
+    });
+  }
+
+  await appendDiscoveryLogRows(LOG_FILE_PATH, { exceptions, completed });
+}

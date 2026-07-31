@@ -1,0 +1,45 @@
+{
+  "name": "amc-repair-suite-backend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Phase 1 ESD inference engine for PSA Airlines component repair open orders.",
+  "scripts": {
+    "cli": "tsx src/cli.ts",
+    "server": "tsx src/server.ts",
+    "mxi:read-esd": "tsx src/mxiReadEsd.ts",
+    "mxi:write-esd": "tsx src/mxiWriteEsd.ts",
+    "mxi:save-storage-state": "tsx src/mxiWriter/saveStorageState.ts",
+    "aero-repair:write-up": "tsx src/aeroRepairWriteUpCli.ts",
+    "aero-repair:batch-discovery": "tsx src/aeroRepairBatchDiscoveryCli.ts",
+    "aero-repair:batch-execute": "tsx src/aeroRepairBatchExecuteCli.ts",
+    "aero-repair:continue-ad-hoc": "tsx src/aeroRepairContinueAdHocCli.ts",
+    "aero-repair:review-pending": "tsx src/aeroRepairReviewPendingCli.ts",
+    "aero-repair:move-to-dock": "tsx src/aeroRepairMoveToDockCli.ts",
+    "aero-repair:approve-issue": "tsx src/aeroRepairApproveIssueCli.ts",
+    "aero-repair:reject-issue": "tsx src/aeroRepairRejectIssueCli.ts",
+    "approve-and-write": "tsx src/approveAndWrite.ts",
+    "verify-gitignore": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-gitignore.ps1",
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.68.0",
+    "better-sqlite3": "^11.3.0",
+    "commander": "^12.1.0",
+    "date-fns": "^4.1.0",
+    "dotenv": "^16.4.5",
+    "exceljs": "^4.4.0",
+    "express": "^4.21.1",
+    "mssql": "^12.7.0",
+    "playwright": "^1.48.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/express": "^4.17.21",
+    "@types/mssql": "^12.3.0",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

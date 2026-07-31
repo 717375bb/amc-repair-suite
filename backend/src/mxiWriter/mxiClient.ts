@@ -1,6 +1,6 @@
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
-import { loadMxiConfig, printProductionWarningIfNeeded, type MxiConfig } from './config.js';
-import { login, TODO_LIST_URL } from './selectors.js';
+import { deriveTodoListUrl, loadMxiConfig, printProductionWarningIfNeeded, type MxiConfig } from './config.js';
+import { login } from './selectors.js';
 
 export type MxiSessionState =
   | { status: 'not_initialized' }
@@ -18,6 +18,7 @@ export type MxiSessionState =
  */
 export class MxiClient {
   readonly config: MxiConfig;
+  readonly todoListUrl: string;
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
   private page: Page | null = null;
@@ -25,6 +26,10 @@ export class MxiClient {
 
   constructor(config: MxiConfig = loadMxiConfig()) {
     this.config = config;
+    // Empty baseUrl (not yet configured) degrades gracefully via
+    // initialize()'s own check below, exactly as before — only a
+    // non-empty-but-malformed baseUrl should fail loudly at construction.
+    this.todoListUrl = config.baseUrl ? deriveTodoListUrl(config.baseUrl) : '';
   }
 
   getState(): MxiSessionState {
@@ -54,8 +59,7 @@ export class MxiClient {
       this.browser = await chromium.launch({ headless: false });
       this.context = await this.browser.newContext();
       this.page = await this.context.newPage();
-      await this.page.goto(this.config.baseUrl);
-      await login(this.page, this.config.username, this.config.password);
+      await login(this.page, this.config.username, this.config.password, this.config.baseUrl);
       this.state = { status: 'ready' };
       console.log(`[mxiClient] Logged in to MXI (${this.config.env}).`);
     } catch (err) {
@@ -86,8 +90,7 @@ export class MxiClient {
 
     console.warn('[mxiClient] MXI session appears to have expired. Re-authenticating once...');
     try {
-      await this.page.goto(this.config.baseUrl);
-      await login(this.page, this.config.username, this.config.password);
+      await login(this.page, this.config.username, this.config.password, this.config.baseUrl);
       if (!(await this.isSessionAlive(this.page))) {
         throw new Error('Session still not valid after re-authentication attempt.');
       }
@@ -124,7 +127,7 @@ export class MxiClient {
     // known authenticated URL. MXI bounces unauthenticated requests to
     // login.jsp, so landing there means the session is dead.
     try {
-      await page.goto(TODO_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 10_000 });
+      await page.goto(this.todoListUrl, { waitUntil: 'domcontentloaded', timeout: 10_000 });
       return !page.url().includes('login.jsp');
     } catch {
       // Navigation timeout or network error — treat as dead so re-auth fires.

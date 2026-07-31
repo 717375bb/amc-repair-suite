@@ -1,0 +1,16 @@
+data/
+.env
+dist/
+node_modules/
+discovery-recording.ts
+data/mxi-stage-storage-state.json
+data/mxi-production-storage-state.json
+
+# Naming convention: every one-off discovery/codegen-recording or scratch
+# diagnostic script lives directly under backend/ and is named
+# discovery-*.ts (e.g. discovery-recording.ts, discovery-<topic>-recording.ts,
+# discovery-<topic>-scratch.ts). This is the 4th time a differently-named
+# one-off script needed its own new literal .gitignore entry — name new ones
+# this way and this single glob covers them, no .gitignore edit required.
+discovery-*.ts
+"discovery-notaskwriteup-recording.ts" 
