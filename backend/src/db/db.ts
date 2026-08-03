@@ -340,7 +340,17 @@ export interface WriteUpActionInsert {
     | 'unrecognized_station'
     | 'zero_usage'
     | 'unassigned_task_present'
-    | 'error';
+    | 'error'
+    // Vendor 0T1Y4 additions, per VENDOR_MODULE_REFACTOR_SPEC.md section 4 —
+    // outcome is a free-text TEXT column with no DB-level enum constraint
+    // (confirmed via schema above), so this is a TS-level extension only,
+    // same pattern as every prior outcome addition.
+    | 'authorized_only'
+    | 'issued_and_docked'
+    | 'no_candidate_lines'
+    | 'usage_table_absent_unexpected'
+    | 'authorization_not_confirmed'
+    | 'no_task_found_for_bn_line';
   stationCode: string | null;
   routedLocation: string | null;
   filledFieldsJson: string | null;

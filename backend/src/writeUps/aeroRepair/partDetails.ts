@@ -4,11 +4,33 @@ import { AERO_REPAIR_ROUTING, NOTES_HEADER_TEXT } from './constants.js';
 import { captureEmptyReadEvidence } from './emptyReadCapture.js';
 import { waitBeforeRetry } from './retryBackoff.js';
 import {
-  waitForBodyTextIncludes,
   waitForGridResolved,
   waitForVendorBidsResolved,
   waitForWorkPackageDetailsResolved,
 } from './gridWait.js';
+import type { PartOwnDetails } from '../shared/partOwnDetails.js';
+
+/**
+ * navigateToUnassignedTasksView, closeUnassignedTasksView,
+ * openPartOwnDetails, closePartOwnDetails, readPartOwnDetails,
+ * extractCleanPartDescription, PartOwnDetails, UsageParmRow moved to
+ * backend/src/writeUps/shared/ per confirmed vendor-agnostic status (a
+ * second real vendor, 0T1Y4, uses the identical mechanics). Re-exported
+ * here so every existing call site in this module keeps working
+ * unchanged. isZeroUsage and composeAeroRepairNotesText stay here — both
+ * genuinely Aero-Repair-specific (see their own docstrings below).
+ */
+export {
+  navigateToUnassignedTasksView,
+  closeUnassignedTasksView,
+} from '../shared/unassignedTasks.js';
+export {
+  openPartOwnDetails,
+  closePartOwnDetails,
+  readPartOwnDetails,
+  extractCleanPartDescription,
+} from '../shared/partOwnDetails.js';
+export type { PartOwnDetails, UsageParmRow } from '../shared/partOwnDetails.js';
 
 const KNOWN_VENDOR_LOCATION_COUNT = new Set(Object.values(AERO_REPAIR_ROUTING)).size;
 
@@ -250,82 +272,6 @@ export async function findFirstRepairLineForPart(
 }
 
 /**
- * After clicking the repair line, the recording did NOT go straight to the
- * inventory checkbox — it detoured through "Unassigned" -> "Unassigned
- * Tasks" -> "Close" first (lines 14-18 of the recording). This function
- * replicates the two clicks that get there, WITHOUT replaying the
- * recording's own `page.goto(CheckDetails.jsp?aCheck=...)` calls — those
- * URLs embed an encoded token specific to that one recorded check instance
- * and would be wrong (or fail outright) for a different order/part. Real
- * live testing confirmed the goto-only jump doesn't work: skipping this
- * detour entirely made the next step (finding the inventory checkbox) time
- * out, because the page was never actually in the right state — this
- * navigation is a real prerequisite, independent of any exception check.
- *
- * NOT where the no-tasks-assigned exception is checked (a real correction
- * from an earlier session): this view's own "no open tasks" message is a
- * different, normal/expected state — confirmed live to appear on every
- * real line checked, including ones with genuine assigned work. The real
- * exception check happens BEFORE this function is even called, on the
- * default "Assigned Tasks" tab (see selectors.ts's readAssignedTasksAreaText).
- */
-export async function navigateToUnassignedTasksView(page: Page): Promise<void> {
-  await page.getByRole('link', { name: 'Unassigned' }).click();
-  await pace(page);
-  await page.getByRole('link', { name: 'Unassigned Tasks' }).click();
-  await pace(page);
-}
-
-export async function closeUnassignedTasksView(page: Page): Promise<void> {
-  await page.getByRole('link', { name: 'Close' }).click();
-  await pace(page);
-}
-
-/**
- * Opens the part's own details view: checks the target line's inventory
- * checkbox and a vendor radio (scoped to the row matching the known-unique
- * repair-link text), then clicks the serial-number link to open the
- * details page.
- *
- * REAL BUG FOUND AND FIXED via live testing (same root cause as
- * selectors.ts's readCurrentLocationCode): this originally used `.first()`
- * on `input[name="aInventory"]` with NO scoping to the target line —
- * silently checking row 1's checkbox/radio regardless of which line
- * findFirstRepairLineForPart had actually selected, whenever a part number
- * has multiple open repair lines (5013640 genuinely does). The final
- * serial-number-link click still targeted the correct line (matched
- * exactly by serialNumber), but the checkbox/radio state leading up to it
- * did not. Now scoped via linkText, same ancestor-of-known-unique-link
- * technique used elsewhere in this module.
- */
-export async function openPartOwnDetails(page: Page, linkText: string, serialNumber: string): Promise<void> {
-  const repairLink = page.getByRole('link', { name: linkText, exact: true });
-  const targetTr = repairLink.locator('xpath=ancestor::tr[1]');
-
-  await targetTr.locator('input[name="aInventory"]').check();
-  await pace(page);
-
-  const vendorRadios = targetTr.getByRole('radio');
-  if ((await vendorRadios.count()) > 0) {
-    await vendorRadios.first().check();
-    await pace(page);
-  }
-
-  await page.getByRole('link', { name: serialNumber, exact: true }).click();
-  await pace(page);
-}
-
-/**
- * Closes the part-details view opened by openPartOwnDetails() — real
- * action from the recording (line 22: "Close"). Lands back on the
- * OEM-part-number-filtered grid.
- */
-export async function closePartOwnDetails(page: Page): Promise<void> {
-  await page.getByRole('link', { name: 'Close' }).click();
-  await pace(page);
-}
-
-/**
  * REAL BUG FOUND AND FIXED via live testing, with real consequences: this
  * originally checked whichever vendor radio was first within the target
  * line's immediate <tr> — which is NOT the same as the vendor matching the
@@ -433,62 +379,7 @@ export async function recheckRepairLineForSchedule(
   await selectVendorRadioForRouting(page, linkText, routingLocation);
 }
 
-export interface UsageParmRow {
-  /** e.g. "CYCLES" | "HOURS" — as literal a label as the real page shows, not assumed to be only these two. */
-  label: string;
-  tsn: string;
-  tso: string;
-  tsi: string;
-}
-
-export interface PartOwnDetails {
-  partDescription: string;
-  partNumber: string;
-  serialNumber: string;
-  usageRows: UsageParmRow[];
-  /**
-   * Full raw text of the page at the moment of reading, captured via a
-   * direct DOM `.innerText()` call — not the browser's manual mouse-select/
-   * copy/paste mechanism (which the user has separately flagged as
-   * unreliable on this page; that unreliability is specific to human mouse
-   * selection and doesn't apply to reading the DOM directly, same as
-   * readNoteToReceiver()'s existing `.innerText()` read on Notes to
-   * Receiver). partDescription/usageRows above are only a best-effort
-   * parse of this text — this raw field is the ground truth for
-   * cross-checking against a real screenshot of the same page.
-   */
-  rawText: string;
-}
-
 const USAGE_ROW_LABELS = ['CYCLES', 'HOURS'];
-
-/**
- * Best-effort parse only — the real structure of this page has not been
- * confirmed yet (this is the first live read of it). Looks for a line
- * starting with one of the known usage-parameter labels followed by
- * whitespace-separated numeric tokens; does NOT assume tab characters
- * (the recording's tab-separated table was typed/pasted by a human into a
- * textarea, not necessarily how this page's own DOM renders it).
- */
-function parseUsageRows(rawText: string): UsageParmRow[] {
-  const rows: UsageParmRow[] = [];
-  for (const line of rawText.split('\n')) {
-    const trimmed = line.trim();
-    for (const label of USAGE_ROW_LABELS) {
-      if (trimmed.toUpperCase().startsWith(label)) {
-        const numbers = trimmed
-          .slice(label.length)
-          .trim()
-          .split(/\s+/)
-          .filter((token) => /^-?\d+(\.\d+)?$/.test(token));
-        if (numbers.length >= 3) {
-          rows.push({ label, tsn: numbers[0], tso: numbers[1], tsi: numbers[2] });
-        }
-      }
-    }
-  }
-  return rows;
-}
 
 /**
  * Zero-usage records-error check: true only if BOTH the CYCLES row and the
@@ -499,9 +390,12 @@ function parseUsageRows(rawText: string): UsageParmRow[] {
  * Deliberately conservative: if either row is missing entirely (a parse
  * miss, or a genuinely different page shape), this returns false rather
  * than guessing — a write-up should never be skipped over a usage check
- * this function couldn't actually confirm.
+ * this function couldn't actually confirm. Aero-Repair-specific (binary),
+ * left untouched by the shared 3-way classifyUsageTable() built for 0T1Y4
+ * — see VENDOR_MODULE_REFACTOR_SPEC.md section 3.3 for why the two are
+ * deliberately not unified.
  */
-export function isZeroUsage(usageRows: UsageParmRow[]): boolean {
+export function isZeroUsage(usageRows: { label: string; tsn: string; tso: string; tsi: string }[]): boolean {
   return USAGE_ROW_LABELS.every((label) => {
     const row = usageRows.find((r) => r.label === label);
     if (!row) return false;
@@ -510,82 +404,14 @@ export function isZeroUsage(usageRows: UsageParmRow[]): boolean {
 }
 
 /**
- * Cross-checked live (2026-07-18 session): the raw candidate line reads
- * e.g. "Inventory Details  WHEEL ASSY, NLG (PN: 5013640, SN: JUL14-3229)"
- * — a page-title fragment ("Inventory Details") glued to the front, and
- * the same "(PN: X, SN: Y)" segment composeAeroRepairNotesText() already
- * appends on its own. Left unstripped, that segment got duplicated
- * verbatim in the composed Notes text — confirmed by actually running
- * composeAeroRepairNotesText() with the unstripped value, not just by
- * inspecting the parsing code. Strips both the leading page-title
- * fragment and the trailing "(PN: ..., SN: ...)" suffix, leaving just the
- * clean part name (e.g. "WHEEL ASSY, NLG").
- */
-export function extractCleanPartDescription(
-  candidateLine: string | undefined,
-  partNumber: string,
-  serialNumber: string,
-): string {
-  if (!candidateLine) return '';
-  const suffixPattern = new RegExp(
-    `\\s*\\(PN:\\s*${escapeRegExp(partNumber)},\\s*SN:\\s*${escapeRegExp(serialNumber)}\\)\\s*$`,
-  );
-  return candidateLine
-    .replace(/^Inventory Details\s+/i, '')
-    .replace(suffixPattern, '')
-    .trim();
-}
-
-/**
- * Reads the part's own details view via direct DOM text extraction
- * (`.innerText()` on the whole page, same technique as
- * mxiWriter/selectors.ts's readNoteToReceiver() and this module's own
- * readAssignedTasksAreaText()) — not the browser's manual copy/paste
- * mechanism. No specific container ID is known for this view yet (the
- * recording only clicked into it and closed it, never reading anything),
- * so this reads the whole page body rather than guessing a container
- * selector, matching this project's rule against fabricating selectors
- * for a page not yet inspected.
- *
- * partNumber/serialNumber are passed in from the caller (already known
- * from findFirstRepairLineForPart) rather than re-parsed from this page.
- * usageRows is a best-effort parse of the raw text; `rawText` is the
- * reliable field for cross-checking against a real screenshot.
- */
-export async function readPartOwnDetails(
-  page: Page,
-  partNumber: string,
-  serialNumber: string,
-): Promise<PartOwnDetails> {
-  // SYSTEMATIC AUDIT FIX: this used to read page.locator('body').innerText()
-  // immediately after openPartOwnDetails's click+750ms pace — the same
-  // whole-body-read-with-no-wait vulnerability class fixed elsewhere. Waits
-  // for the serial number to actually appear in the rendered page before
-  // reading — the exact substring this function's own descriptionLine
-  // lookup below already depends on being present.
-  await waitForBodyTextIncludes(page, serialNumber, `Part own details for ${partNumber}/${serialNumber}`);
-  const rawText = await page.locator('body').innerText();
-
-  const descriptionLine = rawText
-    .split('\n')
-    .map((line) => line.trim())
-    .find((line) => line.includes(partNumber) && line.includes(serialNumber));
-
-  return {
-    partDescription: extractCleanPartDescription(descriptionLine, partNumber, serialNumber),
-    partNumber,
-    serialNumber,
-    usageRows: parseUsageRows(rawText),
-    rawText,
-  };
-}
-
-/**
  * Builds the full Notes field value: the real permanent header text, a
  * blank line, then the part-description line, then the Usage Parm table —
  * exactly the structural shape the recording showed (verified against its
  * literal final `.fill()` argument), using the real extracted values passed
- * in rather than the recording's known-wrong stand-in data.
+ * in rather than the recording's known-wrong stand-in data. Aero-Repair-
+ * specific — hardcodes this module's own NOTES_HEADER_TEXT rather than
+ * taking one as a parameter; see 0T1Y4's own shared/vendorCodeWriteUp.ts
+ * notes composition for the parameterized equivalent.
  */
 export function composeAeroRepairNotesText(details: PartOwnDetails): string {
   const partLine = `${details.partDescription} (PN: ${details.partNumber}, SN: ${details.serialNumber})`;

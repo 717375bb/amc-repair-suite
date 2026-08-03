@@ -1,3 +1,6 @@
+import { DEFAULT_VENDOR_FORM_DEFAULTS } from '../shared/vendorConfig.js';
+export { NO_UNASSIGNED_TASKS_TEXT } from '../shared/unassignedTasks.js';
+
 /**
  * Aero Repair write-up constants. Vendor-specific by design — this project
  * will get one module per vendor as more write-up flows are added; nothing
@@ -40,9 +43,12 @@ export const AERO_REPAIR_ROUTING: Readonly<Record<string, string>> = Object.free
  * Recorded value: `#idEditFieldPurchasingContact` was filled with "717375" in
  * the real recording. The original task description said 717374 — user
  * confirmed via direct question that the recording (717375) is correct and
- * the written instruction was the typo.
+ * the written instruction was the typo. Per VENDOR_MODULE_REFACTOR_SPEC.md,
+ * Purchasing Contact is a confirmed GLOBAL MXI default (not vendor-scoped)
+ * — sourced from shared/vendorConfig.ts's DEFAULT_VENDOR_FORM_DEFAULTS,
+ * same "717375" value, single source of truth now.
  */
-export const PURCHASING_CONTACT = '717375';
+export const PURCHASING_CONTACT = DEFAULT_VENDOR_FORM_DEFAULTS.purchasingContact;
 
 /**
  * Confirmed via a live, read-only query of #idDropdownTermsConditions'
@@ -50,13 +56,18 @@ export const PURCHASING_CONTACT = '717375';
  * success/failure against a guess) — the real visible label is "NET30"
  * (no space, all caps, no hyphen), not "Net 30". Other NET30-ish options
  * also exist (1-NET30, 2-NET30, 2-10N30, etc.) but plain "NET30" is the
- * closest verbatim match to the original ask.
+ * closest verbatim match to the original ask. Confirmed GLOBAL MXI default
+ * (not vendor-scoped) — sourced from shared/vendorConfig.ts's
+ * DEFAULT_VENDOR_FORM_DEFAULTS, same "NET30" value.
  */
-export const CONDITIONS_LABEL = 'NET30';
+export const CONDITIONS_LABEL = DEFAULT_VENDOR_FORM_DEFAULTS.conditions;
 
 /**
  * Confirmed via the same live query of #idDropdownTransportType — the
  * real visible label is "PICKUP" (no space, all caps), not "Pick Up".
+ * Aero Repair is the sole vendor that overrides the shared global default
+ * (FEDEX-2, per DEFAULT_VENDOR_FORM_DEFAULTS) — every future vendor
+ * inherits FEDEX-2 unless it has its own real reason to override it too.
  */
 export const TRANSPORTATION_LABEL = 'PICKUP';
 
@@ -100,19 +111,9 @@ export const NOTES_HEADER_TEXT = 'INSPECT AND SERVICE AS REQUIRED';
  */
 export const NO_TASKS_ASSIGNED_TEXT = 'There are no tasks assigned to this work package.';
 
-/**
- * The Unassigned Tasks sub-tab's own confirmed-real empty-state text —
- * distinct from NO_TASKS_ASSIGNED_TEXT above, and previously deliberately
- * NOT checked here at all: this sub-tab's "no open tasks" message was
- * confirmed to appear on every real line checked (7 across 3 part
- * numbers), including lines with genuine assigned work, so it was
- * correctly treated as a normal, non-blocking, always-present detour — see
- * the addendum this string was originally confirmed in. A real unassigned
- * task row replaces this text entirely, which is what the new
- * "Unassigned Task Present" exception checks for.
- */
-export const NO_UNASSIGNED_TASKS_TEXT =
-  'There are no open tasks for this inventory item or any of its sub-inventory items.';
+// NO_UNASSIGNED_TASKS_TEXT re-exported at top of file (moved to
+// shared/unassignedTasks.ts — confirmed vendor-agnostic by a second real
+// vendor, 0T1Y4).
 
 /** The 6 real Aero Repair part numbers this write-up flow applies to. */
 export const AERO_REPAIR_PART_NUMBERS: readonly string[] = Object.freeze([
