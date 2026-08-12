@@ -5,14 +5,17 @@ import './index.css'
 import App from './App.tsx'
 import { ThemeProvider } from './lib/theme.tsx'
 import { SidebarProvider } from './lib/sidebar.tsx'
+import { ExecuteRunProvider } from './lib/executeRun.tsx'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ThemeProvider>
       <SidebarProvider>
-        <BrowserRouter>
-          <App />
-        </BrowserRouter>
+        <ExecuteRunProvider>
+          <BrowserRouter>
+            <App />
+          </BrowserRouter>
+        </ExecuteRunProvider>
       </SidebarProvider>
     </ThemeProvider>
   </StrictMode>,

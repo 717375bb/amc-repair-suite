@@ -1,5 +1,5 @@
 import { Plus } from 'lucide-react'
-import { Badge, Card, CardHeader, PrimaryButton } from '../components/ui'
+import { Badge, Card, PrimaryButton } from '../components/ui'
 import { discrepancies } from '../data/mockData'
 import { statusTone } from '../lib/status'
 

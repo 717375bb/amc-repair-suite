@@ -28,6 +28,10 @@ export interface ExceptionRow {
     | 'No Longer Eligible (claimed by another process)'
     | 'Zero Usage - Records Error'
     | 'Unassigned Task Present'
+    | 'Multiple Unassigned Tasks'
+    | 'Unassigned Task Detection Suspect'
+    | 'No Removal Task Info Found'
+    | 'Order Created - DO NOT SHIP'
     | 'Automation Error';
   details: string;
   suggestedAction: string;

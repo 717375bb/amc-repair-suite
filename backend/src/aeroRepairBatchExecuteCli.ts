@@ -110,7 +110,7 @@ async function main(): Promise<void> {
 
     for (const target of targets) {
       console.log(`\n--- ${target.partNumber} / SN ${target.serialNumber} ---`);
-      const result = await processLine(db, client, env, target.partNumber, target.serialNumber);
+      const result = await processLine(db, client, env, target.partNumber, target.serialNumber, 'second');
       // Logged to the xlsx immediately after EACH line, not accumulated
       // and written once at the very end — a long run across many lines
       // should never risk losing every completed line's record just

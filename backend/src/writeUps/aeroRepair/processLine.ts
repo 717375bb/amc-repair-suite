@@ -4,6 +4,7 @@ import type { MxiClient } from '../../mxiWriter/mxiClient.js';
 import { verifyLineStillEligible } from './batchDiscovery.js';
 import { appendDiscoveryLogRows, type CompletedRow, type ExceptionRow } from './discoveryLog.js';
 import { issueGeneratedOrder, moveOutboundShipmentToDock, readOrderRealState } from './issueOrder.js';
+import { isSessionLossError } from './retryBackoff.js';
 import { runAeroRepairWriteUp } from './writeUp.js';
 
 export const LOG_FILE_PATH = path.join('data', 'aero-repair-writeup-log.xlsx');
@@ -17,15 +18,42 @@ const REVIEWED_BY = 'batch-execute-automated';
  * duplicating it and risking the two paths drifting apart.
  */
 export type ProcessLineResult =
-  | { status: 'completed'; orderNumber: string; stationCode: string; routingLocation: string; shipmentId: string | null }
+  | {
+      status: 'completed';
+      orderNumber: string;
+      stationCode: string;
+      routingLocation: string;
+      shipmentId: string | null;
+      /** Additive field for the Order Write-Ups UI's "task assigned, then completed" summary — see CLAUDE_CODE_PROMPT frontend spec. */
+      unassignedTaskWasAssigned?: boolean;
+    }
   | { status: 'no_longer_eligible' }
   | { status: 'no_tasks_assigned'; stationCode: string }
   | { status: 'multiple_candidate_tasks'; stationCode: string; candidateNames: string[] }
   | { status: 'ad_hoc_pending_manual_continuation'; serialNumber: string; taskName: string }
   | { status: 'unrecognized_station'; stationCode: string }
   | { status: 'zero_usage' }
-  | { status: 'unassigned_task_present'; taskDetail: string }
-  | { status: 'automation_error'; step: string; errorMessage: string; stationCode: string | null };
+  | { status: 'unassigned_task_multiple_present'; candidateCount: number }
+  | { status: 'unassigned_task_detection_suspect' }
+  | { status: 'no_removal_task_info_found' }
+  /**
+   * CLAUDE_CODE_PROMPT ("Create Order Only" terminal state) — the RO was
+   * created but Request Authorization/Issue Order/Move to Dock were never
+   * reached. Structurally distinct from 'completed': processLine below
+   * returns immediately on this status, before the issue/dock block that
+   * only ever runs for a 'pending_issue' write_up_actions row.
+   */
+  | { status: 'order_created_do_not_ship'; orderNumber: string; reason: string; externalReferenceNote: string }
+  | { status: 'automation_error'; step: string; errorMessage: string; stationCode: string | null }
+  /**
+   * CLAUDE_CODE_PROMPT_WRITEUP_FAILSAFE.md Layer 3 — main-pass-only,
+   * non-terminal: a retryable failure (indeterminate read, target not
+   * found in a grid that may not have finished rendering, etc.) was hit
+   * on the single main-pass attempt. Never returned when `phase ===
+   * 'second'` — the second pass always resolves to a real terminal
+   * status, same as every other variant above.
+   */
+  | { status: 'quarantined'; reason: 'no_longer_eligible' | 'automation_error'; detail: string };
 
 export async function processLine(
   db: ReturnType<typeof openDb>,
@@ -33,9 +61,92 @@ export async function processLine(
   env: string,
   partNumber: string,
   serialNumber: string,
+  /**
+   * CLAUDE_CODE_PROMPT_WRITEUP_FAILSAFE.md Layer 3 — 'main' (one
+   * content-aware attempt per underlying read, no inline backoff; a
+   * retryable failure is quarantined rather than finalized) or 'second'
+   * (today's original behavior, unchanged: full multi-attempt retry with
+   * real backoff, and every outcome — including a repeat failure — is
+   * final). Required, not defaulted, so every call site makes this choice
+   * explicitly rather than inheriting a silent default.
+   */
+  phase: 'main' | 'second',
 ): Promise<ProcessLineResult> {
-  const stillEligible = await verifyLineStillEligible(client, partNumber, serialNumber);
+  try {
+    return await processLineInner(db, client, env, partNumber, serialNumber, phase);
+  } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    // REAL GAP FOUND AND FIXED (Layer 3): verifyLineStillEligible can
+    // throw on a genuinely indeterminate read (never treated as a
+    // confirmed negative — see its own docstring), and that throw was
+    // previously completely uncaught here, propagating all the way to
+    // executeRunner.ts's top-level catch and halting the ENTIRE run over
+    // one line's transient read failure — exactly the "a per-line
+    // retryable failure never [halts the whole run]" rule this fix
+    // exists to uphold. Session loss is the one genuine exception and is
+    // deliberately re-thrown, not quarantined — see isSessionLossError's
+    // own docstring.
+    if (isSessionLossError(errorMessage)) {
+      throw err;
+    }
+    if (phase === 'main') {
+      insertWriteUpAction(db, {
+        vendor: 'aeroRepair',
+        partNumber,
+        targetEnv: env,
+        outcome: 'quarantined',
+        stationCode: null,
+        routedLocation: null,
+        filledFieldsJson: JSON.stringify({ serialNumber, reason: 'automation_error' }, null, 2),
+        errorMessage,
+        orderNumber: null,
+      });
+      return { status: 'quarantined', reason: 'automation_error', detail: errorMessage };
+    }
+    insertWriteUpAction(db, {
+      vendor: 'aeroRepair',
+      partNumber,
+      targetEnv: env,
+      outcome: 'error',
+      stationCode: null,
+      routedLocation: null,
+      filledFieldsJson: JSON.stringify({ serialNumber }, null, 2),
+      errorMessage,
+      orderNumber: null,
+    });
+    return { status: 'automation_error', step: 'eligibility-check', errorMessage, stationCode: null };
+  }
+}
+
+async function processLineInner(
+  db: ReturnType<typeof openDb>,
+  client: MxiClient,
+  env: string,
+  partNumber: string,
+  serialNumber: string,
+  phase: 'main' | 'second',
+): Promise<ProcessLineResult> {
+  const stillEligible = await verifyLineStillEligible(client, partNumber, serialNumber, phase === 'main' ? 1 : 3);
   if (!stillEligible) {
+    if (phase === 'main') {
+      // Per explicit fix spec: "Retire the ability to emit 'Already handled
+      // by someone else' from a single partial-grid read ... even [a
+      // complete-grid confirmed absence should] prefer to let the second
+      // pass confirm." Quarantined, not finalized — see the 'quarantined'
+      // audit-only outcome's own docstring in db.ts.
+      insertWriteUpAction(db, {
+        vendor: 'aeroRepair',
+        partNumber,
+        targetEnv: env,
+        outcome: 'quarantined',
+        stationCode: null,
+        routedLocation: null,
+        filledFieldsJson: JSON.stringify({ serialNumber, reason: 'no_longer_eligible' }, null, 2),
+        errorMessage: null,
+        orderNumber: null,
+      });
+      return { status: 'quarantined', reason: 'no_longer_eligible', detail: 'Line was not confirmed eligible on the main-pass attempt.' };
+    }
     // REAL GAP FOUND AND FIXED: this used to return without ever calling
     // insertWriteUpAction, same as no_tasks_assigned/multiple_candidate_tasks
     // below — meaning every "No Longer Eligible" skip (10 real ones found
@@ -55,7 +166,27 @@ export async function processLine(
     return { status: 'no_longer_eligible' };
   }
 
-  const writeUpOutcome = await runAeroRepairWriteUp(client, partNumber, serialNumber);
+  const writeUpOutcome = await runAeroRepairWriteUp(client, partNumber, serialNumber, phase === 'main' ? 1 : 3);
+
+  // CLAUDE_CODE_PROMPT_AERO_BUGS.md Defect 2, change 7: a distinct,
+  // append-only record of every line that required a real task assignment
+  // — separate from whatever the write-up's own eventual outcome is (an
+  // assignment can be followed by ANY outcome: filled, unrecognized_station,
+  // zero_usage, ...), so it's auditable how many lines needed this without
+  // grepping filledFieldsJson across every outcome type.
+  if (writeUpOutcome.unassignedTaskWasAssigned) {
+    insertWriteUpAction(db, {
+      vendor: 'aeroRepair',
+      partNumber,
+      targetEnv: env,
+      outcome: 'unassigned_task_assigned',
+      stationCode: null,
+      routedLocation: null,
+      filledFieldsJson: JSON.stringify({ serialNumber }, null, 2),
+      errorMessage: null,
+      orderNumber: null,
+    });
+  }
 
   if (writeUpOutcome.status === 'no_tasks_assigned') {
     // REAL GAP FOUND AND FIXED: same as no_longer_eligible above — this
@@ -150,25 +281,99 @@ export async function processLine(
     });
     return { status: 'zero_usage' };
   }
-  if (writeUpOutcome.status === 'unassigned_task_present') {
+  if (writeUpOutcome.status === 'unassigned_task_multiple_present') {
     insertWriteUpAction(db, {
       vendor: 'aeroRepair',
       partNumber,
       targetEnv: env,
-      outcome: 'unassigned_task_present',
+      outcome: 'unassigned_task_multiple_present',
       stationCode: null,
       routedLocation: null,
       filledFieldsJson: JSON.stringify(
-        { serialNumber: writeUpOutcome.serialNumber, taskDetail: writeUpOutcome.taskDetail },
+        { serialNumber: writeUpOutcome.serialNumber, candidateCount: writeUpOutcome.candidateCount },
         null,
         2,
       ),
       errorMessage: null,
       orderNumber: null,
     });
-    return { status: 'unassigned_task_present', taskDetail: writeUpOutcome.taskDetail };
+    return { status: 'unassigned_task_multiple_present', candidateCount: writeUpOutcome.candidateCount };
+  }
+  if (writeUpOutcome.status === 'unassigned_task_detection_suspect') {
+    insertWriteUpAction(db, {
+      vendor: 'aeroRepair',
+      partNumber,
+      targetEnv: env,
+      outcome: 'unassigned_task_detection_suspect',
+      stationCode: null,
+      routedLocation: null,
+      filledFieldsJson: JSON.stringify({ serialNumber: writeUpOutcome.serialNumber }, null, 2),
+      errorMessage: null,
+      orderNumber: null,
+    });
+    return { status: 'unassigned_task_detection_suspect' };
+  }
+  if (writeUpOutcome.status === 'no_removal_task_info_found') {
+    insertWriteUpAction(db, {
+      vendor: 'aeroRepair',
+      partNumber,
+      targetEnv: env,
+      outcome: 'no_removal_task_info_found',
+      stationCode: null,
+      routedLocation: null,
+      filledFieldsJson: JSON.stringify({ serialNumber: writeUpOutcome.serialNumber }, null, 2),
+      errorMessage: null,
+      orderNumber: null,
+    });
+    return { status: 'no_removal_task_info_found' };
+  }
+  if (writeUpOutcome.status === 'order_created_do_not_ship') {
+    // CLAUDE_CODE_PROMPT ("Create Order Only" terminal state) — structural
+    // guard: returns here, before the issue/dock block further down that
+    // only ever runs for a 'pending_issue' outcome (this status never
+    // produces one). No insertWriteUpIssueDecision/insertWriteUpDockMove
+    // row is ever created for this outcome — genuinely never reached.
+    insertWriteUpAction(db, {
+      vendor: 'aeroRepair',
+      partNumber,
+      targetEnv: env,
+      outcome: 'order_created_do_not_ship',
+      stationCode: null,
+      routedLocation: null,
+      filledFieldsJson: JSON.stringify(
+        { serialNumber: writeUpOutcome.serialNumber, reason: writeUpOutcome.reason, externalReferenceNote: writeUpOutcome.externalReferenceNote },
+        null,
+        2,
+      ),
+      errorMessage: null,
+      orderNumber: writeUpOutcome.generatedOrderNumber,
+    });
+    return {
+      status: 'order_created_do_not_ship',
+      orderNumber: writeUpOutcome.generatedOrderNumber,
+      reason: writeUpOutcome.reason,
+      externalReferenceNote: writeUpOutcome.externalReferenceNote,
+    };
   }
   if (writeUpOutcome.status === 'error') {
+    if (phase === 'main') {
+      // Per Layer 3: a main-pass read/automation failure quarantines
+      // rather than finalizing as 'error' — the exact same failure class
+      // (indeterminate reads, target-not-found-in-an-incomplete-grid,
+      // Unassigned-Tasks detection timing) that this whole fix targets.
+      insertWriteUpAction(db, {
+        vendor: 'aeroRepair',
+        partNumber,
+        targetEnv: env,
+        outcome: 'quarantined',
+        stationCode: null,
+        routedLocation: null,
+        filledFieldsJson: JSON.stringify({ serialNumber: writeUpOutcome.serialNumber, reason: 'automation_error' }, null, 2),
+        errorMessage: writeUpOutcome.errorMessage,
+        orderNumber: null,
+      });
+      return { status: 'quarantined', reason: 'automation_error', detail: writeUpOutcome.errorMessage };
+    }
     // GAP FOUND AND FIXED: this used to log filledFieldsJson: null for
     // every error, so a write_up_actions 'error' row could never be
     // attributed to a specific line without cross-referencing the xlsx log
@@ -271,6 +476,7 @@ export async function processLine(
     stationCode: stationCode ?? '(unknown)',
     routingLocation: routedLocation ?? '(unknown)',
     shipmentId: dockResult.shipmentId,
+    unassignedTaskWasAssigned: writeUpOutcome.unassignedTaskWasAssigned,
   };
 }
 
@@ -368,17 +574,57 @@ export async function logProcessLineResult(
       details: 'Current Usage table shows CYCLES and HOURS both at exactly 0 for TSN/TSO/TSI — a real part in active repair inventory should not show zero usage across the board.',
       suggestedAction: 'Notify the maintenance records team to correct this part\'s usage data before a write-up can be created for it.',
     });
-  } else if (result.status === 'unassigned_task_present') {
-    console.log('SKIPPED: a real unassigned task is present on this line.');
+  } else if (result.status === 'unassigned_task_multiple_present') {
+    console.log(`SKIPPED: ${result.candidateCount} genuinely-assignable unassigned tasks found, flagging for human review (not guessing among them).`);
     exceptions.push({
       partNumber: target.partNumber,
       serialNumber: target.serialNumber,
       station: '(unknown)',
       dateFound,
-      issueType: 'Unassigned Task Present',
-      details: `Unassigned Tasks sub-tab shows a real task, not the confirmed empty state: ${result.taskDetail}`,
-      suggestedAction: 'Can be manually assigned by a CRA in the meantime — auto-assignment for this case is not yet built.',
+      issueType: 'Multiple Unassigned Tasks',
+      details: `Unassigned Tasks sub-tab shows ${result.candidateCount} real, non-PC candidate tasks — ambiguous which (if not all) should be assigned to this work package.`,
+      suggestedAction: 'Manually determine which unassigned task(s) apply and assign them — automation refuses to guess among multiple candidates.',
     });
+  } else if (result.status === 'unassigned_task_detection_suspect') {
+    console.log('SKIPPED: a task checkbox was detected on the Unassigned Tasks sub-tab, but every candidate filtered out as PC (administrative) — detection is suspect.');
+    exceptions.push({
+      partNumber: target.partNumber,
+      serialNumber: target.serialNumber,
+      station: '(unknown)',
+      dateFound,
+      issueType: 'Unassigned Task Detection Suspect',
+      details: 'A real task checkbox was present on the Unassigned Tasks sub-tab, but it was the PC (Parts Card) administrative row, not a genuine assignable task — refusing to assign it and refusing to silently treat this line as clean.',
+      suggestedAction: 'Manually inspect this line\'s Unassigned Tasks sub-tab to confirm whether anything genuinely needs assignment.',
+    });
+  } else if (result.status === 'no_removal_task_info_found') {
+    console.log('SKIPPED: no task assigned, and this line\'s Removal Information has no Task Name/ID either.');
+    exceptions.push({
+      partNumber: target.partNumber,
+      serialNumber: target.serialNumber,
+      station: '(unknown)',
+      dateFound,
+      issueType: 'No Removal Task Info Found',
+      details: 'No task is currently assigned to this work package, and the line\'s own Removal Information (Task Name/ID) is also empty — the real removal reason can\'t be determined, so no Ad-Hoc task was created.',
+      suggestedAction: 'Manually determine the real removal reason/task and assign or create it before a write-up can be created for this line.',
+    });
+  } else if (result.status === 'order_created_do_not_ship') {
+    console.log(`CREATE ORDER ONLY: order ${result.orderNumber} created, marked DO NOT SHIP (${result.reason}). No authorization, issue, or dock.`);
+    exceptions.push({
+      partNumber: target.partNumber,
+      serialNumber: target.serialNumber,
+      station: '(unknown)',
+      dateFound,
+      issueType: 'Order Created - DO NOT SHIP',
+      details: `Order ${result.orderNumber} created and marked "${result.externalReferenceNote}" — reason: ${result.reason}. Not authorized, issued, or docked.`,
+      suggestedAction: 'Once the underlying records issue is corrected, finish the workflow (authorize, issue, dock) on this existing order — a separate, not-yet-built capability. Do not create a second order for this line.',
+    });
+  } else if (result.status === 'quarantined') {
+    // CLAUDE_CODE_PROMPT_WRITEUP_FAILSAFE.md Layer 3 — non-terminal:
+    // deliberately NOT pushed to the xlsx exceptions sheet (that log is
+    // for real, final review-worthy outcomes). The automatic second pass
+    // will call logProcessLineResult again with this line's real terminal
+    // result once it resolves.
+    console.log(`QUARANTINED (will retry automatically after the main pass): ${result.reason} — ${result.detail}`);
   } else {
     console.error(`AUTOMATION ERROR at step "${result.step}": ${result.errorMessage}`);
     exceptions.push({

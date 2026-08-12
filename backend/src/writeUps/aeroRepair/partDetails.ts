@@ -1,6 +1,6 @@
 /// <reference lib="dom" />
 import type { Page, Locator } from 'playwright';
-import { AERO_REPAIR_ROUTING, NOTES_HEADER_TEXT } from './constants.js';
+import { NOTES_HEADER_TEXT } from './constants.js';
 import { captureEmptyReadEvidence } from './emptyReadCapture.js';
 import { waitBeforeRetry } from './retryBackoff.js';
 import {
@@ -9,6 +9,7 @@ import {
   waitForWorkPackageDetailsResolved,
 } from './gridWait.js';
 import type { PartOwnDetails } from '../shared/partOwnDetails.js';
+import { extractRemovalTaskInfo } from '../shared/removalTaskInfo.js';
 
 /**
  * navigateToUnassignedTasksView, closeUnassignedTasksView,
@@ -32,8 +33,6 @@ export {
 } from '../shared/partOwnDetails.js';
 export type { PartOwnDetails, UsageParmRow } from '../shared/partOwnDetails.js';
 
-const KNOWN_VENDOR_LOCATION_COUNT = new Set(Object.values(AERO_REPAIR_ROUTING)).size;
-
 /**
  * Fixed pause after actions, same pacing fix and same reasoning as
  * mxiWriter/selectors.ts's CLICK_DELAY_MS — MXI's server-driven page updates
@@ -54,6 +53,10 @@ export interface RepairLineInfo {
   serialNumber: string;
   /** The full matched link text, e.g. "Repair WHEEL ASSY, NLG (PN: 5013640, SN: AUG10-2534)". */
   linkText: string;
+  /** This line's real "Removal Information > Task > Name" — see shared/removalTaskInfo.ts's docstring. Captured here (before navigating away) since it's only visible on the grid row. */
+  removalTaskName: string | null;
+  /** This line's real "Removal Information > Task > ID" — see shared/removalTaskInfo.ts's docstring. */
+  removalTaskId: string | null;
 }
 
 /**
@@ -150,6 +153,14 @@ export async function findFirstRepairLineForPart(
   partNumber: string,
   todoListUrl: string,
   preferredSerialNumber?: string,
+  /**
+   * CLAUDE_CODE_PROMPT_WRITEUP_FAILSAFE.md Layer 3 — defaults to 3
+   * (unchanged behavior). processLine.ts passes 1 for a main-pass attempt
+   * so the main pass never burns inline backoff on a single line; a
+   * retryable failure quarantines immediately and gets the full
+   * multi-attempt treatment only on the second pass.
+   */
+  maxAttempts = 3,
 ): Promise<RepairLineInfo> {
   // Definite-assignment: always set in one of the two branches below
   // (the if-branch either assigns it before breaking out of its retry
@@ -168,8 +179,10 @@ export async function findFirstRepairLineForPart(
     // up to 3 times, with a real pause between attempts
     // (`waitBeforeRetry`), before concluding the serial genuinely isn't
     // present — same discipline as findCandidateLinesWithRetry/
-    // verifyLineStillEligible.
-    const MAX_ATTEMPTS = 3;
+    // verifyLineStillEligible. Attempt count is now caller-controlled
+    // (`maxAttempts`, default 3) — see this function's own signature
+    // docstring for why the main execute pass overrides it to 1.
+    const MAX_ATTEMPTS = maxAttempts;
     let lastCandidateCount = 0;
     // Same reasoning as batchDiscovery.ts's two retry loops:
     // navigateToPartGridAndGetCandidates can now throw (an inconclusive
@@ -258,6 +271,10 @@ export async function findFirstRepairLineForPart(
     );
   }
 
+  // Captured BEFORE clicking away — Removal Information is only visible on
+  // this grid row, not on Work Package Details. See shared/removalTaskInfo.ts.
+  const removalTask = await extractRemovalTaskInfo(repairLink);
+
   await repairLink.click();
   // SYSTEMATIC AUDIT FIX: this used to be just pace() before returning —
   // every caller (writeUp.ts, aeroRepairContinueAdHocCli.ts) immediately
@@ -268,7 +285,12 @@ export async function findFirstRepairLineForPart(
   // waitForWorkPackageDetailsResolved for the full account.
   await waitForWorkPackageDetailsResolved(page);
 
-  return { serialNumber: serialMatch[1], linkText };
+  return {
+    serialNumber: serialMatch[1],
+    linkText,
+    removalTaskName: removalTask.name,
+    removalTaskId: removalTask.id,
+  };
 }
 
 /**
@@ -312,50 +334,43 @@ export async function selectVendorRadioForRouting(
   // immediate page.evaluate() right after the caller's fixed 750ms
   // pace(), with no wait of its own — the same render-latency class of
   // bug Part A fixed for the three grid-read paths, just never applied
-  // here. Content-aware wait first: either the target location is already
-  // present, or all KNOWN_VENDOR_LOCATION_COUNT real vendor bids have
-  // rendered — see gridWait.ts's waitForVendorBidsResolved.
-  await waitForVendorBidsResolved(page, linkText, routingLocation, KNOWN_VENDOR_LOCATION_COUNT);
+  // here. Content-aware wait first: waits until AT LEAST ONE structurally-
+  // valid (radio-bearing) bid row has rendered for this line — see
+  // gridWait.ts's waitForVendorBidsResolved.
+  //
+  // DEFECT 1 REWRITE: this no longer requires the target routingLocation
+  // to already be present, or a fixed ">= 4 known vendor locations" count,
+  // before proceeding — that hardcoded threshold encoded an assumption
+  // (every line has exactly the 4 wheel locations) that real brake lines
+  // can violate. Whether THIS SPECIFIC location is among the rendered bids
+  // is now a separate classification step below, done once rendering is
+  // confirmed complete — a definitively-rendered bid list that genuinely
+  // lacks the target location raises "Vendor Bid Not Found" (a real,
+  // actionable exception), never an indeterminate-state timeout.
+  const rows = await waitForVendorBidsResolved(page, linkText);
 
-  const result = await page.evaluate(
-    ({ targetLinkText, location }) => {
-      const links = Array.from(document.querySelectorAll('a'));
-      const targetLink = links.find((a) => a.textContent?.trim() === targetLinkText);
-      if (!targetLink) return { found: false, matchedVendorText: null };
+  const matchedRow = rows.find((row) => row.hasRadio && row.text.includes(routingLocation));
 
-      const mainTr = targetLink.closest('tr');
-      if (!mainTr) return { found: false, matchedVendorText: null };
-
-      let current: Element | null = mainTr;
-      let isMainRow = true;
-      while (current && current.tagName === 'TR') {
-        const text = current.textContent ?? '';
-        if (!isMainRow && text.includes('INTERCHG')) break; // reached the next line's own main row
-        if (text.includes(location)) {
-          const radio = current.querySelector('input[type="radio"]');
-          if (radio) {
-            (radio as HTMLInputElement).click();
-            return { found: true, matchedVendorText: text.replace(/\s+/g, ' ').trim() };
-          }
-        }
-        current = current.nextElementSibling;
-        isMainRow = false;
-      }
-      return { found: false, matchedVendorText: null };
-    },
-    { targetLinkText: linkText, location: routingLocation },
-  );
-
-  if (!result.found) {
-    // PART B: capture-on-failure, same discipline that made the grid-read
-    // bug solvable — a screenshot + raw page text at the exact moment a
-    // vendor match fails, so the next real occurrence is diagnosable
-    // directly instead of needing another live reproduction attempt.
-    await captureEmptyReadEvidence(page, 'vendor-bid-not-found', { linkText, routingLocation });
+  if (!matchedRow) {
+    // Capture-on-failure, same discipline that made the grid-read bug
+    // solvable — a screenshot + raw page text at the exact moment a real,
+    // definitively-rendered bid list turns out not to include the target
+    // location, so the next real occurrence is diagnosable directly.
+    await captureEmptyReadEvidence(page, 'vendor-bid-not-found', {
+      linkText,
+      routingLocation,
+      renderedBidCount: rows.filter((row) => row.hasRadio).length,
+      renderedBidText: rows.filter((row) => row.hasRadio).map((row) => row.text),
+    });
     throw new Error(
-      `Could not find a vendor bid matching routing location "${routingLocation}" for line "${linkText}" — refusing to guess a different vendor.`,
+      `Vendor Bid Not Found: no rendered bid row for line "${linkText}" matches routing location "${routingLocation}" ` +
+        `among ${rows.filter((row) => row.hasRadio).length} rendered bid row(s) — refusing to guess a different vendor.`,
     );
   }
+
+  // Real DOM click via Playwright's own locator — matches this specific
+  // row's own radio input directly, no positional/`.first()` guessing.
+  await matchedRow.radio.click();
   await pace(page);
 }
 
@@ -414,6 +429,22 @@ export function isZeroUsage(usageRows: { label: string; tsn: string; tso: string
  * notes composition for the parameterized equivalent.
  */
 export function composeAeroRepairNotesText(details: PartOwnDetails): string {
+  // CLAUDE_CODE_PROMPT_USAGE_TABLE_BUG.md, required change 4 — defense in
+  // depth: shared/partOwnDetails.ts's waitForUsageTableResolved already
+  // throws before this function is normally ever reached in the read-
+  // failure case (table element found, 0 data rows) — this guard exists so
+  // this function can never itself produce a header-only Usage Parm block,
+  // independent of whether the upstream wait's own guarantee holds. The
+  // genuinely-absent-table case (usageTableFound: false — the pre-existing
+  // BN-override state) is deliberately NOT touched here; that's existing,
+  // accepted behavior, not the bug this guards against.
+  if (details.usageTableFound && details.usageRows.length === 0) {
+    throw new Error(
+      `usage_table_rows_empty: Usage Parm table for ${details.partNumber}/${details.serialNumber} was found but ` +
+        `returned zero data rows — refusing to write a header-only usage block.`,
+    );
+  }
+
   const partLine = `${details.partDescription} (PN: ${details.partNumber}, SN: ${details.serialNumber})`;
   const tableHeader = 'Usage Parm\tTSN\tTSO\tTSI';
   const tableRows = details.usageRows.map((row) => `${row.label}\t${row.tsn}\t${row.tso}\t${row.tsi}`);

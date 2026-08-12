@@ -6,7 +6,10 @@ import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist']),
+  // backend/ is a separate Node/TS project with its own tsconfig and
+  // toolchain (see backend/package.json) — it isn't part of this Vite app
+  // and shouldn't be linted against browser/React rules.
+  globalIgnores(['dist', 'backend']),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [

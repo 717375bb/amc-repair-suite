@@ -1,10 +1,12 @@
 import type { Page } from 'playwright';
 import type { MxiClient } from '../../mxiWriter/mxiClient.js';
 import { waitBeforeRetry } from '../aeroRepair/retryBackoff.js';
-import { resolveAuthFlowPolicy, type ResolvedAuthFlowPolicy, type VendorConfig } from './vendorConfig.js';
+import { resolveAuthFlowPolicy, resolveShipsetCase, type ResolvedAuthFlowPolicy, type ShipsetCaseConfig, type TerminalState, type VendorConfig } from './vendorConfig.js';
 import { buildChargeToAccountWithSuffix } from './chargeToAccount.js';
 import { classifyUsageTable } from './usageTable.js';
 import {
+  createAdHocTaskForCandidate,
+  openCreateNewTask,
   readAssignedTasksAreaText,
   readUnassignedTasksAreaText,
   waitForWorkPackageDetailsResolved,
@@ -29,11 +31,24 @@ import { issueGeneratedOrder, moveOutboundShipmentToDock, readOrderRealState } f
 import { isUnassignedTaskPresent, navigateToUnassignedTasksView, closeUnassignedTasksView, waitForUnassignedTasksSectionResolved } from './unassignedTasks.js';
 import { isNoTasksAssignedException } from '../aeroRepair/noTaskException.js';
 import { closePartOwnDetails, openPartOwnDetails, readPartOwnDetails, type PartOwnDetails } from './partOwnDetails.js';
+import { completeCreateOrderOnly, composeDoNotShipNote, verifyExternalReferenceCommitted, ZERO_USAGE_DO_NOT_SHIP_REASON } from './createOrderOnly.js';
+import { captureVendorCodeGridDiagnostics } from './vendorCodeGridDiagnostics.js';
+import { extractRemovalTaskInfo } from './removalTaskInfo.js';
 
 const CLICK_DELAY_MS = 750;
 const GRID_WAIT_TIMEOUT_MS = 30_000;
 const GRID_WAIT_POLL_MS = 250;
 const BN_OVERRIDE_ID = 'BN_SERIAL_REPAIR_FLOW';
+
+/**
+ * CLAUDE_CODE_PROMPT ("Create Order Only" terminal state) — literal
+ * fallback for a blank-autofilled Charge To Account, per explicit user
+ * direction given after the first live test showed leaving it blank
+ * silently prevents order creation. Applies to every vendor in this shared
+ * engine's family except Skypaxxx (7A9Y2) — see the doNotShipReason branch
+ * below.
+ */
+const CREATE_ORDER_ONLY_CHARGE_TO_ACCOUNT_FALLBACK = 'CR7REPAIR';
 
 async function pace(page: Page): Promise<void> {
   await page.waitForTimeout(CLICK_DELAY_MS);
@@ -83,37 +98,70 @@ async function navigateToVendorCodeGrid(page: Page, todoListUrl: string, vendorC
   // #idButtonOptionsOK, the same Options dialog shared by every vendor's
   // search flow.
   await page.locator('#idButtonOptionsOK').click();
-  await waitForVendorCodeGridResolved(page);
+  await waitForVendorCodeGridResolved(page, vendorCode);
 }
 
 /**
- * Content-aware wait: either a real repair-line link ("Repair ... (PN: X,
- * SN: Y)" or the BN-line variant "(PN: X, BN: Y)") or the page's own "no
+ * Content-aware wait: either a real per-line row or the page's own "no
  * inventory" empty-state text. Not scoped to one known part number — a
  * vendor-code search can return lines for ANY part number.
+ *
+ * REAL BUG FOUND AND FIXED, per CLAUDE_CODE_PROMPT_GRID_WAIT_FIX.md's own
+ * evidence-first sequencing (evidence capture shipped first; this
+ * predicate change only happened after real evidence, below, confirmed
+ * the actual cause — not the document's own MOD/ADREQ/CALREQ hypothesis,
+ * which real evidence did NOT support): the predicate previously required
+ * a "Repair "-prefixed link, generalized from a two-vendor sample (Aero
+ * Repair, 0T1Y4) where every real row happened to have a work package
+ * already. Live evidence captured against vendor 21844 in production
+ * (data/diagnostics/grid-wait-21844-*) showed a REAL row genuinely
+ * present — "BOOSTER PUMP PRESSURE | D98C08-607 | ... | [blank Work
+ * Package] | ... | 21844 (BARFIELD INSTRUMENT CORP) | REPAIR | APPROVED"
+ * — with a completely blank Work Package column, so it never matched the
+ * "Repair ..." pattern, wasn't "no inventory" either, and hung the full
+ * 30s. This is the EXACT same real phenomenon already discovered and
+ * handled for Aero Repair (see aeroRepair/batchDiscovery.ts's
+ * findNoWorkPackageLinesForPart docstring — "a real USSTG inventory row
+ * can have a completely BLANK Work Package column... while still being a
+ * genuine, real open inventory row"), just never generalized to this
+ * vendor-code family. Fixed the same structural way Aero Repair's own
+ * grid-resolved check does: any real per-line row has `input[name=
+ * "aInventory"]` regardless of whether it has a work package yet — check
+ * for that instead of requiring the work-package-specific link pattern.
+ * findCandidateLinesForVendorCodeOnce (below) still only returns rows that
+ * DO have a real "Repair ..." link as eligible candidates — a real row
+ * with no work package correctly resolves to "0 eligible candidates" for
+ * this vendor, a legitimate zero, not an indeterminate hang.
  */
-export async function waitForVendorCodeGridResolved(page: Page): Promise<void> {
+export async function waitForVendorCodeGridResolved(page: Page, vendorCode: string): Promise<void> {
   const start = Date.now();
+  let resolutionReason: 'real_row' | 'no_inventory' = 'real_row';
   try {
     await page.waitForFunction(
       () => {
-        const hasRealRow = Array.from(document.querySelectorAll('a')).some((a) =>
-          /^Repair .*\(PN: [^,]+, (?:SN|BN): [^)]+\)$/.test((a.textContent ?? '').trim()),
-        );
+        const hasRealRow = document.querySelectorAll('input[name="aInventory"]').length > 0;
         const bodyText = document.body?.innerText ?? '';
         return hasRealRow || bodyText.includes('no inventory');
       },
       undefined,
       { timeout: GRID_WAIT_TIMEOUT_MS, polling: GRID_WAIT_POLL_MS },
     );
+    resolutionReason = (await page.locator('input[name="aInventory"]').count()) > 0 ? 'real_row' : 'no_inventory';
   } catch (err) {
+    // Evidence capture BEFORE throwing, per
+    // CLAUDE_CODE_PROMPT_GRID_WAIT_FIX.md item 1 — converts an opaque hang
+    // into hard, inspectable evidence (row count, first rows' text, full
+    // grid text, overlay/dialog presence, screenshot, HTML dump) rather
+    // than a bare timeout message. Best-effort — never masks the real
+    // error even if capture itself fails.
+    await captureVendorCodeGridDiagnostics(page, vendorCode);
     throw new Error(
-      `Vendor-code grid did not resolve to a definitive state (no real "Repair ..." line AND no "no inventory" ` +
-        `empty-state text) within ${GRID_WAIT_TIMEOUT_MS}ms — refusing to treat this as a genuine empty result. ` +
-        `Underlying error: ${err instanceof Error ? err.message : String(err)}`,
+      `Vendor-code grid for vendor "${vendorCode}" did not resolve to a definitive state (no real inventory row ` +
+        `AND no "no inventory" empty-state text) within ${GRID_WAIT_TIMEOUT_MS}ms — refusing to treat this ` +
+        `as a genuine empty result. Underlying error: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
-  console.log(`[grid-wait] vendor-code grid resolved in ${Date.now() - start}ms`);
+  console.log(`[grid-wait] vendor-code grid for vendor "${vendorCode}" resolved in ${Date.now() - start}ms (reason: ${resolutionReason})`);
 }
 
 export interface VendorCodeCandidateLine {
@@ -123,6 +171,24 @@ export interface VendorCodeCandidateLine {
   linkText: string;
   /** True if this line's link text used the "BN:" label instead of "SN:". */
   isBnLine: boolean;
+  /**
+   * The row's own real "Removal Information > Task > Name" — confirmed via
+   * direct DOM inspection (discovery-inspectRemovalInfoAndNoTask.ts against
+   * real production line 861CA01/957): a `td.longString` cell containing
+   * an `<a href=".../TaskDetails.jsp?aTask=<token>">`, immediately followed
+   * by a `td.shortString` cell with an `<a>` to the SAME `aTask=<token>`
+   * whose text is the real Task ID (see `removalTaskId` below). This is
+   * DIFFERENT from the Work Package/Check ID
+   * (extractWorkPackageCheckId reads that from the Assigned Tasks tab's
+   * title line instead) — two genuinely different real MXI fields,
+   * confirmed distinct on the same real line (Task ID "TRFKE00GY46E" vs.
+   * Check ID "TRFKE00GY4KC"). Null if this row's Removal Information
+   * genuinely has no Task Name (rare per explicit user confirmation, but
+   * not assumed impossible — never guessed, never fabricated).
+   */
+  removalTaskName: string | null;
+  /** The Removal Information Task ID paired with removalTaskName — see its docstring. */
+  removalTaskId: string | null;
 }
 
 const REPAIR_LINK_PATTERN = /^Repair .*\(PN: ([^,]+), (SN|BN): ([^)]+)\)$/;
@@ -145,11 +211,16 @@ async function findCandidateLinesForVendorCodeOnce(
     const linkText = (await repairLinks.nth(i).innerText()).trim();
     const match = linkText.match(REPAIR_LINK_PATTERN);
     if (!match) continue;
+
+    const removalTask = await extractRemovalTaskInfo(repairLinks.nth(i));
+
     candidates.push({
       partNumber: match[1],
       serialNumber: match[3],
       linkText,
       isBnLine: match[2] === 'BN',
+      removalTaskName: removalTask.name,
+      removalTaskId: removalTask.id,
     });
   }
   return candidates;
@@ -206,6 +277,38 @@ async function recheckCandidateForSchedule(page: Page, candidate: VendorCodeCand
   }
 }
 
+/**
+ * CLAUDE_CODE_PROMPT (vendor 7A9Y2 "shipset" case) — reads the "Task"
+ * column's own text from the target line's HOME-PAGE grid row, BEFORE the
+ * line is ever opened. Explicit requirement: the task name inside the work
+ * package can be blank, so it must be read from here, not from inside.
+ *
+ * GUESSED / UNCONFIRMED SHAPE: discovery-7A9Y2-AJS-sn-recording.ts only
+ * captures this row's FLATTENED accessible-name text (a single
+ * getByRole('row', {name: '...'}) match), not its real HTML — so the exact
+ * cell boundary for "Task" (vs. the adjacent Aircraft/Inventory, Work
+ * Package No, and Last Turn In Date columns in the same row) is inferred
+ * from that one example's own shape, not independently confirmed via raw
+ * DOM inspection the way most other selectors in this project are. The
+ * recorded row read: "...WO - 46716438 TO_25-079-005-22-JIC (SEAT REFRESH -
+ * REMOVE AND INSTALL SEATS) TRFKE009A60X UNSCHED 06-AUG-2026 07:37 EDT" —
+ * this regex anchors on the "WO - <digits>" token immediately before the
+ * task name and a "TRFKE..."-shaped Work Package No token immediately
+ * after it (the same real ID prefix confirmed on every other real Work
+ * Package/Check ID seen elsewhere in this project). Flag this for
+ * confirmation before trusting it against a line whose real row text
+ * deviates from this one example's shape.
+ */
+const USSTG_TASK_NAME_PATTERN = /WO - \d+\s+(.+?)\s+TRFKE[A-Z0-9]+\s+\S+\s+\d{2}-[A-Z]{3}-\d{4}/;
+
+export async function readUsstgLineTaskName(page: Page, linkText: string): Promise<string | null> {
+  const repairLink = page.getByRole('link', { name: linkText, exact: true });
+  const targetTr = repairLink.locator('xpath=ancestor::tr[1]');
+  const rowText = (await targetTr.innerText()).replace(/\s+/g, ' ').trim();
+  const match = rowText.match(USSTG_TASK_NAME_PATTERN);
+  return match ? match[1].trim() : null;
+}
+
 // ---- Notes composition (moved from 0t1y4/notes.ts, parameterized) ----
 
 /** Confirmed correct: header line + blank line + part description + Usage Parm table. */
@@ -241,9 +344,30 @@ export interface VendorCodeWriteUpFields {
 export type VendorCodeWriteUpOutcome =
   | { status: 'authorized_only'; fields: VendorCodeWriteUpFields }
   | { status: 'issued_and_docked'; fields: VendorCodeWriteUpFields; shipmentId: string | null }
+  /**
+   * CLAUDE_CODE_PROMPT (vendor 7A9Y2 "shipset" case, Delta 5) — a genuinely
+   * distinct terminal state from both of the above: the order WAS issued,
+   * but Move to Dock was deliberately skipped this run (a temporary safety
+   * measure, config-gated — see ShipsetCaseConfig.moveToDockOnInitialRun).
+   * Never reused for a real dock FAILURE (that stays 'error', thrown) —
+   * this status means the skip was intentional and the order is otherwise
+   * healthy, so a caller can't mistake this for either "fully done" or "a
+   * problem occurred."
+   */
+  | { status: 'issued_not_docked'; fields: VendorCodeWriteUpFields }
+  /**
+   * CLAUDE_CODE_PROMPT ("Create Order Only" terminal state) — the RO was
+   * created (Schedule Work Package ran normally, real Note To Vendor
+   * written) but Request Authorization/Issue Order/Move to Dock were never
+   * reached — structurally, not via a skippable check. `reason` and
+   * `externalReferenceNote` are composed from the SAME string (see
+   * shared/createOrderOnly.ts) so the audit trail and the real MXI field
+   * can never drift apart.
+   */
+  | { status: 'order_created_do_not_ship'; fields: VendorCodeWriteUpFields; reason: string; externalReferenceNote: string }
   | { status: 'no_candidate_lines'; vendorCode: string }
   | { status: 'unassigned_task_present'; partNumber: string; serialNumber: string; taskDetail: string }
-  | { status: 'no_task_found_for_bn_line'; partNumber: string; serialNumber: string }
+  | { status: 'no_removal_task_info_found'; partNumber: string; serialNumber: string }
   | { status: 'zero_usage'; partNumber: string; serialNumber: string }
   | { status: 'usage_table_absent_unexpected'; partNumber: string; serialNumber: string }
   | {
@@ -310,51 +434,100 @@ export async function runVendorCodeWriteUp(
     knownPartNumber = candidate.partNumber;
     knownSerialNumber = candidate.serialNumber;
 
-    const resolved: ResolvedAuthFlowPolicy = resolveAuthFlowPolicy(candidate.serialNumber, config);
+    // CLAUDE_CODE_PROMPT (vendor 7A9Y2 "shipset" case) — read the shipset
+    // trigger from the HOME-PAGE grid row BEFORE opening the line (per
+    // explicit instruction: the task name inside the work package can be
+    // blank and reading from there causes false negatives). A no-op,
+    // single-line read for every vendor without a shipsetCase configured.
+    const usstgTaskName = await readUsstgLineTaskName(page, candidate.linkText);
+    const shipset: ShipsetCaseConfig | null = resolveShipsetCase(usstgTaskName, config);
+
+    const resolved: ResolvedAuthFlowPolicy = shipset
+      ? {
+          authFlow: shipset.authFlow,
+          terminalState: shipset.terminalState,
+          // Never consulted for a shipset line — Delta 3/4 skip the usage-table
+          // read entirely below, so this placeholder value is never read.
+          usageTableExpectation: 'expectedPresent',
+          matchedOverrideId: shipset.id,
+        }
+      : resolveAuthFlowPolicy(candidate.serialNumber, config);
     const isBnFlow = resolved.matchedOverrideId === BN_OVERRIDE_ID;
 
     await openVendorCodeCandidate(page, candidate);
     await waitForWorkPackageDetailsResolved(page);
 
-    if (isBnFlow) {
-      // REAL BUG FOUND AND FIXED, discovered live via direct DOM inspection
-      // after a completed BN run: this code previously assumed BN lines
-      // ALWAYS have no task assigned (true for the one recorded example,
-      // discovery-0t1y4-bn-recording.ts's BN 394368 line) and created an
-      // Ad-Hoc task UNCONDITIONALLY, with no check. Real evidence proved
-      // this wrong — BN 394600 already had a genuine, real, pre-existing
-      // task ("Slats Halfspeed during T/O roll at 90 kts. B1-007813
-      // TRFKE00GYRE8", ID TRFKE00GZBS4) that existed before this automation
-      // ever touched the line. The unconditional Ad-Hoc creation blindly
-      // added a second, wrongly-named, redundant task alongside it instead
-      // of recognizing and using the real one — confirmed via
-      // discovery-inspectTaskDescriptionSource.ts's direct read of the
-      // Assigned Tasks tab, not assumed. Fixed by adding the exact same
-      // no-tasks-assigned check every other flow in this project already
-      // has (isNoTasksAssignedException) — Ad-Hoc creation only fires when
-      // a task is genuinely, confirmably absent, matching the recorded
-      // example's own real state; when a real task already exists, this
-      // now does nothing and proceeds with the rest of the flow using it.
-      // REVISED per explicit user instruction: a BN line with genuinely no
-      // findable task is NOT a case to paper over with a fabricated
-      // Ad-Hoc task name. The task's real name/description IS the
-      // real-world removal reason — losing it isn't a formality, it's
-      // losing the actual information a human needs recorded. Flag it as
-      // an exception instead, same "refuse to guess" discipline used
-      // everywhere else in this project (never substitute fabricated data
-      // for a real value the automation couldn't confirm).
-      const assignedTasksText = await readAssignedTasksAreaText(page);
-      if (isNoTasksAssignedException(assignedTasksText)) {
+    // REAL BUG FOUND AND FIXED, discovered live via direct DOM inspection,
+    // a real user-provided screenshot, and explicit user correction: this
+    // used to assume "no tasks assigned" only ever happens on BN lines
+    // (true for the one recorded example) and, when it fired, created an
+    // Ad-Hoc task with a FABRICATED name. Both assumptions were wrong.
+    // Real evidence: (1) a genuine NORMAL line (861CA01/957) can also show
+    // "no tasks assigned"; (2) a genuine BN line (BN 394600) can already
+    // have a real, pre-existing task. The real distinguishing condition is
+    // whether a task exists at all — not isBnFlow. (3) When no task
+    // exists, the correct Ad-Hoc task name is THIS line's own real
+    // "Removal Information > Task > Name / ID" grid columns (confirmed via
+    // discovery-inspectRemovalInfoAndNoTask.ts and the user's screenshot:
+    // 861CA01/957 shows Name="AC service bus caution message on #2 eng
+    // with apu batt charger msg", ID="TRFKE00GY46E") — a DIFFERENT real
+    // field from the Work Package/Check ID this code previously used
+    // (that same line's Check ID is "TRFKE00GY4KC"). Per explicit user
+    // confirmation, Removal Information's Task Name/ID is present on
+    // almost every real line — genuinely missing data (both null) is now
+    // the real "flag as error" case, not "no task currently assigned."
+    const assignedTasksText = await readAssignedTasksAreaText(page);
+    if (isNoTasksAssignedException(assignedTasksText)) {
+      // CLAUDE_CODE_PROMPT (vendor 7A9Y2 "shipset" case, Delta 6) — a
+      // missing assigned task is NOT a blocker for this case: no abort, no
+      // prompt, no retry, no Ad-Hoc creation attempt. Distinct from the
+      // UNASSIGNED-task detour below (a task that exists but isn't yet
+      // attached) — that check is untouched by this delta and only runs
+      // for lines that DO have an assigned task.
+      if (shipset && shipset.allowMissingAssignedTask) {
+        console.log(
+          `[vendor-config] ${config.id}: no assigned task exists for ${candidate.partNumber}/${candidate.serialNumber} — ` +
+            `shipset case "${shipset.id}" tolerates this (Delta 6), continuing without Ad-Hoc creation.`,
+        );
+        // REAL BUG FOUND AND FIXED via the first live watched run against
+        // production (real line 41034002-111/68676): unlike the Ad-Hoc
+        // creation branch below (whose own Close/Close sequence lands back
+        // on the grid automatically), this tolerate-and-continue branch
+        // does no UI interaction at all — it was left sitting on Work
+        // Package Details, where readCurrentLocationCode's own
+        // candidate.linkText lookup (which expects the GRID page) timed
+        // out after 30s. Explicit re-navigation restores the same page
+        // state every other branch already relies on.
+        await navigateToVendorCodeGrid(page, client.todoListUrl, vendorCode);
+      } else if (!candidate.removalTaskName || !candidate.removalTaskId) {
         return {
-          status: 'no_task_found_for_bn_line',
+          status: 'no_removal_task_info_found',
           partNumber: candidate.partNumber,
           serialNumber: candidate.serialNumber,
         };
+      } else {
+        await openCreateNewTask(page);
+        await createAdHocTaskForCandidate(
+          page,
+          { name: candidate.removalTaskName, taskClass: '' },
+          candidate.removalTaskId,
+        );
+        // Real, from discovery-0t1y4-bn-recording.ts lines 19-20: after
+        // Ad-Hoc creation's Close/Close, the very next action is a
+        // row-scoped checkbox re-check on the vendor-code grid — no
+        // repair-link re-click in between. We're already back on the grid.
+        // Per explicit user instruction, the process CONTINUES from here
+        // (Schedule Work Package, Authorize, Issue/Dock where applicable)
+        // rather than stopping — no longer a hard exception either way.
+        await waitForVendorCodeGridResolved(page, vendorCode);
       }
-      // else: a real task already exists — do nothing, proceed with the
-      // rest of the flow (still on Work Package Details from the initial
-      // openVendorCodeCandidate click, same as the no-detour case below).
-    } else {
+    } else if (!isBnFlow) {
+      // A real task already exists. The Unassigned Tasks detour (checking
+      // for a genuine BLOCKING unassigned task) only applies here, matching
+      // the warranty recording's own real sequence (which always had a
+      // pre-existing task) — BN lines with an already-existing task skip
+      // this detour too, matching the BN recording's own sequence, which
+      // never visits it regardless of task state.
       await navigateToUnassignedTasksView(page);
       await waitForUnassignedTasksSectionResolved(page);
       const unassignedTasksText = await readUnassignedTasksAreaText(page);
@@ -369,42 +542,154 @@ export async function runVendorCodeWriteUp(
       }
       await closeUnassignedTasksView(page);
     }
+    // else: isBnFlow && a real task already exists — no detour, no Ad-Hoc
+    // creation, proceed directly (matches the BN recording's own sequence).
 
     const currentLocation = await readCurrentLocationCode(page, candidate.linkText);
     const returnToLocation = transformReturnToLocation(currentLocation);
 
-    await openPartOwnDetails(page, candidate.linkText, candidate.serialNumber);
-    const partOwnDetails = await readPartOwnDetails(page, candidate.partNumber, candidate.serialNumber);
-    const usageClassification = classifyUsageTable(partOwnDetails.usageRows);
+    // CLAUDE_CODE_PROMPT ("Create Order Only" terminal state) — a single,
+    // explicit allowlisted redirect: ONLY zero-usage-on-a-USSTG-line
+    // qualifies (confirmed scope, 2026-08-07). Every other exception in
+    // this function keeps its normal behavior untouched. Applies to every
+    // vendor including BN lines — no vendor/flow gate — per explicit
+    // instruction. `effectiveTerminalState` overrides whatever
+    // resolveAuthFlowPolicy/shipset resolved, since a DO-NOT-SHIP line
+    // never reaches Request Authorization regardless of what its own
+    // normal terminal state would otherwise have been.
+    let effectiveTerminalState: TerminalState = resolved.terminalState;
+    let doNotShipReason: string | null = null;
 
-    if (usageClassification === 'present_all_zero') {
-      await closePartOwnDetails(page);
-      return { status: 'zero_usage', partNumber: candidate.partNumber, serialNumber: candidate.serialNumber };
-    }
-    if (usageClassification === 'absent' && resolved.usageTableExpectation !== 'expectedAbsent') {
-      await closePartOwnDetails(page);
-      return {
-        status: 'usage_table_absent_unexpected',
-        partNumber: candidate.partNumber,
-        serialNumber: candidate.serialNumber,
-      };
-    }
+    let notesText: string;
+    if (shipset) {
+      // CLAUDE_CODE_PROMPT (vendor 7A9Y2 "shipset" case, Deltas 3 & 4) —
+      // Notes to Vendor is a fixed literal (never composed from usage/part
+      // data, so the times/cycles formatting helper is never called at
+      // all), and zero usage is normal/expected for this case. Delta 4's
+      // own stated preference: skip the times/cycles read + validation
+      // entirely rather than read it and discard the result — this also
+      // means the existing zero-usage guard structurally never runs for a
+      // shipset line, satisfying Delta 4 without a separate suppression
+      // flag. Every other vendor's and every non-shipset 7A9Y2 line's own
+      // usage read/validation below is completely untouched.
+      console.log(
+        `[vendor-config] ${config.id}: shipset case "${shipset.id}" — skipping the times/cycles read entirely ` +
+          `(Delta 3/4); Notes to Vendor fixed to "${shipset.notesText}".`,
+      );
+      notesText = shipset.notesText;
+    } else {
+      await openPartOwnDetails(page, candidate.linkText, candidate.serialNumber);
+      const partOwnDetails = await readPartOwnDetails(page, candidate.partNumber, candidate.serialNumber);
+      const usageClassification = classifyUsageTable(partOwnDetails.usageRows);
 
-    const notesText = isBnFlow
-      ? composeNotesForBnLine(config.form.notesHeader)
-      : composeNotesForNormalLine(partOwnDetails, config.form.notesHeader);
-    await closePartOwnDetails(page);
+      if (usageClassification === 'present_all_zero') {
+        // CLAUDE_CODE_PROMPT ("Create Order Only") — the single allowlisted
+        // redirect. Confirmed scope: USSTG lines only. currentLocation was
+        // already read above in the exact "<STATION>/<CODE>" shape every
+        // other station check in this project uses.
+        const isUsstgLine = currentLocation.split('/')[1] === 'USSTG';
+        if (isUsstgLine) {
+          doNotShipReason = ZERO_USAGE_DO_NOT_SHIP_REASON;
+          effectiveTerminalState = 'CREATE_ORDER_ONLY';
+          console.log(
+            `[create-order-only] ${config.id} ${candidate.partNumber}/${candidate.serialNumber}: zero usage ` +
+              `detected on a USSTG line — routing to CREATE_ORDER_ONLY instead of the Zero Usage exception ` +
+              `(reason: "${doNotShipReason}").`,
+          );
+        } else {
+          await closePartOwnDetails(page);
+          return { status: 'zero_usage', partNumber: candidate.partNumber, serialNumber: candidate.serialNumber };
+        }
+      }
+      if (usageClassification === 'absent' && resolved.usageTableExpectation !== 'expectedAbsent') {
+        await closePartOwnDetails(page);
+        return {
+          status: 'usage_table_absent_unexpected',
+          partNumber: candidate.partNumber,
+          serialNumber: candidate.serialNumber,
+        };
+      }
+
+      // A DO-NOT-SHIP line gets the bare header only — confirmed rule: the
+      // usage block is added "on non-zero-usage lines," and this line's
+      // usage is, definitionally, all zero. Matches the recording exactly
+      // (a normal, non-BN line whose Note To Vendor was header-only).
+      notesText = doNotShipReason || isBnFlow
+        ? composeNotesForBnLine(config.form.notesHeader)
+        : composeNotesForNormalLine(partOwnDetails, config.form.notesHeader);
+      await closePartOwnDetails(page);
+    }
 
     await recheckCandidateForSchedule(page, candidate);
     await clickScheduleWorkPackage(page);
 
     const chargeToAccountBefore = await readChargeToAccount(page);
-    const chargeToAccountAfter = buildChargeToAccountWithSuffix(chargeToAccountBefore, config.form.chargeToAccountSuffix);
-    await fillChargeToAccount(page, chargeToAccountAfter);
+    let chargeToAccountAfter: string;
+    if (shipset) {
+      // CLAUDE_CODE_PROMPT (vendor 7A9Y2 "shipset" case, Delta 7) — always
+      // the literal value, never derived from whatever MXI autofills.
+      // Explicitly clear + re-enter (fillChargeToAccount already does a
+      // click + .fill(), which replaces rather than appends), then read
+      // back and assert — no special logging needed when overwriting an
+      // autofilled value, per explicit instruction.
+      chargeToAccountAfter = shipset.chargeToAccount;
+      await fillChargeToAccount(page, chargeToAccountAfter);
+      const chargeToAccountReadBack = await readChargeToAccount(page);
+      if (chargeToAccountReadBack !== shipset.chargeToAccount) {
+        throw new Error(
+          `Charge To Account read-back mismatch for ${candidate.partNumber}/${candidate.serialNumber}: expected ` +
+            `literal "${shipset.chargeToAccount}" (Delta 7), got "${chargeToAccountReadBack}".`,
+        );
+      }
+    } else if (doNotShipReason) {
+      // CLAUDE_CODE_PROMPT ("Create Order Only" terminal state) — REAL
+      // FINDING from the first live test: this line's Charge To Account
+      // autofilled completely blank (no "<CR-prefix>ROUTINE+NONROUTINE"
+      // shape to preserve), and leaving it blank made Schedule Work
+      // Package's "OK" silently produce no order at all (confirmed via a
+      // fresh read-only re-check: no order was created, line unchanged).
+      // Per explicit user direction after this finding was reported: every
+      // vendor in this shared-engine family EXCEPT Skypaxxx (7A9Y2) gets a
+      // fixed literal fallback here — Skypaxxx keeps the original
+      // leave-it-untouched behavior since its shipset case already governs
+      // Charge To Account via Delta 7 above, and non-shipset Skypaxxx lines
+      // were explicitly told to skip this fallback too.
+      if (config.id === '7a9y2') {
+        chargeToAccountAfter = chargeToAccountBefore;
+        console.log(
+          `[create-order-only] ${config.id} ${candidate.partNumber}/${candidate.serialNumber}: Charge To Account ` +
+            `left untouched at "${chargeToAccountBefore}" — Skypaxxx is explicitly excluded from the CREATE_ORDER_ONLY fallback.`,
+        );
+      } else {
+        chargeToAccountAfter = CREATE_ORDER_ONLY_CHARGE_TO_ACCOUNT_FALLBACK;
+        await fillChargeToAccount(page, chargeToAccountAfter);
+        const chargeToAccountReadBack = await readChargeToAccount(page);
+        if (chargeToAccountReadBack !== CREATE_ORDER_ONLY_CHARGE_TO_ACCOUNT_FALLBACK) {
+          throw new Error(
+            `Charge To Account read-back mismatch for ${candidate.partNumber}/${candidate.serialNumber}: expected ` +
+              `literal "${CREATE_ORDER_ONLY_CHARGE_TO_ACCOUNT_FALLBACK}" (CREATE_ORDER_ONLY fallback), got "${chargeToAccountReadBack}".`,
+          );
+        }
+      }
+    } else {
+      chargeToAccountAfter = buildChargeToAccountWithSuffix(chargeToAccountBefore, config.form.chargeToAccountSuffix);
+      await fillChargeToAccount(page, chargeToAccountAfter);
+    }
     await fillPurchasingContact(page, config.form.purchasingContact);
     await selectConditions(page, config.form.conditions);
     await fillReturnToLocation(page, returnToLocation);
-    await selectTransportation(page, config.form.transportation);
+
+    if (shipset && shipset.transportationType === null) {
+      // CLAUDE_CODE_PROMPT (vendor 7A9Y2 "shipset" case, Delta 1) — leave
+      // the dropdown untouched at whatever MXI presents. Never select an
+      // empty option, never clear it — simply never call selectTransportation
+      // at all, so a future regression (silently falling back to FEDEX-2)
+      // is visible in the run log as a MISSING line, not a wrong value.
+      console.log(`[vendor-config] ${config.id}: Transportation Type step intentionally SKIPPED (Delta 1 — shipset leaves it blank).`);
+    } else {
+      await selectTransportation(page, shipset ? shipset.transportationType! : config.form.transportation);
+    }
+
     await fillNotesToVendor(page, notesText);
     await confirmScheduleWorkPackage(page);
 
@@ -415,10 +700,59 @@ export async function runVendorCodeWriteUp(
       );
     }
 
+    // CLAUDE_CODE_PROMPT ("Create Order Only" terminal state) — STRUCTURAL
+    // guard: this branch returns before openGeneratedOrder/Request
+    // Authorization/Issue Order/Move to Dock are ever reached below, not
+    // via a skippable flag. completeCreateOrderOnly() does its own
+    // openGeneratedOrder() internally (the order-number link only exists
+    // on THIS page, right after Schedule Work Package confirms) — calling
+    // it again below (the normal path's own openGeneratedOrder call) would
+    // be a double-click on a link that's no longer there.
+    if (effectiveTerminalState === 'CREATE_ORDER_ONLY' && doNotShipReason) {
+      const note = composeDoNotShipNote(doNotShipReason);
+      await completeCreateOrderOnly(page, generatedOrderNumber, note);
+
+      const verification = await verifyExternalReferenceCommitted(page, generatedOrderNumber, client.todoListUrl, note);
+      if (!verification.committed) {
+        throw new Error(
+          `CREATE_ORDER_ONLY external reference verification failed for order ${generatedOrderNumber} ` +
+            `(${candidate.partNumber}/${candidate.serialNumber}): expected "${note}", got ` +
+            `"${verification.realValue ?? '(not found)'}".`,
+        );
+      }
+
+      const doNotShipFields: VendorCodeWriteUpFields = {
+        partNumber: candidate.partNumber,
+        serialNumber: candidate.serialNumber,
+        isBnLine: isBnFlow,
+        purchasingContact: config.form.purchasingContact,
+        returnToLocation,
+        conditions: config.form.conditions,
+        transportation: shipset && shipset.transportationType === null ? '(intentionally skipped — Delta 1)' : config.form.transportation,
+        chargeToAccountBefore,
+        chargeToAccountAfter,
+        notesText,
+        generatedOrderNumber,
+        authFlow: '(not requested — CREATE_ORDER_ONLY)',
+      };
+      return {
+        status: 'order_created_do_not_ship',
+        fields: doNotShipFields,
+        reason: doNotShipReason,
+        externalReferenceNote: note,
+      };
+    }
+
     await openGeneratedOrder(page, generatedOrderNumber);
 
     let realAuthStatus: string | null;
-    if (isBnFlow) {
+    // CLAUDE_CODE_PROMPT (vendor 7A9Y2 "shipset" case, Delta 2) — REPAIR
+    // authorization, not WARRANTY: mirrors the BN/REPAIR retry discipline
+    // (seeking a real, synchronous APPROVED within the session), the same
+    // as Aero Repair's own REPAIR flow — not the WARRANTY branch's
+    // REQUESTED-is-fine acceptance, since this is explicitly a non-warranty
+    // situation per the delta.
+    if (isBnFlow || shipset) {
       const MAX_AUTH_ATTEMPTS = 2;
       let approved = false;
       realAuthStatus = null;
@@ -467,7 +801,9 @@ export async function runVendorCodeWriteUp(
       purchasingContact: config.form.purchasingContact,
       returnToLocation,
       conditions: config.form.conditions,
-      transportation: config.form.transportation,
+      // Reflects what actually happened, not the vendor's baseline default —
+      // a shipset line with transportationType: null never had this step run at all (Delta 1).
+      transportation: shipset && shipset.transportationType === null ? '(intentionally skipped — Delta 1)' : config.form.transportation,
       chargeToAccountBefore,
       chargeToAccountAfter,
       notesText,
@@ -489,6 +825,20 @@ export async function runVendorCodeWriteUp(
               `issueGeneratedOrder reported: ${issueResult.status}${issueResult.errorMessage ? ' — ' + issueResult.errorMessage : ''}).`,
           );
         }
+        // CLAUDE_CODE_PROMPT (vendor 7A9Y2 "shipset" case, Delta 5) — a
+        // deliberate, temporary safety measure for the first production
+        // runs: skip Move to Dock, ALL OTHER STEPS (including Issue Order
+        // above) still run as normal. Config-gated (moveToDockOnInitialRun)
+        // so the capability stays reachable by flipping the flag later —
+        // no code change needed to re-enable.
+        if (shipset && !shipset.moveToDockOnInitialRun) {
+          console.log(
+            `[vendor-config] ${config.id}: order ${generatedOrderNumber} issued successfully — Move to Dock ` +
+              `intentionally SKIPPED on this run (Delta 5, shipset case "${shipset.id}").`,
+          );
+          return { status: 'issued_not_docked', fields };
+        }
+
         const dockResult = await moveOutboundShipmentToDock(client, generatedOrderNumber);
         if (dockResult.status === 'failed' || dockResult.status === 'no_outbound_shipment_found') {
           throw new Error(`Move to Dock failed for order ${generatedOrderNumber}: ${dockResult.errorMessage ?? dockResult.status}`);
@@ -497,6 +847,19 @@ export async function runVendorCodeWriteUp(
       }
       case 'AUTHORIZATION_ONLY': {
         return { status: 'authorized_only', fields };
+      }
+      case 'CREATE_ORDER_ONLY': {
+        // Structurally unreachable: resolved.terminalState (from
+        // resolveAuthFlowPolicy/shipset) never actually produces this
+        // value — only the separate effectiveTerminalState variable does,
+        // and that path already returned above, well before this switch,
+        // openGeneratedOrder, or Request Authorization ever ran. This case
+        // exists only to satisfy TerminalState's exhaustiveness now that
+        // CREATE_ORDER_ONLY is a member of the shared type.
+        throw new Error(
+          `Unreachable: resolved.terminalState was 'CREATE_ORDER_ONLY' for ${candidate.partNumber}/${candidate.serialNumber} ` +
+            `— this should have been handled by the effectiveTerminalState early-return above.`,
+        );
       }
     }
   } catch (err) {

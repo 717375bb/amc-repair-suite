@@ -1,13 +1,19 @@
 import type { Database as DatabaseType } from 'better-sqlite3';
 import 'dotenv/config';
 import express, { type NextFunction, type Request, type Response } from 'express';
+import multer from 'multer';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getActionableEsdInference, getPendingEsdUpdates, getPriorMxiWriteEnvironments, insertMxiWrite, openDb } from './db/db.js';
-import { loadMxiConfig } from './mxiWriter/config.js';
+import { loadMxiConfig, type MxiEnv } from './mxiWriter/config.js';
 import { assembleNoteText, toMxiDateFormat } from './mxiWriter/esdFormatting.js';
 import { MxiClient } from './mxiWriter/mxiClient.js';
 import { writeEsdAndNotes } from './mxiWriter/writeEsdAndNotes.js';
+import { getActiveJob, getJob, getVendorList, startDiscoveryJob, startExecuteJob } from './api/jobManager.js';
+import { isKnownVendorId } from './api/vendors.js';
+import { getActiveEsdJob, getEsdJob, startEsdCompareJob, startEsdWriteJob } from './api/esdFinder/esdFinderJobManager.js';
+import { MissingHeadersError, peekEsdFinderFile, validateHeadersOnly } from './api/esdFinder/ingestion.js';
 
 /**
  * Shared-secret gate for the three endpoints Power Automate calls. GET
@@ -54,12 +60,317 @@ function checkCrossEnvironmentHistory(db: DatabaseType, orderNumber: string, cur
   );
 }
 
+/**
+ * Order Write-Ups frontend additions. CORS is restricted to the Vite dev
+ * origin only — this server binds to 127.0.0.1 (see main() below) and is
+ * meant for exactly one local analyst's browser tab, never a public API.
+ * Both localhost and 127.0.0.1 forms of the default Vite port are allowed
+ * since browsers treat them as distinct origins.
+ */
+const ALLOWED_UI_ORIGINS = new Set(['http://localhost:5173', 'http://127.0.0.1:5173']);
+
+function corsMiddleware(req: Request, res: Response, next: NextFunction): void {
+  const origin = req.header('Origin');
+  if (origin && ALLOWED_UI_ORIGINS.has(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Automation-Key');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  }
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(204);
+    return;
+  }
+  next();
+}
+
+function parseRequiredEnv(req: Request, res: Response): MxiEnv | null {
+  const raw = req.body?.env;
+  if (raw !== 'stage' && raw !== 'production') {
+    res.status(400).json({ error: 'env is required and must be exactly "stage" or "production" — no default.' });
+    return null;
+  }
+  return raw;
+}
+
 export function createApp(db: DatabaseType, mxiClient: MxiClient) {
   const app = express();
+  app.use(corsMiddleware);
   app.use(express.json());
 
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok' });
+  });
+
+  // --- Order Write-Ups API (carry-forward rule: reuses this same Express
+  // app, this same requireAutomationKey gate, this same error/response
+  // conventions — no second server). ---
+
+  app.get('/api/vendors', requireAutomationKey, (_req, res) => {
+    res.json(getVendorList());
+  });
+
+  // State A needs to know, before even starting a job, whether one is
+  // already active — so the UI can disable Run and link to it directly,
+  // rather than only discovering the conflict on submit.
+  app.get('/api/active-job', requireAutomationKey, (_req, res) => {
+    const job = getActiveJob();
+    res.json({ activeRunId: job?.runId ?? null, kind: job?.kind ?? null });
+  });
+
+  app.post('/api/discovery', requireAutomationKey, (req, res) => {
+    const env = parseRequiredEnv(req, res);
+    if (!env) return;
+    const vendorIds: unknown = req.body?.vendorIds;
+    if (!Array.isArray(vendorIds) || vendorIds.length === 0 || !vendorIds.every((v) => typeof v === 'string')) {
+      res.status(400).json({ error: 'vendorIds must be a non-empty array of vendor id strings.' });
+      return;
+    }
+    const unknownIds = vendorIds.filter((v) => !isKnownVendorId(v));
+    if (unknownIds.length > 0) {
+      res.status(400).json({ error: `Unknown vendor id(s): ${unknownIds.join(', ')}` });
+      return;
+    }
+
+    const result = startDiscoveryJob(env, vendorIds);
+    if (!result.ok) {
+      res.status(409).json({ error: 'A write-up job is already running.', activeRunId: result.conflictRunId });
+      return;
+    }
+    res.status(202).json({ runId: result.runId });
+  });
+
+  app.get('/api/runs/:runId', requireAutomationKey, (req, res) => {
+    const job = getJob(req.params.runId);
+    if (!job) {
+      res.status(404).json({ error: `No run found for runId "${req.params.runId}".` });
+      return;
+    }
+    res.json({
+      runId: job.runId,
+      kind: job.kind,
+      env: job.env,
+      vendorIds: job.vendorIds,
+      status: job.status,
+      startedAt: job.startedAt,
+      completedAt: job.completedAt,
+      fatalError: job.fatalError,
+      counts: job.counts,
+      lines: job.lines ? Array.from(job.lines.values()) : undefined,
+      sourceDiscoveryRunId: job.sourceDiscoveryRunId,
+    });
+  });
+
+  app.get('/api/runs/:runId/log', requireAutomationKey, (req, res) => {
+    const job = getJob(req.params.runId);
+    if (!job) {
+      res.status(404).json({ error: `No run found for runId "${req.params.runId}".` });
+      return;
+    }
+    const since = Number(req.query.since ?? -1);
+    const events = job.log.filter((e) => e.seq > since);
+    res.json({ events, latestSeq: job.log.length > 0 ? job.log[job.log.length - 1].seq : since });
+  });
+
+  app.post('/api/execute', requireAutomationKey, (req, res) => {
+    const env = parseRequiredEnv(req, res);
+    if (!env) return;
+    const { runId, selectedLineIds } = req.body ?? {};
+    if (typeof runId !== 'string' || !runId) {
+      res.status(400).json({ error: 'runId is required.' });
+      return;
+    }
+    if (!Array.isArray(selectedLineIds) || selectedLineIds.length === 0 || !selectedLineIds.every((v) => typeof v === 'string')) {
+      res.status(400).json({ error: 'selectedLineIds must be a non-empty array of line id strings.' });
+      return;
+    }
+
+    const result = startExecuteJob(runId, selectedLineIds, env);
+    if (!result.ok) {
+      if (result.conflictRunId) {
+        res.status(409).json({ error: 'A write-up job is already running.', activeRunId: result.conflictRunId });
+      } else {
+        res.status(400).json({ error: result.error });
+      }
+      return;
+    }
+    res.status(202).json({ executeRunId: result.runId });
+  });
+
+  // --- Open Order ESD Finder API (independent workstream from Order
+  // Write-Ups — its own job slot in esdFinderJobManager.ts, so an active
+  // job on one tab never blocks the other — same server, same
+  // requireAutomationKey gate, same conventions, per the spec. ---
+
+  const esdUpload = multer({ dest: path.join('data', 'esd-finder-uploads-tmp') });
+
+  // State A's per-file preview: row count + immediate header-rejection
+  // feedback as each file is dropped, before the analyst commits to a full
+  // comparison run.
+  app.post('/api/esd/peek', requireAutomationKey, esdUpload.single('file'), async (req, res) => {
+    const file = req.file;
+    const role = req.body?.role;
+    if (!file) {
+      res.status(400).json({ error: 'file is required.' });
+      return;
+    }
+    if (role !== 'vendor' && role !== 'cra') {
+      fs.rm(file.path, { force: true }, () => {});
+      res.status(400).json({ error: 'role is required and must be "vendor" or "cra".' });
+      return;
+    }
+    try {
+      const peeked = await peekEsdFinderFile(file.path, file.originalname, role);
+      res.json(peeked);
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    } finally {
+      fs.rm(file.path, { force: true }, () => {});
+    }
+  });
+
+  app.post(
+    '/api/esd/compare',
+    requireAutomationKey,
+    esdUpload.fields([
+      { name: 'vendorFiles', maxCount: 20 },
+      { name: 'craFile', maxCount: 1 },
+    ]),
+    async (req, res) => {
+      const files = req.files as { vendorFiles?: Express.Multer.File[]; craFile?: Express.Multer.File[] } | undefined;
+      const vendorFiles = files?.vendorFiles ?? [];
+      const craFiles = files?.craFile ?? [];
+      // multer saves every uploaded file to disk regardless of outcome
+      // below — startEsdCompareJob copies what it needs into its own
+      // per-run staging directory, so these originals are always scratch
+      // to be deleted before this handler returns, on every path.
+      const allUploadedPaths = [...vendorFiles, ...craFiles].map((f) => f.path);
+      const cleanupUploads = () => {
+        for (const p of allUploadedPaths) fs.rm(p, { force: true }, () => {});
+      };
+
+      if (vendorFiles.length === 0) {
+        cleanupUploads();
+        res.status(400).json({ error: 'At least one Vendor OOR file is required.' });
+        return;
+      }
+      if (craFiles.length !== 1) {
+        cleanupUploads();
+        res.status(400).json({ error: 'Exactly one CRA OOR file is required.' });
+        return;
+      }
+
+      const vendorFileRefs = vendorFiles.map((f) => ({ filePath: f.path, fileName: f.originalname }));
+      const craFileRef = { filePath: craFiles[0].path, fileName: craFiles[0].originalname };
+
+      // Fast rejection before a background job is even started — see
+      // validateHeadersOnly's docstring for why this is a convenience, not
+      // the structural guarantee (that lives inside ingestEsdFinderFiles,
+      // re-checked regardless of what this pre-check already found).
+      try {
+        for (const f of vendorFileRefs) {
+          await validateHeadersOnly(f.filePath, f.fileName, 'vendor');
+        }
+        await validateHeadersOnly(craFileRef.filePath, craFileRef.fileName, 'cra');
+      } catch (err) {
+        cleanupUploads();
+        if (err instanceof MissingHeadersError) {
+          res.status(400).json({ error: err.message });
+        } else {
+          res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+        }
+        return;
+      }
+
+      const result = startEsdCompareJob(vendorFileRefs, craFileRef);
+      cleanupUploads(); // already copied into the job's own staging dir by now
+      if (!result.ok) {
+        res.status(409).json({ error: 'An ESD Finder job is already running.', activeRunId: result.conflictRunId });
+        return;
+      }
+      res.status(202).json({ runId: result.runId });
+    },
+  );
+
+  app.get('/api/esd/active-job', requireAutomationKey, (_req, res) => {
+    const job = getActiveEsdJob();
+    res.json({ activeRunId: job?.runId ?? null });
+  });
+
+  app.get('/api/esd/runs/:runId', requireAutomationKey, (req, res) => {
+    const job = getEsdJob(req.params.runId);
+    if (!job) {
+      res.status(404).json({ error: `No ESD Finder run found for runId "${req.params.runId}".` });
+      return;
+    }
+    res.json({
+      runId: job.runId,
+      kind: job.kind,
+      status: job.status,
+      phase: job.phase,
+      startedAt: job.startedAt,
+      completedAt: job.completedAt,
+      fatalError: job.fatalError,
+      result: job.result,
+      writeEnv: job.writeEnv,
+      writeResults: job.writeResults,
+    });
+  });
+
+  // Writes the surviving, non-X'd, actionable, non-duplicate rows from a
+  // completed compare run. `env` is explicit and required on every call —
+  // no default, no inheriting server.ts's own server-lifetime mxiClient
+  // (see esdWriteRunner.ts's docstring for why that distinction matters).
+  // The requested order numbers are validated against the SOURCE compare
+  // job's own stored result, not trusted from the client: anything
+  // actionable-but-duplicate, not actionable at all, or simply not present
+  // in that run is rejected outright rather than silently dropped.
+  app.post('/api/esd/write', requireAutomationKey, (req, res) => {
+    const env = parseRequiredEnv(req, res);
+    if (!env) return;
+
+    const { runId, orderNumbers } = req.body ?? {};
+    if (typeof runId !== 'string' || !runId) {
+      res.status(400).json({ error: 'runId is required (the compare run to write from).' });
+      return;
+    }
+    if (!Array.isArray(orderNumbers) || orderNumbers.length === 0 || !orderNumbers.every((o) => typeof o === 'string')) {
+      res.status(400).json({ error: 'orderNumbers must be a non-empty array of order number strings.' });
+      return;
+    }
+
+    const compareJob = getEsdJob(runId);
+    if (!compareJob || compareJob.kind !== 'compare') {
+      res.status(404).json({ error: `No ESD Finder compare run found for runId "${runId}".` });
+      return;
+    }
+    if (compareJob.status !== 'completed' || !compareJob.result) {
+      res.status(400).json({ error: `Compare run "${runId}" has not completed successfully — nothing to write.` });
+      return;
+    }
+
+    const duplicateOrderNumbers = new Set(
+      compareJob.result.duplicates.map((d) => d.orderNumber.trim().toUpperCase()),
+    );
+    const writeableOrderNumbers = new Set(
+      compareJob.result.records
+        .filter((r) => r.actionable && !duplicateOrderNumbers.has(r.orderNumber.trim().toUpperCase()))
+        .map((r) => r.orderNumber),
+    );
+
+    const invalid = orderNumbers.filter((o) => !writeableOrderNumbers.has(o));
+    if (invalid.length > 0) {
+      res.status(400).json({
+        error: `The following order number(s) are not actionable, non-duplicate rows from run "${runId}": ${invalid.join(', ')}. Refusing to write any of the requested orders.`,
+      });
+      return;
+    }
+
+    const result = startEsdWriteJob(env, compareJob.result.dbRunId, orderNumbers);
+    if (!result.ok) {
+      res.status(409).json({ error: 'An ESD Finder job is already running.', activeRunId: result.conflictRunId });
+      return;
+    }
+    res.status(202).json({ runId: result.runId, env });
   });
 
   app.get('/pending-esd-updates', requireAutomationKey, (_req, res) => {
@@ -168,8 +479,11 @@ async function main(): Promise<void> {
   await mxiClient.initialize();
 
   const app = createApp(db, mxiClient);
-  const httpServer = app.listen(port, () => {
-    console.log(`ESD approval API listening on http://localhost:${port} (MXI_ENV=${config.env})`);
+  // 127.0.0.1 only, never 0.0.0.0 — this now also serves the Order
+  // Write-Ups job-spawning endpoints, which is not something to expose on
+  // the network even accidentally.
+  const httpServer = app.listen(port, '127.0.0.1', () => {
+    console.log(`ESD approval API listening on http://127.0.0.1:${port} (MXI_ENV=${config.env})`);
   });
 
   const shutdown = async (): Promise<void> => {

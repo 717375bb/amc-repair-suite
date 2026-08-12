@@ -90,3 +90,41 @@ function normalizeWhitespace(value: string): string {
 export function isUnassignedTaskPresent(pageText: string): boolean {
   return !normalizeWhitespace(pageText).includes(normalizeWhitespace(NO_UNASSIGNED_TASKS_TEXT));
 }
+
+export type UnassignedTaskDetectionState = 'present' | 'absent' | 'inconclusive';
+
+export interface UnassignedTaskDetectionResult {
+  state: UnassignedTaskDetectionState;
+  taskCheckboxCount: number;
+  pageText: string;
+}
+
+/**
+ * CLAUDE_CODE_PROMPT_AERO_BUGS.md Defect 2, change 4 — tri-state refinement
+ * of isUnassignedTaskPresent above, for Aero Repair's own call site only.
+ * isUnassignedTaskPresent infers "present" purely from "does not match the
+ * known empty-state text" — absence-based inference producing a confident
+ * answer, which standing discipline #2 forbids. This instead requires
+ * POSITIVE evidence for each state: `present` needs a real assignable task
+ * checkbox (`input[name="aTask"]`, the confirmed real mechanism from
+ * discovery-UnassignedTaskAssignment-recording.ts) actually present in the
+ * DOM; `absent` needs the confirmed empty-state text; anything matching
+ * NEITHER is `inconclusive` — callers must raise a distinct exception for
+ * that case rather than falling through to either branch.
+ *
+ * isUnassignedTaskPresent itself is left untouched — it's shared with
+ * vendor 0T1Y4 (confirmed vendor-agnostic there), and this tri-state
+ * refinement has not been verified against that vendor's own flow.
+ */
+export async function detectUnassignedTaskState(page: Page): Promise<UnassignedTaskDetectionResult> {
+  const pageText = await page.locator('body').innerText();
+  const taskCheckboxCount = await page.locator('input[name="aTask"]').count();
+
+  if (taskCheckboxCount > 0) {
+    return { state: 'present', taskCheckboxCount, pageText };
+  }
+  if (!isUnassignedTaskPresent(pageText)) {
+    return { state: 'absent', taskCheckboxCount, pageText };
+  }
+  return { state: 'inconclusive', taskCheckboxCount, pageText };
+}

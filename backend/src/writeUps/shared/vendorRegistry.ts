@@ -1,4 +1,4 @@
-import { buildWarrantyTerminalStateVendorConfig, type VendorConfig } from './vendorConfig.js';
+import { AUTH_FLOW_REPAIR, buildWarrantyTerminalStateVendorConfig, type VendorConfig } from './vendorConfig.js';
 
 /**
  * Every vendor using the "vendor-code search + BN-prefix override +
@@ -35,6 +35,48 @@ export const VENDOR_REGISTRY: Readonly<Record<string, VendorConfig>> = Object.fr
   VC00564: buildWarrantyTerminalStateVendorConfig('VC00564', 'Vendor VC00564'),
   '21844': buildWarrantyTerminalStateVendorConfig('21844', 'Vendor 21844'),
   '6MXR1': buildWarrantyTerminalStateVendorConfig('6MXR1', 'Vendor 6MXR1'),
+  // CLAUDE_CODE_PROMPT (vendor 7A9Y2 "shipset" case) — baseline behavior is
+  // identical to every other vendor in this family (WARRANTY auth,
+  // AUTHORIZATION_ONLY terminal state, FEDEX-2 transport, NET30/717375) —
+  // no baseline overrides needed. The shipsetCase override is the entire
+  // delta: an alternate case, gated on a home-page grid-row task-name
+  // trigger (not a serial-number prefix), applied only when it matches —
+  // see vendorConfig.ts's resolveShipsetCase() and
+  // vendorCodeWriteUp.ts's runVendorCodeWriteUp() for where each field is
+  // consumed.
+  '7A9Y2': buildWarrantyTerminalStateVendorConfig('7A9Y2', 'Skypaxxx Repairs', {
+    shipsetCase: {
+      id: 'SEAT_REFRESH_SHIPSET',
+      expectedUsstgTaskName: 'TO_25-079-005-22-JIC (SEAT REFRESH - REMOVE AND INSTALL SEATS)',
+      // Delta 1 — leave Transportation Type untouched, never an empty string.
+      transportationType: null,
+      // Delta 2 — REPAIR, not WARRANTY. Confirmed by explicit user
+      // direction: this is the same authorization process BN-prefix lines
+      // already follow (AUTH_FLOW_REPAIR + the retry-for-APPROVED
+      // discipline in runVendorCodeWriteUp() — see the `isBnFlow ||
+      // shipset` branch there). The recording's own selectOption call for
+      // #idDropdownAuthFlows only captured an opaque {AES}-encoded value
+      // (codegen records the internal option value, not the visible label,
+      // for a native <select>), so the plain-text label itself couldn't be
+      // read from the recording directly — using the same AUTH_FLOW_REPAIR
+      // constant BN lines already use is now confirmed correct, not a
+      // standing guess.
+      authFlow: AUTH_FLOW_REPAIR,
+      // Delta 2 — "Issue the order as normal": ISSUE_AND_DOCK dispatch,
+      // with Delta 5 separately gating the dock-move sub-step below.
+      terminalState: 'ISSUE_AND_DOCK',
+      // Delta 3 — fixed, exact literal. Never composed from usage/part data.
+      notesText: 'INSPECT AND SERVICE AS REQUIRED',
+      // Delta 5 — temporary safety measure for initial production runs;
+      // flip to true to re-enable Move to Dock, no code change needed.
+      moveToDockOnInitialRun: false,
+      // Delta 6 — a missing assigned task is not a blocker for this case.
+      allowMissingAssignedTask: true,
+      // Delta 7 — always the literal value, never derived from autofill.
+      // Corrected per explicit user instruction: CR7HMV, not CR7REPAIR.
+      chargeToAccount: 'CR7HMV',
+    },
+  }),
 });
 
 /**

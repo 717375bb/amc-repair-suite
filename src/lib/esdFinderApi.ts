@@ -1,0 +1,171 @@
+/**
+ * Open Order ESD Finder API client. Same backend, same 127.0.0.1-bound
+ * CORS-restricted server as lib/api.ts's Order Write-Ups client, same
+ * VITE_AUTOMATION_API_KEY bundling caveat (acceptable only because this is
+ * a local-analyst-only server, never internet-facing) — kept as its own
+ * file rather than folded into lib/api.ts because this tab's endpoints are
+ * multipart-upload-based, not JSON-body-based, and mixing the two request
+ * helpers in one file would make it easy to send the wrong Content-Type
+ * for one or the other.
+ */
+
+export type EsdClassification =
+  | 'explicit_date'
+  | 'vendor_quote_estimate'
+  | 'parts_pending'
+  | 'not_esd_relevant'
+  | 'quote_sent_reference'
+  | 'none'
+export type EsdFlag = 'ok' | 'no_esd_found' | 'orphaned_vendor_row' | 'orphaned_cra_row'
+export type EsdJobStatus = 'pending' | 'running' | 'completed' | 'failed'
+export type EsdJobKind = 'compare' | 'write'
+export type MxiEnv = 'stage' | 'production'
+
+export interface EsdWriteOrderResult {
+  orderNumber: string
+  status: 'success' | 'failed' | 'skipped'
+  errorMessage: string | null
+}
+
+export interface EsdCompareResultRow {
+  orderNumber: string
+  vendorName: string | null
+  roEsdRaw: string | null
+  mxiEsdRaw: string | null
+  currentStatus: string | null
+  vendorNotes: string | null
+  orderStatus: string | null
+  classification: EsdClassification | null
+  extractedBaseDate: string | null
+  bufferDaysApplied: number | null
+  usedFallback: boolean
+  confidence: 'high' | 'medium' | 'low' | null
+  reasoningNote: string | null
+  inferredEsd: string | null
+  flag: EsdFlag
+  deltaDaysVsMxi: number | null
+  aiCallMade: boolean
+  actionable: boolean
+  notesToReceiverPreview: string | null
+  partNumber: string | null
+  serialNumber: string | null
+}
+
+export interface DuplicateOrderNumber {
+  orderNumber: string
+  occurrences: Array<{ sourceFileName: string; vendorName: string | null }>
+}
+
+export interface EsdRunSummary {
+  processed: number
+  matched: number
+  orphanedVendor: number
+  orphanedCra: number
+  aiCallsMade: number
+  aiFallbackUsed: number
+}
+
+export interface EsdCompareResult {
+  dbRunId: number
+  records: EsdCompareResultRow[]
+  duplicates: DuplicateOrderNumber[]
+  outputFilePath: string
+  summary: EsdRunSummary
+}
+
+export interface EsdRunStatusResponse {
+  runId: string
+  kind: EsdJobKind
+  status: EsdJobStatus
+  phase: string | null
+  startedAt: string
+  completedAt: string | null
+  fatalError: string | null
+  result: EsdCompareResult | null
+  writeEnv: MxiEnv | null
+  writeResults: EsdWriteOrderResult[]
+}
+
+const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:3001'
+const API_KEY = import.meta.env.VITE_AUTOMATION_API_KEY ?? ''
+
+export class ApiError extends Error {
+  status: number
+  activeRunId?: string
+  constructor(status: number, message: string, activeRunId?: string) {
+    super(message)
+    this.status = status
+    this.activeRunId = activeRunId
+  }
+}
+
+interface ErrorBody {
+  error?: string
+  activeRunId?: string
+}
+
+async function handleResponse<T>(res: Response): Promise<T> {
+  if (!res.ok) {
+    let message = res.statusText
+    let activeRunId: string | undefined
+    try {
+      const body = (await res.json()) as ErrorBody
+      message = body.error ?? message
+      activeRunId = body.activeRunId
+    } catch {
+      // response body wasn't JSON — fall back to statusText
+    }
+    throw new ApiError(res.status, message, activeRunId)
+  }
+  return res.json() as Promise<T>
+}
+
+function jsonRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  return fetch(`${BASE_URL}${path}`, {
+    ...init,
+    headers: { 'X-Automation-Key': API_KEY, ...(init?.headers ?? {}) },
+  }).then(handleResponse<T>)
+}
+
+function jsonPostRequest<T>(path: string, body: unknown): Promise<T> {
+  return jsonRequest<T>(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+/** No manual Content-Type header — the browser sets the correct multipart boundary itself. */
+function uploadRequest<T>(path: string, formData: FormData): Promise<T> {
+  return fetch(`${BASE_URL}${path}`, {
+    method: 'POST',
+    headers: { 'X-Automation-Key': API_KEY },
+    body: formData,
+  }).then(handleResponse<T>)
+}
+
+export function peekFile(file: File, role: 'vendor' | 'cra'): Promise<{ fileName: string; rowCount: number }> {
+  const formData = new FormData()
+  formData.append('file', file)
+  formData.append('role', role)
+  return uploadRequest('/api/esd/peek', formData)
+}
+
+export function getActiveEsdJob(): Promise<{ activeRunId: string | null }> {
+  return jsonRequest('/api/esd/active-job')
+}
+
+export function startCompare(vendorFiles: File[], craFile: File): Promise<{ runId: string }> {
+  const formData = new FormData()
+  for (const f of vendorFiles) formData.append('vendorFiles', f)
+  formData.append('craFile', craFile)
+  return uploadRequest('/api/esd/compare', formData)
+}
+
+export function getEsdRunStatus(runId: string): Promise<EsdRunStatusResponse> {
+  return jsonRequest(`/api/esd/runs/${encodeURIComponent(runId)}`)
+}
+
+export function startWrite(runId: string, orderNumbers: string[], env: MxiEnv): Promise<{ runId: string; env: MxiEnv }> {
+  return jsonPostRequest('/api/esd/write', { runId, orderNumbers, env })
+}

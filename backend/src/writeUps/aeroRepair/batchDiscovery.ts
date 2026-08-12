@@ -226,8 +226,16 @@ export async function verifyLineStillEligible(
   client: MxiClient,
   partNumber: string,
   serialNumber: string,
+  /**
+   * CLAUDE_CODE_PROMPT_WRITEUP_FAILSAFE.md Layer 3 — defaults to 3
+   * (unchanged behavior). processLine.ts passes 1 for a main-pass attempt
+   * — a retryable "not eligible" result quarantines the line immediately
+   * instead of burning inline backoff; the full multi-attempt treatment
+   * (with Layer 2's fixed 5s/15s/30s backoff) only runs on the second pass.
+   */
+  maxAttempts = 3,
 ): Promise<boolean> {
-  const MAX_ATTEMPTS = 3;
+  const MAX_ATTEMPTS = maxAttempts;
   // With waitForGridResolved in place, verifyLineStillEligibleOnce can now
   // THROW (an inconclusive grid read that never resolved), not just return
   // false. That throw must survive to the caller on the final attempt —

@@ -18,6 +18,8 @@
     "aero-repair:move-to-dock": "tsx src/aeroRepairMoveToDockCli.ts",
     "aero-repair:approve-issue": "tsx src/aeroRepairApproveIssueCli.ts",
     "aero-repair:reject-issue": "tsx src/aeroRepairRejectIssueCli.ts",
+    "api:discovery-runner": "tsx src/api/jobRunners/discoveryRunner.ts",
+    "api:execute-runner": "tsx src/api/jobRunners/executeRunner.ts",
     "vendor:write-up": "tsx src/vendorCodeWriteUpCli.ts",
     "vendor:batch-discovery": "tsx src/vendorCodeBatchDiscoveryCli.ts",
     "vendor:batch-execute": "tsx src/vendorCodeBatchExecuteCli.ts",
@@ -35,12 +37,14 @@
     "exceljs": "^4.4.0",
     "express": "^4.21.1",
     "mssql": "^12.7.0",
+    "multer": "^2.2.0",
     "playwright": "^1.48.2"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",
     "@types/express": "^4.17.21",
     "@types/mssql": "^12.3.0",
+    "@types/multer": "^2.2.0",
     "@types/node": "^22.10.0",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3"

@@ -68,13 +68,30 @@ async function main(): Promise<void> {
       | 'ad_hoc_pending_manual_continuation'
       | 'unrecognized_station'
       | 'zero_usage'
-      | 'unassigned_task_present'
+      | 'unassigned_task_multiple_present'
+      | 'unassigned_task_detection_suspect'
+      | 'no_removal_task_info_found'
+      | 'order_created_do_not_ship'
       | 'error';
     let stationCode: string | null = null;
     let routedLocation: string | null = null;
     let filledFieldsJson: string | null = null;
     let errorMessage: string | null = null;
     let orderNumber: string | null = null;
+
+    if (outcome.unassignedTaskWasAssigned) {
+      insertWriteUpAction(db, {
+        vendor: 'aeroRepair',
+        partNumber,
+        targetEnv: env,
+        outcome: 'unassigned_task_assigned',
+        stationCode: null,
+        routedLocation: null,
+        filledFieldsJson: JSON.stringify({ serialNumber: preferredSerialNumber ?? null }, null, 2),
+        errorMessage: null,
+        orderNumber: null,
+      });
+    }
 
     switch (outcome.status) {
       case 'filled': {
@@ -148,13 +165,44 @@ async function main(): Promise<void> {
         process.exitCode = 1;
         break;
       }
-      case 'unassigned_task_present': {
-        dbOutcome = 'unassigned_task_present';
-        filledFieldsJson = JSON.stringify({ serialNumber: outcome.serialNumber, taskDetail: outcome.taskDetail }, null, 2);
+      case 'unassigned_task_multiple_present': {
+        dbOutcome = 'unassigned_task_multiple_present';
+        filledFieldsJson = JSON.stringify({ serialNumber: outcome.serialNumber, candidateCount: outcome.candidateCount }, null, 2);
         console.error(
-          `Part ${partNumber} / SN ${outcome.serialNumber}: a real unassigned task is present on this line. Nothing was filled. Can be manually assigned by a CRA in the meantime.`,
+          `Part ${partNumber} / SN ${outcome.serialNumber}: ${outcome.candidateCount} genuinely-assignable unassigned tasks found — flagging for human review, not guessing among them. Nothing was filled.`,
         );
         process.exitCode = 1;
+        break;
+      }
+      case 'unassigned_task_detection_suspect': {
+        dbOutcome = 'unassigned_task_detection_suspect';
+        filledFieldsJson = JSON.stringify({ serialNumber: outcome.serialNumber }, null, 2);
+        console.error(
+          `Part ${partNumber} / SN ${outcome.serialNumber}: a task checkbox was detected on the Unassigned Tasks sub-tab, but it filtered out as PC (administrative) — detection is suspect. Nothing was filled or assigned.`,
+        );
+        process.exitCode = 1;
+        break;
+      }
+      case 'no_removal_task_info_found': {
+        dbOutcome = 'no_removal_task_info_found';
+        console.error(
+          `Part ${partNumber} / SN ${outcome.serialNumber}: no task assigned, and this line's own Removal ` +
+            `Information has no Task Name/ID either — the real removal reason can't be determined. Nothing was filled.`,
+        );
+        process.exitCode = 1;
+        break;
+      }
+      case 'order_created_do_not_ship': {
+        dbOutcome = 'order_created_do_not_ship';
+        orderNumber = outcome.generatedOrderNumber;
+        filledFieldsJson = JSON.stringify(
+          { serialNumber: outcome.serialNumber, reason: outcome.reason, externalReferenceNote: outcome.externalReferenceNote },
+          null,
+          2,
+        );
+        console.log('');
+        console.log(`=== CREATE ORDER ONLY — order ${outcome.generatedOrderNumber} created, marked DO NOT SHIP (${outcome.reason}). ===`);
+        console.log('No authorization, issue, or dock was performed for this line.');
         break;
       }
       case 'error': {

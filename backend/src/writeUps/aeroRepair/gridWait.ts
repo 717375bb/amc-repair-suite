@@ -1,4 +1,5 @@
 import type { Page } from 'playwright';
+import { captureVendorBidDiagnostics, type VendorBidRowEvidence } from './emptyReadCapture.js';
 
 /**
  * waitForBodyTextIncludes, waitForWorkPackageDetailsResolved,
@@ -56,99 +57,216 @@ const GRID_WAIT_POLL_MS = 250;
  * rather than letting the caller read an inconclusive 0. Zero must only
  * ever come from MXI genuinely saying "no inventory" — never from a read
  * that simply never got a chance to finish.
+ *
+ * CLAUDE_CODE_PROMPT_WRITEUP_FAILSAFE.md Layer 1 — REAL ROOT CAUSE FOUND:
+ * "at least one real row rendered" was too weak a completion signal for a
+ * LARGE result set under business-hours load. A real production run
+ * against `90001200-1` (21 real open lines — the largest known part
+ * number) hit `Preferred serial ... not found among 0 candidate lines`
+ * SEVEN times in one 53-order batch, always on this specific part number.
+ * Root cause, confirmed by re-reading this function: the moment row 1
+ * renders, this resolves "done" — while rows 2-21 (including whichever
+ * specific serial the caller actually wants) are still streaming in. Every
+ * downstream caller then reads a genuinely incomplete grid as final,
+ * exactly the "partial grid read as complete" failure class this whole
+ * fix addresses (2 other real symptoms — `unassigned_task_state_indeterminate`
+ * and a raw `locator.click` timeout waiting for "Unassigned" — trace to
+ * the same class of bug in sibling wait functions, not this one).
+ *
+ * Fixed to require a STRONGER completion signal per the explicit fix
+ * spec: the real per-line row count (same signal this function already
+ * used to detect "any row at all" — every real row, with or without a
+ * work package, has its own part number as a plain `<a>` link, confirmed
+ * in this file's own docstring above) must be STABLE across two
+ * consecutive polls, not just present once. A grid still streaming rows in
+ * will show an increasing count between polls and keep waiting; a grid
+ * that has genuinely finished shows the same count twice in a row. Zero
+ * rows never resolves via stability — only the explicit "no inventory"
+ * text can conclude an empty result, unchanged from before.
  */
+const GRID_STABILITY_POLL_MS = 600;
+
+async function readGridState(
+  page: Page,
+  partNumber: string,
+): Promise<{ rowCount: number; noInventory: boolean }> {
+  return page.evaluate(({ pn }: { pn: string }) => {
+    const rowCount = Array.from(document.querySelectorAll('a')).filter(
+      (a) => (a.textContent ?? '').trim() === pn,
+    ).length;
+    const noInventory = (document.body?.innerText ?? '').includes('no inventory');
+    return { rowCount, noInventory };
+  }, { pn: partNumber });
+}
+
 export async function waitForGridResolved(page: Page, partNumber: string): Promise<void> {
   const start = Date.now();
-  try {
-    await page.waitForFunction(
-      ({ pn }: { pn: string }) => {
-        const hasRealRow = Array.from(document.querySelectorAll('a')).some(
-          (a) => (a.textContent ?? '').trim() === pn,
-        );
-        const bodyText = document.body?.innerText ?? '';
-        return hasRealRow || bodyText.includes('no inventory');
-      },
-      { pn: partNumber },
-      { timeout: GRID_WAIT_TIMEOUT_MS, polling: GRID_WAIT_POLL_MS },
-    );
-  } catch (err) {
-    // REAL GAP FOUND AND FIXED: a bare rethrow here once masked a genuine
-    // `ReferenceError: __name is not defined` (an esbuild/tsx serialization
-    // artifact in the sibling function below) as a misleading generic
-    // timeout message for 30+ seconds across multiple real attempts before
-    // the actual cause was found — see
-    // waitForUnassignedTasksSectionResolved's docstring for the full
-    // account. Including the real underlying message here means that
-    // class of masking can't happen again silently.
-    throw new Error(
-      `Grid read for part ${partNumber} did not resolve to a definitive state (no real row for this part number ` +
-        `AND no "no inventory" empty-state text) within ${GRID_WAIT_TIMEOUT_MS}ms — refusing to treat this as a ` +
-        `genuine empty result. Underlying error: ${err instanceof Error ? err.message : String(err)}`,
-    );
+  const deadline = start + GRID_WAIT_TIMEOUT_MS;
+
+  let previous = await readGridState(page, partNumber);
+  if (previous.noInventory) {
+    console.log(`[grid-wait] part ${partNumber} resolved in ${Date.now() - start}ms (reason: no_inventory)`);
+    return;
   }
-  console.log(`[grid-wait] part ${partNumber} resolved in ${Date.now() - start}ms`);
+
+  while (Date.now() < deadline) {
+    await page.waitForTimeout(GRID_STABILITY_POLL_MS);
+    const current = await readGridState(page, partNumber);
+    if (current.noInventory) {
+      console.log(`[grid-wait] part ${partNumber} resolved in ${Date.now() - start}ms (reason: no_inventory)`);
+      return;
+    }
+    if (current.rowCount > 0 && current.rowCount === previous.rowCount) {
+      console.log(`[grid-wait] part ${partNumber} resolved in ${Date.now() - start}ms (reason: stable_row_count=${current.rowCount})`);
+      return;
+    }
+    previous = current;
+  }
+
+  // REAL GAP FOUND AND FIXED: a bare rethrow here once masked a genuine
+  // `ReferenceError: __name is not defined` (an esbuild/tsx serialization
+  // artifact in the sibling function below) as a misleading generic
+  // timeout message for 30+ seconds across multiple real attempts before
+  // the actual cause was found — see
+  // waitForUnassignedTasksSectionResolved's docstring for the full
+  // account. Kept as a plain descriptive throw here (no wrapped `err` to
+  // preserve now that this is a manual poll loop, not `waitForFunction`).
+  throw new Error(
+    `Grid read for part ${partNumber} did not resolve to a stable state (row count never repeated across two ` +
+      `consecutive polls, and no "no inventory" empty-state text appeared) within ${GRID_WAIT_TIMEOUT_MS}ms — ` +
+      `refusing to treat this as a genuine result. Last observed row count: ${previous.rowCount}.`,
+  );
+}
+
+export interface VendorBidRow {
+  /** 0 = the line's own main row; 1+ = sibling bid rows, in DOM order. */
+  index: number;
+  /** Whitespace-normalized innerText of this row. */
+  text: string;
+  hasRadio: boolean;
+  /** Resolves to this row's own radio input — click this to select the bid. */
+  radio: import('playwright').Locator;
+  /** Resolves to the row's own <tr> — used for HTML-dump diagnostics regardless of hasRadio. */
+  tr: import('playwright').Locator;
+}
+
+function normalizeRowText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Walks the line's own main `<tr>` (found via Playwright's accessible-name
+ * locator — see the real root-cause finding below) then its sibling `<tr>`s,
+ * stopping at (not including) the first sibling whose text contains
+ * "INTERCHG" — that boundary marks the start of the NEXT line's own main
+ * row. Returns `{ targetLinkFound: false, rows: [] }` if the repair link
+ * itself can't currently be resolved on the page at all.
+ *
+ * REAL BUG FOUND AND FIXED via a live production capture (see
+ * emptyReadCapture.ts's captureVendorBidDiagnostics docstring for the full
+ * account): this used to walk via a raw `document.querySelectorAll('a')` +
+ * `a.textContent?.trim() === linkText` comparison inside a `page.evaluate()`
+ * — for every wheel line tested (5/5) this matched fine, but for EVERY
+ * brake line (6/6) it matched ZERO elements, confirmed directly
+ * ("Target repair link found in DOM at all: false" for a page that had, in
+ * fact, fully rendered). Same whitespace-normalization class of bug already
+ * fixed for the OEM-grid/unassigned-tasks reads elsewhere in this project —
+ * raw `textContent` and Playwright's own accessible-name resolution
+ * (`.innerText()`, `getByRole(...,{exact:true})`) don't always agree on
+ * exactly which whitespace is collapsed. Now uses the SAME
+ * locator-resolution mechanism as every other reliable row-finder in this
+ * module (readCurrentLocationCode, findGeneratedOrderNumber,
+ * recheckRepairLineForSchedule) instead of a second, independently-fallible
+ * raw-DOM re-implementation.
+ */
+export async function collectVendorBidRows(
+  page: Page,
+  linkText: string,
+): Promise<{ targetLinkFound: boolean; rows: VendorBidRow[] }> {
+  const repairLink = page.getByRole('link', { name: linkText, exact: true });
+  if ((await repairLink.count()) === 0) {
+    return { targetLinkFound: false, rows: [] };
+  }
+  const mainTr = repairLink.locator('xpath=ancestor::tr[1]');
+  const mainRadio = mainTr.locator('input[type="radio"]');
+  const rows: VendorBidRow[] = [
+    {
+      index: 0,
+      text: normalizeRowText(await mainTr.innerText()),
+      hasRadio: (await mainRadio.count()) > 0,
+      radio: mainRadio.first(),
+      tr: mainTr,
+    },
+  ];
+
+  const siblingTrs = mainTr.locator('xpath=following-sibling::tr');
+  const siblingCount = await siblingTrs.count();
+  for (let i = 0; i < siblingCount; i++) {
+    const sib = siblingTrs.nth(i);
+    const text = normalizeRowText(await sib.innerText());
+    if (text.includes('INTERCHG')) break; // next line's own main row
+    const radio = sib.locator('input[type="radio"]');
+    rows.push({ index: i + 1, text, hasRadio: (await radio.count()) > 0, radio: radio.first(), tr: sib });
+  }
+  return { targetLinkFound: true, rows };
+}
+
+async function captureRowEvidence(rows: VendorBidRow[]): Promise<VendorBidRowEvidence[]> {
+  const evidence: VendorBidRowEvidence[] = [];
+  for (const row of rows) {
+    const html = await row.tr.evaluate((el) => el.outerHTML).catch(() => '(could not read outerHTML)');
+    evidence.push({ index: row.index, text: row.text, html, hasRadio: row.hasRadio });
+  }
+  return evidence;
 }
 
 /**
  * PART B — same render-latency root cause as the OEM-grid reads (Part A),
- * in a read that fix never covered: selectVendorRadioForRouting reads the
- * vendor-bid rows via a single immediate `page.evaluate()` right after the
- * caller's fixed 750ms pace(), with no wait of its own. If the bid rows
- * haven't finished rendering yet, the walk sees an incomplete set, never
- * finds the target routingLocation, and throws "Could not find a vendor
- * bid matching routing location" — indistinguishable from a genuine
- * routing/data problem, but actually just a read that fired too early.
- * Recurring, worse under real business-hours load — exactly the pattern
- * already confirmed for the three grid-read paths Part A fixed.
+ * in a read that fix never covered: selectVendorRadioForRouting used to
+ * read the vendor-bid rows via a single immediate `page.evaluate()` right
+ * after the caller's fixed 750ms pace(), with no wait of its own.
  *
- * Waits for a DEFINITIVE end state before the real evaluation happens:
- * either the target routingLocation is already found (fast path, no need
- * to wait further), or at least as many distinct radio-bearing rows as
- * `expectedBidCount` (the real number of known Aero Repair vendor
- * locations — every real line sampled across this project shows all of
- * them together) have rendered for this line. 30s timeout; throws rather
- * than letting the caller evaluate an incomplete set as "no match."
+ * Defect 1 rewrite: the hardcoded ">= 4 known vendor locations" threshold
+ * is gone — it encoded an assumption (every line has exactly the 4 wheel
+ * locations) that real brake lines can violate in ways never enumerated.
+ * The only thing this function waits for now is "the bid region has
+ * rendered at all" — at least one radio-bearing row found in the line's own
+ * row span. Whether the SPECIFIC target routingLocation is among them is a
+ * separate classification step, done by the caller
+ * (selectVendorRadioForRouting) once this resolves — a definitively
+ * rendered bid list that genuinely lacks the target location is a real,
+ * actionable "Vendor Bid Not Found" exception, not an indeterminate-state
+ * timeout.
+ *
+ * Only throws (and captures full structural diagnostics) when NO
+ * radio-bearing row is found at all within 30s — a genuinely indeterminate
+ * read, never treated as "no bids."
  */
-export async function waitForVendorBidsResolved(
-  page: Page,
-  linkText: string,
-  routingLocation: string,
-  expectedBidCount: number,
-): Promise<void> {
+export async function waitForVendorBidsResolved(page: Page, linkText: string): Promise<VendorBidRow[]> {
   const start = Date.now();
-  try {
-    await page.waitForFunction(
-      ({ targetLinkText, location, minBidRows }: { targetLinkText: string; location: string; minBidRows: number }) => {
-        const links = Array.from(document.querySelectorAll('a'));
-        const targetLink = links.find((a) => a.textContent?.trim() === targetLinkText);
-        if (!targetLink) return false;
-        const mainTr = targetLink.closest('tr');
-        if (!mainTr) return false;
+  const deadline = start + GRID_WAIT_TIMEOUT_MS;
+  let targetLinkFound = false;
+  let rows: VendorBidRow[] = [];
 
-        let current: Element | null = mainTr;
-        let isMainRow = true;
-        let radioRowCount = 0;
-        let foundLocation = false;
-        while (current && current.tagName === 'TR') {
-          const text = current.textContent ?? '';
-          if (!isMainRow && text.includes('INTERCHG')) break;
-          if (current.querySelector('input[type="radio"]')) radioRowCount++;
-          if (text.includes(location)) foundLocation = true;
-          current = current.nextElementSibling;
-          isMainRow = false;
-        }
-        return foundLocation || radioRowCount >= minBidRows;
-      },
-      { targetLinkText: linkText, location: routingLocation, minBidRows: expectedBidCount },
-      { timeout: GRID_WAIT_TIMEOUT_MS, polling: GRID_WAIT_POLL_MS },
-    );
-  } catch (err) {
-    throw new Error(
-      `Vendor bid rows for line "${linkText}" did not resolve to a definitive state (target location "${routingLocation}" ` +
-        `not found AND fewer than ${expectedBidCount} bid row(s) rendered) within ${GRID_WAIT_TIMEOUT_MS}ms — refusing ` +
-        `to treat this as a genuine "no matching vendor" result. Underlying error: ` +
-        `${err instanceof Error ? err.message : String(err)}`,
-    );
+  while (Date.now() < deadline) {
+    const result = await collectVendorBidRows(page, linkText);
+    targetLinkFound = result.targetLinkFound;
+    rows = result.rows;
+    if (rows.some((r) => r.hasRadio)) {
+      console.log(
+        `[grid-wait] vendor bids for "${linkText}" resolved in ${Date.now() - start}ms ` +
+          `(${rows.filter((r) => r.hasRadio).length} bid row(s))`,
+      );
+      return rows;
+    }
+    await page.waitForTimeout(GRID_WAIT_POLL_MS);
   }
-  console.log(`[grid-wait] vendor bids for "${linkText}" resolved in ${Date.now() - start}ms`);
+
+  const evidence = await captureRowEvidence(rows);
+  await captureVendorBidDiagnostics(page, linkText, evidence, targetLinkFound);
+  throw new Error(
+    `Vendor bid rows for line "${linkText}" did not resolve to a definitive state (0 radio-bearing bid rows found, ` +
+      `target link resolved: ${targetLinkFound}) within ${GRID_WAIT_TIMEOUT_MS}ms — refusing to treat this as a ` +
+      `genuine "no bids" result.`,
+  );
 }

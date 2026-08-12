@@ -9,6 +9,8 @@ import {
   ShieldCheck,
   Gauge,
   LineChart,
+  PlayCircle,
+  Search,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -60,6 +62,20 @@ export const navGroups: NavGroup[] = [
         description: 'Process and document parts scrapped from service',
         icon: PackageX,
         status: 'soon',
+      },
+      {
+        key: 'order-write-ups',
+        path: '/order-write-ups',
+        label: 'Order Write-Ups',
+        description: 'Run and review automated vendor write-ups',
+        icon: PlayCircle,
+      },
+      {
+        key: 'esd-finder',
+        path: '/esd-finder',
+        label: 'Open Order ESD Finder',
+        description: 'Drag in vendor/CRA OOR files and review inferred ESDs',
+        icon: Search,
       },
     ],
   },

@@ -1,7 +1,5 @@
 import type { Page } from 'playwright';
 
-const GRID_WAIT_TIMEOUT_MS = 30_000;
-const GRID_WAIT_POLL_MS = 250;
 const CLICK_DELAY_MS = 750;
 
 async function pace(page: Page): Promise<void> {
@@ -20,33 +18,55 @@ async function pace(page: Page): Promise<void> {
  * unchanged.
  */
 
+/**
+ * CLAUDE_CODE_PROMPT_AERO_BUGS.md Defect 3 — every line in the real
+ * 2026-08-05 batch run, INCLUDING all 6 successful ones, burned the full
+ * 30s here before falling through to findGeneratedOrderNumber's own
+ * (correct) check below — roughly 6.5 of ~18 minutes across 13 lines spent
+ * confirming what should have been an near-instant positive read.
+ *
+ * REAL ROOT CAUSE: this used to poll via a raw `page.waitForFunction` with
+ * a hand-rolled `a.textContent?.trim() === targetLinkText` DOM comparison —
+ * the EXACT SAME whitespace-normalization bug found and fixed for the
+ * vendor-bid rows (see gridWait.ts's collectVendorBidRows docstring: a real
+ * production capture showed this comparison matching ZERO elements for a
+ * page that had, in fact, fully rendered). That predicate never matched
+ * the target link at all, on ANY line, so it never resolved true and
+ * always burned the full timeout — the "definitive wait" was never
+ * actually observing genuine render latency, it was just failing to find
+ * its own target every single time.
+ *
+ * Fixed by inverting the check, per the explicit instruction: read via
+ * Playwright's own accessible-name-based locator resolution (the SAME
+ * mechanism findGeneratedOrderNumber's real check already correctly uses)
+ * directly, with a SHORT timeout — since the underlying state was never
+ * actually slow to render, just being watched for with the wrong
+ * predicate. A genuine absence is still a legitimate, definitive negative
+ * (findGeneratedOrderNumber's own .count() check right after this
+ * correctly reports null) — this just no longer wastes 30s establishing
+ * that on the common, fast, happy path.
+ */
+const GENERATED_ORDER_SHORT_TIMEOUT_MS = 5_000;
+
 export async function waitForGeneratedOrderNumberSettled(
   page: Page,
   linkText: string,
   orderNumberPatternSource: string,
 ): Promise<void> {
   const start = Date.now();
+  const repairLink = page.getByRole('link', { name: linkText, exact: true });
+  const targetTr = repairLink.locator('xpath=ancestor::tr[1]');
+  const orderLink = targetTr.getByRole('link', { name: new RegExp(orderNumberPatternSource) }).first();
+
   try {
-    await page.waitForFunction(
-      ({ targetLinkText, patternSource }: { targetLinkText: string; patternSource: string }) => {
-        const re = new RegExp(patternSource);
-        const links = Array.from(document.querySelectorAll('a'));
-        const targetLink = links.find((a) => a.textContent?.trim() === targetLinkText);
-        if (!targetLink) return false;
-        const tr = targetLink.closest('tr');
-        if (!tr) return false;
-        return Array.from(tr.querySelectorAll('a')).some((a) => re.test((a.textContent ?? '').trim()));
-      },
-      { targetLinkText: linkText, patternSource: orderNumberPatternSource },
-      { timeout: GRID_WAIT_TIMEOUT_MS, polling: GRID_WAIT_POLL_MS },
-    );
+    await orderLink.waitFor({ state: 'attached', timeout: GENERATED_ORDER_SHORT_TIMEOUT_MS });
     console.log(`[grid-wait] generated-order-number for "${linkText}" appeared in ${Date.now() - start}ms`);
   } catch {
     // Swallowed deliberately: findGeneratedOrderNumber's own .count() check
-    // right after this correctly reports null on a genuine 30s absence —
+    // right after this correctly reports null on a genuine absence —
     // already handled correctly downstream.
     console.log(
-      `[grid-wait] generated-order-number for "${linkText}" did not appear within ${GRID_WAIT_TIMEOUT_MS}ms — ` +
+      `[grid-wait] generated-order-number for "${linkText}" did not appear within ${GENERATED_ORDER_SHORT_TIMEOUT_MS}ms — ` +
         `proceeding to the real check, which may still correctly report null.`,
     );
   }

@@ -4,7 +4,17 @@
  * that reads them. See the spec doc for which vendor uses which shape.
  */
 
-export type TerminalState = 'ISSUE_AND_DOCK' | 'AUTHORIZATION_ONLY';
+/**
+ * CLAUDE_CODE_PROMPT ("Create Order Only" terminal state) — a third
+ * terminal state alongside the original two: the RO is created (Schedule
+ * Work Package runs normally) but Request Authorization/Issue Order/Move
+ * to Dock are never reached. Currently only ever entered via the single,
+ * explicit zero-usage-on-a-USSTG-line allowlist (see
+ * shared/createOrderOnly.ts) — never a normal per-vendor default the way
+ * the other two states are (no VendorConfig field sets this as its
+ * defaultTerminalState).
+ */
+export type TerminalState = 'ISSUE_AND_DOCK' | 'AUTHORIZATION_ONLY' | 'CREATE_ORDER_ONLY';
 export type UsageTableExpectation = 'expectedPresent' | 'expectedAbsent';
 
 export interface AuthFlowOverride {
@@ -42,6 +52,38 @@ export type VendorSearchStrategy =
   | { kind: 'vendorCode'; vendorCode: string }
   | { kind: 'partNumberList'; partNumbers: readonly string[] };
 
+/**
+ * CLAUDE_CODE_PROMPT (vendor 7A9Y2 "shipset" case) — a vendor-level case
+ * triggered by a signal the existing AuthFlowOverride mechanism can't
+ * express (a home-page grid-row TASK NAME, not a serial-number prefix), and
+ * whose deltas span far more than authFlow/terminalState/usageTable (it
+ * also touches transportation, notes, charge-to-account, and two guard
+ * suppressions). Deliberately a SEPARATE mechanism from AuthFlowOverride
+ * rather than shoehorned into it — the two triggers and their field sets
+ * don't overlap enough to unify without forcing every non-7A9Y2 vendor to
+ * carry irrelevant fields. See resolveShipsetCase() below for how this is
+ * matched, and vendorCodeWriteUp.ts's runVendorCodeWriteUp() for where each
+ * field is consumed.
+ */
+export interface ShipsetCaseConfig {
+  /** Human-readable id for logging/audit, e.g. "SEAT_REFRESH_SHIPSET". */
+  id: string;
+  /** Exact text expected on the USSTG line's own Task column — matched character-for-character, read BEFORE the line is opened. */
+  expectedUsstgTaskName: string;
+  /** null = skip the Transportation Type step entirely (leave whatever MXI already shows untouched) — never an empty-string value that gets typed in. */
+  transportationType: string | null;
+  authFlow: string;
+  terminalState: TerminalState;
+  /** The exact, fixed Note to Vendor text for this case — never composed from usage/part data. */
+  notesText: string;
+  /** false = skip the Move to Dock step after Issue Order on this run (temporary safety measure — flip to re-enable, no code change needed). */
+  moveToDockOnInitialRun: boolean;
+  /** true = a missing assigned task is not a blocker for this case — log and continue, never attempt Ad-Hoc creation or return an exception for it. */
+  allowMissingAssignedTask: boolean;
+  /** Always written literally, regardless of what MXI autofills — never derived via buildChargeToAccountWithSuffix. */
+  chargeToAccount: string;
+}
+
 export interface VendorConfig {
   id: string;
   displayName: string;
@@ -50,6 +92,31 @@ export interface VendorConfig {
   authFlowPolicy: AuthFlowPolicy;
   defaultTerminalState: TerminalState;
   warrantyEligible: boolean;
+  /** Optional — only vendors with a genuine alternate-case trigger (today: just 7A9Y2) set this. */
+  shipsetCase?: ShipsetCaseConfig;
+}
+
+/**
+ * Resolves whether the shipset case applies, from the USSTG line's own
+ * home-page task name (read BEFORE the line is opened — the task name
+ * inside the work package can be blank and reading from there causes false
+ * negatives, per explicit instruction). Logs which branch was taken and the
+ * exact text read, win or lose, so a mis-detection is diagnosable from the
+ * run log alone. Returns null for any vendor with no shipsetCase configured
+ * at all (the overwhelming majority) — a single cheap check, not a
+ * meaningful branch, for those vendors.
+ */
+export function resolveShipsetCase(usstgTaskName: string | null, config: VendorConfig): ShipsetCaseConfig | null {
+  if (!config.shipsetCase) return null;
+
+  const matched = usstgTaskName !== null && usstgTaskName.trim() === config.shipsetCase.expectedUsstgTaskName.trim();
+  console.log(
+    `[vendor-config] ${config.id}: USSTG line task name read as ` +
+      `${usstgTaskName === null ? '(none found)' : `"${usstgTaskName}"`} — expected ` +
+      `"${config.shipsetCase.expectedUsstgTaskName}" — ${matched ? 'MATCHED' : 'did not match'}. ` +
+      `${matched ? `Applying shipset case "${config.shipsetCase.id}".` : 'Falling through to standard handling.'}`,
+  );
+  return matched ? config.shipsetCase : null;
 }
 
 /**
@@ -147,7 +214,7 @@ export const WARRANTY_TERMINAL_STATE_CHARGE_TO_ACCOUNT_SUFFIX = 'REPAIR';
 export function buildWarrantyTerminalStateVendorConfig(
   vendorCode: string,
   displayName: string,
-  overrides?: Partial<Pick<VendorConfig, 'form' | 'authFlowPolicy' | 'defaultTerminalState' | 'warrantyEligible'>>,
+  overrides?: Partial<Pick<VendorConfig, 'form' | 'authFlowPolicy' | 'defaultTerminalState' | 'warrantyEligible' | 'shipsetCase'>>,
 ): VendorConfig {
   return {
     id: vendorCode.toLowerCase(),

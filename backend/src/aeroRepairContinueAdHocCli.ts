@@ -72,7 +72,7 @@ async function main(): Promise<void> {
     }
     console.log(`Confirmed: ${linkText} has a real task assigned. Proceeding through the rest of the flow for real.`);
 
-    const result = await processLine(db, client, env, partNumber, serialNumber);
+    const result = await processLine(db, client, env, partNumber, serialNumber, 'second');
     await logProcessLineResult({ partNumber, serialNumber }, result, env);
 
     if (result.status === 'completed') {

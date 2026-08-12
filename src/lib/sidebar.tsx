@@ -37,6 +37,9 @@ export function SidebarProvider({ children }: { children: ReactNode }) {
   )
 }
 
+// Standard context+hook pairing; splitting into a second file for HMR
+// purity isn't worth it for a hook this small.
+// eslint-disable-next-line react-refresh/only-export-components
 export function useSidebar() {
   const ctx = useContext(SidebarContext)
   if (!ctx) throw new Error('useSidebar must be used within SidebarProvider')

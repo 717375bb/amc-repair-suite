@@ -347,10 +347,44 @@ export interface WriteUpActionInsert {
     // same pattern as every prior outcome addition.
     | 'authorized_only'
     | 'issued_and_docked'
+    // CLAUDE_CODE_PROMPT (vendor 7A9Y2 "shipset" case, Delta 5) — a
+    // genuinely distinct terminal state: issued for real, but Move to Dock
+    // deliberately skipped this run. See vendorCodeWriteUp.ts's
+    // VendorCodeWriteUpOutcome docstring for why this can't reuse
+    // 'issued_and_docked'.
+    | 'issued_not_docked'
+    // CLAUDE_CODE_PROMPT ("Create Order Only" terminal state) — the RO was
+    // created but Request Authorization/Issue Order/Move to Dock were
+    // never reached; a DO NOT SHIP note was recorded on the real order
+    // instead. Distinct from every existing outcome — never conflated
+    // with a normal completion or with the original blocking exception it
+    // replaces for this one allowlisted condition.
+    | 'order_created_do_not_ship'
     | 'no_candidate_lines'
     | 'usage_table_absent_unexpected'
     | 'authorization_not_confirmed'
-    | 'no_task_found_for_bn_line';
+    | 'no_removal_task_info_found'
+    | 'grid_state_indeterminate'
+    // CLAUDE_CODE_PROMPT_AERO_BUGS.md Defect 2 additions — the old
+    // 'unassigned_task_present' terminal SKIP (still above) is superseded
+    // going forward: a genuine unassigned task is now auto-assigned and
+    // the same pass continues, recorded via the new
+    // 'unassigned_task_assigned' row (see processLine.ts) rather than a
+    // terminal outcome. Only the genuinely ambiguous/suspect shapes below
+    // still short-circuit.
+    | 'unassigned_task_assigned'
+    | 'unassigned_task_multiple_present'
+    | 'unassigned_task_detection_suspect'
+    // CLAUDE_CODE_PROMPT_WRITEUP_FAILSAFE.md Layer 3 — a non-terminal,
+    // audit-only row: a main-pass line hit a retryable failure (indeterminate
+    // read, target not found in an incomplete grid, etc.) and was set aside
+    // for the automatic end-of-run second pass rather than immediately
+    // recorded as a final outcome. Every quarantined line gets exactly one
+    // more real outcome row later (from the second-pass processLine call) —
+    // querying both rows together for the same part/serial shows which
+    // lines were quarantined, which recovered, and which still needed
+    // review after the second attempt.
+    | 'quarantined';
   stationCode: string | null;
   routedLocation: string | null;
   filledFieldsJson: string | null;

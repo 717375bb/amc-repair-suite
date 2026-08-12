@@ -26,8 +26,42 @@ import type { Page } from 'playwright';
  * it worse, not better. This adds a real, increasing pause BETWEEN
  * attempts (not before the first) so a retry actually has a chance of
  * landing in a recovered state.
+ *
+ * CLAUDE_CODE_PROMPT_WRITEUP_FAILSAFE.md Layer 2 — escalated from the
+ * original 3s/6s schedule to 5s/15s/30s, tuned above the observed
+ * business-hours latency spike (confirmed real: the failing 53-order run
+ * was 9:10-10:20 AM ET) and sized larger for the large-result-set class of
+ * part number (`90001200-1`-class) that this project has repeatedly found
+ * needs the most real time to fully render.
  */
+const RETRY_BACKOFF_SCHEDULE_MS = [5000, 15000, 30000];
+
 export async function waitBeforeRetry(page: Page, attemptJustFailed: number): Promise<void> {
-  const delayMs = attemptJustFailed * 3000; // 3s after attempt 1 fails, 6s after attempt 2, ...
+  const delayMs = RETRY_BACKOFF_SCHEDULE_MS[attemptJustFailed - 1] ?? RETRY_BACKOFF_SCHEDULE_MS[RETRY_BACKOFF_SCHEDULE_MS.length - 1];
   await page.waitForTimeout(delayMs);
+}
+
+/**
+ * CLAUDE_CODE_PROMPT_WRITEUP_FAILSAFE.md Layer 3, requirement 4 — REAL GAP
+ * FOUND: `runAeroRepairWriteUp`'s own catch-all (writeUp.ts) previously
+ * swallowed EVERY thrown error, including a genuine MXI session/login
+ * loss, into a per-line `{status: 'error'}` outcome — contradicting this
+ * module's own documented intent (see aeroRepairBatchExecuteCli.ts's
+ * docstring: "Session/login loss is the one exception that halts entirely
+ * ... same standing rule as the ESD writer's mxiClient halt-on-session-loss
+ * behavior") and the already-correct precedent in
+ * vendorCodeBatchDiscoveryCli.ts, which explicitly re-throws on these same
+ * message substrings rather than treating session death as a per-line
+ * failure. Matched against mxiClient.ts's own real thrown messages
+ * (`MXI session not established: ...`, `MXI session lost and
+ * re-authentication failed (...)`, `Session still not valid after
+ * re-authentication attempt.`) — not guessed.
+ */
+export function isSessionLossError(message: string): boolean {
+  return (
+    message.includes('MXI session not established') ||
+    message.includes('MXI session lost') ||
+    message.includes('Session still not valid') ||
+    message.includes('Re-authentication failed')
+  );
 }

@@ -43,6 +43,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   )
 }
 
+// Standard context+hook pairing; splitting into a second file for HMR
+// purity isn't worth it for a hook this small.
+// eslint-disable-next-line react-refresh/only-export-components
 export function useTheme() {
   const ctx = useContext(ThemeContext)
   if (!ctx) throw new Error('useTheme must be used within ThemeProvider')

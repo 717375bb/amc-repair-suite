@@ -11,7 +11,9 @@ import { emailQuotes } from '../data/mockData'
 import { statusTone } from '../lib/status'
 
 export default function EmailQuoteAnalysis() {
-  const [selectedId, setSelectedId] = useState(emailQuotes[0].id)
+  const [selectedId, setSelectedId] = useState<(typeof emailQuotes)[number]['id']>(
+    emailQuotes[0].id,
+  )
   const selected =
     emailQuotes.find((email) => email.id === selectedId) ?? emailQuotes[0]
 

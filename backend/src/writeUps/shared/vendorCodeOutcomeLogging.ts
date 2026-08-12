@@ -24,7 +24,12 @@ export function logVendorCodeOutcome(
   let orderNumber: string | null = null;
   let success = true;
   let partNumberForLog = '(unknown)';
-  if (outcome.status === 'authorized_only' || outcome.status === 'issued_and_docked') {
+  if (
+    outcome.status === 'authorized_only' ||
+    outcome.status === 'issued_and_docked' ||
+    outcome.status === 'issued_not_docked' ||
+    outcome.status === 'order_created_do_not_ship'
+  ) {
     partNumberForLog = outcome.fields.partNumber;
   } else if ('partNumber' in outcome && outcome.partNumber) {
     partNumberForLog = outcome.partNumber;
@@ -47,6 +52,25 @@ export function logVendorCodeOutcome(
       console.log(filledFieldsJson);
       break;
     }
+    case 'issued_not_docked': {
+      dbOutcome = 'issued_not_docked';
+      filledFieldsJson = JSON.stringify(outcome.fields, null, 2);
+      orderNumber = outcome.fields.generatedOrderNumber;
+      console.log(`\n=== ISSUED, NOT DOCKED — real order issued; Move to Dock intentionally skipped this run (shipset Delta 5). ===`);
+      console.log(filledFieldsJson);
+      break;
+    }
+    case 'order_created_do_not_ship': {
+      dbOutcome = 'order_created_do_not_ship';
+      filledFieldsJson = JSON.stringify({ ...outcome.fields, reason: outcome.reason, externalReferenceNote: outcome.externalReferenceNote }, null, 2);
+      orderNumber = outcome.fields.generatedOrderNumber;
+      console.log(
+        `\n=== CREATE ORDER ONLY — real order created, DO NOT SHIP recorded (reason: "${outcome.reason}"). ` +
+          `No authorization, issue, or dock. ===`,
+      );
+      console.log(filledFieldsJson);
+      break;
+    }
     case 'no_candidate_lines': {
       dbOutcome = 'no_candidate_lines';
       console.log(`No candidate lines found for vendor code "${outcome.vendorCode}".`);
@@ -59,11 +83,12 @@ export function logVendorCodeOutcome(
       success = false;
       break;
     }
-    case 'no_task_found_for_bn_line': {
-      dbOutcome = 'no_task_found_for_bn_line';
+    case 'no_removal_task_info_found': {
+      dbOutcome = 'no_removal_task_info_found';
       console.error(
-        `Part ${outcome.partNumber} / SN ${outcome.serialNumber}: no task found on this BN line. Its real name/description ` +
-          `is the actual removal reason and can't be guessed — flagging for manual review rather than fabricating an Ad-Hoc task.`,
+        `Part ${outcome.partNumber} / SN ${outcome.serialNumber}: no task assigned, and this line's own Removal ` +
+          `Information has no Task Name/ID either. That data is the actual removal reason and can't be guessed — ` +
+          `flagging for manual review rather than fabricating an Ad-Hoc task.`,
       );
       success = false;
       break;

@@ -67,15 +67,18 @@ export function Badge({
 export function PrimaryButton({
   children,
   onClick,
+  disabled = false,
 }: {
   children: ReactNode
   onClick?: () => void
+  disabled?: boolean
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className="inline-flex items-center gap-2 rounded-md bg-accent px-3.5 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-hover"
+      disabled={disabled}
+      className="inline-flex items-center gap-2 rounded-md bg-accent px-3.5 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-accent"
     >
       {children}
     </button>
@@ -85,15 +88,18 @@ export function PrimaryButton({
 export function SecondaryButton({
   children,
   onClick,
+  disabled = false,
 }: {
   children: ReactNode
   onClick?: () => void
+  disabled?: boolean
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className="inline-flex items-center gap-2 rounded-md border border-border bg-surface px-3.5 py-2 text-sm font-medium text-text transition-colors hover:bg-bg"
+      disabled={disabled}
+      className="inline-flex items-center gap-2 rounded-md border border-border bg-surface px-3.5 py-2 text-sm font-medium text-text transition-colors hover:bg-bg disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-surface"
     >
       {children}
     </button>
