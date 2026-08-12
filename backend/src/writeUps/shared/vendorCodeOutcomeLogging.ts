@@ -28,7 +28,8 @@ export function logVendorCodeOutcome(
     outcome.status === 'authorized_only' ||
     outcome.status === 'issued_and_docked' ||
     outcome.status === 'issued_not_docked' ||
-    outcome.status === 'order_created_do_not_ship'
+    outcome.status === 'order_created_do_not_ship' ||
+    outcome.status === 'order_created_awaiting_rma'
   ) {
     partNumberForLog = outcome.fields.partNumber;
   } else if ('partNumber' in outcome && outcome.partNumber) {
@@ -67,6 +68,16 @@ export function logVendorCodeOutcome(
       console.log(
         `\n=== CREATE ORDER ONLY — real order created, DO NOT SHIP recorded (reason: "${outcome.reason}"). ` +
           `No authorization, issue, or dock. ===`,
+      );
+      console.log(filledFieldsJson);
+      break;
+    }
+    case 'order_created_awaiting_rma': {
+      dbOutcome = 'order_created_awaiting_rma';
+      filledFieldsJson = JSON.stringify({ ...outcome.fields, externalReferenceNote: outcome.externalReferenceNote }, null, 2);
+      orderNumber = outcome.fields.generatedOrderNumber;
+      console.log(
+        `\n=== RMA — real order created, "${outcome.externalReferenceNote}" recorded. No authorization, issue, or dock. ===`,
       );
       console.log(filledFieldsJson);
       break;

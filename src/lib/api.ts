@@ -16,6 +16,8 @@ export type LineStatus = 'in_progress' | 'completed' | 'skipped' | 'exception' |
 
 export interface VendorListEntry {
   id: string
+  /** The vendor code itself (e.g. "0T1Y4") — only present for searchKind: 'vendorCode' entries. */
+  code?: string
   displayName: string
   searchKind: VendorSearchKind
 }

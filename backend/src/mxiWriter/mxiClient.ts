@@ -56,7 +56,7 @@ export class MxiClient {
     }
 
     try {
-      this.browser = await chromium.launch({ headless: false });
+      this.browser = await chromium.launch({ headless: this.config.headless });
       this.context = await this.browser.newContext();
       this.page = await this.context.newPage();
       await login(this.page, this.config.username, this.config.password, this.config.baseUrl);

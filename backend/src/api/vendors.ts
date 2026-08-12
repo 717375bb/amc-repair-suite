@@ -16,6 +16,8 @@ export type VendorSearchKind = 'partNumber' | 'vendorCode';
 
 export interface VendorListEntry {
   id: string;
+  /** The vendor code itself (e.g. "0T1Y4") — only present for searchKind: 'vendorCode' entries. */
+  code?: string;
   displayName: string;
   searchKind: VendorSearchKind;
 }
@@ -31,6 +33,7 @@ export function listVendors(): VendorListEntry[] {
 
   const vendorCodeVendors: VendorListEntry[] = Object.values(VENDOR_REGISTRY).map((config) => ({
     id: config.id,
+    code: config.search.kind === 'vendorCode' ? config.search.vendorCode : undefined,
     displayName: config.displayName,
     searchKind: 'vendorCode' as const,
   }));

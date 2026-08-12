@@ -1,4 +1,4 @@
-import type { MxiEnv } from './config.js';
+import { readHeadlessFlag, type MxiEnv } from './config.js';
 import { MxiClient } from './mxiClient.js';
 
 /**
@@ -27,7 +27,7 @@ export async function createReadyMxiClient(env: MxiEnv = 'stage'): Promise<MxiCl
     );
   }
 
-  const client = new MxiClient({ env, baseUrl, username, password });
+  const client = new MxiClient({ env, baseUrl, username, password, headless: readHeadlessFlag() });
   await client.initialize();
 
   const state = client.getState();

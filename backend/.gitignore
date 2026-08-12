@@ -2,9 +2,20 @@ data/
 .env
 dist/
 node_modules/
+*.tsbuildinfo
 discovery-recording.ts
 data/mxi-stage-storage-state.json
 data/mxi-production-storage-state.json
+
+# Real vendor/order spreadsheets dropped directly under backend/ (or its
+# subdirectories, including data/) for manual testing — never real business
+# data in git. Matches at any depth relative to this file, so this covers
+# both backend/*.xlsm|xlsx and backend/data/*.xlsm|xlsx (the latter already
+# covered by the data/ rule above too — kept explicit here as a second,
+# independent guard so it still holds even if the data/ rule is ever
+# narrowed).
+*.xlsm
+*.xlsx
 
 # Naming convention: every one-off discovery/codegen-recording or scratch
 # diagnostic script lives directly under backend/ and is named

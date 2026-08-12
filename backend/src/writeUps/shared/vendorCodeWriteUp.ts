@@ -1,7 +1,7 @@
 import type { Page } from 'playwright';
 import type { MxiClient } from '../../mxiWriter/mxiClient.js';
 import { waitBeforeRetry } from '../aeroRepair/retryBackoff.js';
-import { resolveAuthFlowPolicy, resolveShipsetCase, type ResolvedAuthFlowPolicy, type ShipsetCaseConfig, type TerminalState, type VendorConfig } from './vendorConfig.js';
+import { AUTH_FLOW_REPAIR, resolveAuthFlowPolicy, resolveShipsetCase, type ResolvedAuthFlowPolicy, type ShipsetCaseConfig, type TerminalState, type VendorConfig } from './vendorConfig.js';
 import { buildChargeToAccountWithSuffix } from './chargeToAccount.js';
 import { classifyUsageTable } from './usageTable.js';
 import {
@@ -31,7 +31,9 @@ import { issueGeneratedOrder, moveOutboundShipmentToDock, readOrderRealState } f
 import { isUnassignedTaskPresent, navigateToUnassignedTasksView, closeUnassignedTasksView, waitForUnassignedTasksSectionResolved } from './unassignedTasks.js';
 import { isNoTasksAssignedException } from '../aeroRepair/noTaskException.js';
 import { closePartOwnDetails, openPartOwnDetails, readPartOwnDetails, type PartOwnDetails } from './partOwnDetails.js';
-import { completeCreateOrderOnly, composeDoNotShipNote, verifyExternalReferenceCommitted, ZERO_USAGE_DO_NOT_SHIP_REASON } from './createOrderOnly.js';
+import { completeCreateOrderOnly, composeAwaitingRmaNote, composeDoNotShipNote, verifyExternalReferenceCommitted, ZERO_USAGE_DO_NOT_SHIP_REASON } from './createOrderOnly.js';
+import { closePartDetailsReceivingNotes, openPartDetailsReceivingNotes, readPartDetailsReceivingNotes } from './partDetailsReceivingNotes.js';
+import { isRmaVendor } from './rmaVendors.js';
 import { captureVendorCodeGridDiagnostics } from './vendorCodeGridDiagnostics.js';
 import { extractRemovalTaskInfo } from './removalTaskInfo.js';
 
@@ -365,6 +367,15 @@ export type VendorCodeWriteUpOutcome =
    * can never drift apart.
    */
   | { status: 'order_created_do_not_ship'; fields: VendorCodeWriteUpFields; reason: string; externalReferenceNote: string }
+  /**
+   * CLAUDE_CODE_PROMPT (#1, RMA framework) — a genuinely distinct terminal
+   * state from order_created_do_not_ship above: gated on vendor MEMBERSHIP
+   * (isRmaVendor), not a per-line data condition, and stops at the same
+   * point (right after Schedule Work Package -> OK, before Request
+   * Authorization). Dormant this batch — RMA_VENDOR_IDS is empty, see
+   * shared/rmaVendors.ts.
+   */
+  | { status: 'order_created_awaiting_rma'; fields: VendorCodeWriteUpFields; externalReferenceNote: string }
   | { status: 'no_candidate_lines'; vendorCode: string }
   | { status: 'unassigned_task_present'; partNumber: string; serialNumber: string; taskDetail: string }
   | { status: 'no_removal_task_info_found'; partNumber: string; serialNumber: string }
@@ -453,6 +464,18 @@ export async function runVendorCodeWriteUp(
         }
       : resolveAuthFlowPolicy(candidate.serialNumber, config);
     const isBnFlow = resolved.matchedOverrideId === BN_OVERRIDE_ID;
+    // CLAUDE_CODE_PROMPT (#1, new vendors) — until this batch, REPAIR
+    // authorization was ONLY ever reached via the BN override or a shipset
+    // case, so isBnFlow doubled as "is this a REPAIR-authorization flow"
+    // for the retry-until-APPROVED gate below. 76863/4X623/6FVE5/75818 are
+    // the first vendors where REPAIR is the DEFAULT (no override at all) —
+    // isBnFlow is false for them even though they need the same
+    // retry-until-APPROVED discipline as a real BN line. isRepairFlow keys
+    // on the actually-resolved authFlow instead, a strict superset of
+    // isBnFlow (every BN-override line already resolves to AUTH_FLOW_REPAIR
+    // by construction), so this is a widening, not a behavior change, for
+    // every existing vendor.
+    const isRepairFlow = resolved.authFlow === AUTH_FLOW_REPAIR;
 
     await openVendorCodeCandidate(page, candidate);
     await waitForWorkPackageDetailsResolved(page);
@@ -618,6 +641,25 @@ export async function runVendorCodeWriteUp(
         ? composeNotesForBnLine(config.form.notesHeader)
         : composeNotesForNormalLine(partOwnDetails, config.form.notesHeader);
       await closePartOwnDetails(page);
+
+      // CLAUDE_CODE_PROMPT (#1, new vendors) — the part-level Details /
+      // receiving-notes step, real from discovery-76863-AJS-sn-recording.ts.
+      // Only vendors confirmed to show this in their own recording opt in
+      // (76863, 1DH10) — confirmed ABSENT from 4X623's recording, so never
+      // assumed universal. Dormant read: the value is logged for visibility
+      // but not consumed by any charge-to-account decision this batch
+      // (that's Aerotron 2N512's rule, deferred). Real recorded sequence
+      // runs this AFTER closePartOwnDetails and BEFORE the recheck below —
+      // not the other way around.
+      if (config.hasPartDetailsStep) {
+        await openPartDetailsReceivingNotes(page, candidate.linkText, candidate.partNumber);
+        const receivingNotes = await readPartDetailsReceivingNotes(page);
+        console.log(
+          `[vendor-config] ${config.id}: part-level receiving notes for ${candidate.partNumber}/${candidate.serialNumber}: ` +
+            `${receivingNotes ? JSON.stringify(receivingNotes) : '(none found)'} — dormant, not used in any decision this batch.`,
+        );
+        await closePartDetailsReceivingNotes(page);
+      }
     }
 
     await recheckCandidateForSchedule(page, candidate);
@@ -700,6 +742,42 @@ export async function runVendorCodeWriteUp(
       );
     }
 
+    // CLAUDE_CODE_PROMPT (#1, RMA framework) — STRUCTURAL guard, same shape
+    // as the CREATE_ORDER_ONLY guard right below: a pure vendor-MEMBERSHIP
+    // check (no notes/content scan), independent of and checked before the
+    // per-line doNotShipReason condition. Dormant this batch — isRmaVendor
+    // is false for every vendor in VENDOR_REGISTRY right now (empty
+    // RMA_VENDOR_IDS), so this branch never actually executes yet.
+    if (isRmaVendor(config)) {
+      const note = composeAwaitingRmaNote();
+      await completeCreateOrderOnly(page, generatedOrderNumber, note);
+
+      const verification = await verifyExternalReferenceCommitted(page, generatedOrderNumber, client.todoListUrl, note);
+      if (!verification.committed) {
+        throw new Error(
+          `RMA external reference verification failed for order ${generatedOrderNumber} ` +
+            `(${candidate.partNumber}/${candidate.serialNumber}): expected "${note}", got ` +
+            `"${verification.realValue ?? '(not found)'}".`,
+        );
+      }
+
+      const rmaFields: VendorCodeWriteUpFields = {
+        partNumber: candidate.partNumber,
+        serialNumber: candidate.serialNumber,
+        isBnLine: isBnFlow,
+        purchasingContact: config.form.purchasingContact,
+        returnToLocation,
+        conditions: config.form.conditions,
+        transportation: shipset && shipset.transportationType === null ? '(intentionally skipped — Delta 1)' : config.form.transportation,
+        chargeToAccountBefore,
+        chargeToAccountAfter,
+        notesText,
+        generatedOrderNumber,
+        authFlow: '(not requested — RMA vendor)',
+      };
+      return { status: 'order_created_awaiting_rma', fields: rmaFields, externalReferenceNote: note };
+    }
+
     // CLAUDE_CODE_PROMPT ("Create Order Only" terminal state) — STRUCTURAL
     // guard: this branch returns before openGeneratedOrder/Request
     // Authorization/Issue Order/Move to Dock are ever reached below, not
@@ -751,8 +829,9 @@ export async function runVendorCodeWriteUp(
     // (seeking a real, synchronous APPROVED within the session), the same
     // as Aero Repair's own REPAIR flow — not the WARRANTY branch's
     // REQUESTED-is-fine acceptance, since this is explicitly a non-warranty
-    // situation per the delta.
-    if (isBnFlow || shipset) {
+    // situation per the delta. isRepairFlow (not isBnFlow) as of #1 — see
+    // its own docstring above for why.
+    if (isRepairFlow || shipset) {
       const MAX_AUTH_ATTEMPTS = 2;
       let approved = false;
       realAuthStatus = null;

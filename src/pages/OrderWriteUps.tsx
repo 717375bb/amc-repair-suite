@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
-import { AlertTriangle, CheckCircle2, Clock, Loader2, PlayCircle, RefreshCw, XCircle } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { AlertTriangle, CheckCircle2, Clock, Loader2, PlayCircle, RefreshCw, Search, XCircle } from 'lucide-react'
 import { Badge, Card, CardHeader, PrimaryButton, SecondaryButton } from '../components/ui'
 import {
   ApiError,
@@ -422,11 +422,34 @@ function SelectState({
 }) {
   const canRun = !disabled && selectedVendorIds.size > 0 && vendors.length > 0
 
+  const [query, setQuery] = useState('')
+  // Filters by vendor code OR name — selection state (selectedVendorIds) is
+  // keyed by id and untouched by the filter, so narrowing the list never
+  // silently deselects a vendor picked before a search term was typed.
+  const filteredVendors = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return vendors
+    return vendors.filter((v) => v.code?.toLowerCase().includes(q) || v.displayName.toLowerCase().includes(q))
+  }, [vendors, query])
+
   return (
     <Card className={disabled ? 'opacity-60' : ''}>
       <CardHeader title="Select vendors" description="Choose which write-up workflows to scan for open, eligible lines." />
+      <div className="border-b border-border px-5 py-3">
+        <div className="relative">
+          <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            disabled={disabled}
+            placeholder="Search by vendor code or name..."
+            className="w-full rounded-md border border-border bg-bg py-2 pl-9 pr-3 text-sm text-text placeholder:text-muted focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
+          />
+        </div>
+      </div>
       <div className="divide-y divide-border">
-        {vendors.map((v) => (
+        {filteredVendors.map((v) => (
           <label
             key={v.id}
             className={`flex items-center justify-between px-5 py-3 ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-bg'}`}
@@ -439,12 +462,19 @@ function SelectState({
                 onChange={() => onToggleVendor(v.id)}
                 className="h-4 w-4 rounded border-border accent-accent"
               />
-              <span className="text-sm text-text">{v.displayName}</span>
+              <span className="text-sm text-text">
+                {v.code ? <span className="font-medium text-accent">{v.code}</span> : null}
+                {v.code ? ' — ' : ''}
+                {v.displayName}
+              </span>
             </div>
             <Badge tone="neutral">{v.searchKind === 'partNumber' ? 'Part number list' : 'Vendor code search'}</Badge>
           </label>
         ))}
         {vendors.length === 0 && <p className="px-5 py-6 text-sm text-muted">Loading vendors...</p>}
+        {vendors.length > 0 && filteredVendors.length === 0 && (
+          <p className="px-5 py-6 text-sm text-muted">No vendors match "{query}".</p>
+        )}
       </div>
       <div className="flex justify-end border-t border-border px-5 py-4">
         <PrimaryButton onClick={onRun} disabled={!canRun}>

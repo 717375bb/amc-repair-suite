@@ -360,6 +360,13 @@ export interface WriteUpActionInsert {
     // with a normal completion or with the original blocking exception it
     // replaces for this one allowlisted condition.
     | 'order_created_do_not_ship'
+    // CLAUDE_CODE_PROMPT (#1, RMA framework) — a genuinely distinct
+    // terminal state from 'order_created_do_not_ship': written by a pure
+    // vendor-membership rule (not a per-line data condition), and the real
+    // MXI note text differs ("AWAITING RMA" vs "DO NOT SHIP ..."). Dormant
+    // for now — the RMA vendor membership list is empty, see
+    // shared/rmaVendors.ts.
+    | 'order_created_awaiting_rma'
     | 'no_candidate_lines'
     | 'usage_table_absent_unexpected'
     | 'authorization_not_confirmed'

@@ -274,6 +274,16 @@ export function vendorCodeOutcomeToLogEvent(
         orderNumber: outcome.fields.generatedOrderNumber ?? undefined,
         detail: outcome.externalReferenceNote,
       };
+    case 'order_created_awaiting_rma':
+      return {
+        ...base,
+        partNumber: outcome.fields.partNumber,
+        status: 'exception',
+        summary: `Order ${outcome.fields.generatedOrderNumber} created — awaiting RMA. Needs manual review before it can proceed.`,
+        exceptionType: 'order_created_awaiting_rma',
+        orderNumber: outcome.fields.generatedOrderNumber ?? undefined,
+        detail: outcome.externalReferenceNote,
+      };
     case 'no_candidate_lines':
       return { ...base, status: 'exception', summary: 'No lines currently found for this vendor. Needs manual review.', exceptionType: 'no_candidate_lines' };
     case 'unassigned_task_present':

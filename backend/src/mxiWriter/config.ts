@@ -5,6 +5,8 @@ export interface MxiConfig {
   baseUrl: string;
   username: string;
   password: string;
+  /** Playwright launch mode. Headless by default; only headed when HEADLESS is the literal string "false". */
+  headless: boolean;
 }
 
 /**
@@ -35,7 +37,19 @@ export function loadMxiConfig(): MxiConfig {
     baseUrl,
     username: process.env.MXI_USERNAME ?? '',
     password: process.env.MXI_PASSWORD ?? '',
+    headless: readHeadlessFlag(),
   };
+}
+
+/**
+ * Shared by loadMxiConfig() and cliMxiClient.ts's own separate MxiConfig
+ * construction, so the two credential paths can't drift on what HEADLESS
+ * means. Defaults headless. Only the exact literal "false" runs headed —
+ * unset, "False", "0", or a typo all stay headless, since headless is the
+ * safe default to fall back to, not the one that needs guarding against.
+ */
+export function readHeadlessFlag(): boolean {
+  return process.env.HEADLESS !== 'false';
 }
 
 /**

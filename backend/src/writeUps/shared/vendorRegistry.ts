@@ -1,4 +1,10 @@
-import { AUTH_FLOW_REPAIR, buildWarrantyTerminalStateVendorConfig, type VendorConfig } from './vendorConfig.js';
+import {
+  AUTH_FLOW_REPAIR,
+  buildVendorFormConfig,
+  buildWarrantyTerminalStateVendorConfig,
+  WARRANTY_TERMINAL_STATE_NOTES_HEADER,
+  type VendorConfig,
+} from './vendorConfig.js';
 
 /**
  * Every vendor using the "vendor-code search + BN-prefix override +
@@ -15,10 +21,10 @@ import { AUTH_FLOW_REPAIR, buildWarrantyTerminalStateVendorConfig, type VendorCo
  * don't silently assume identical.
  */
 export const VENDOR_REGISTRY: Readonly<Record<string, VendorConfig>> = Object.freeze({
-  '0T1Y4': buildWarrantyTerminalStateVendorConfig('0T1Y4', 'Vendor 0T1Y4'),
-  VC01059: buildWarrantyTerminalStateVendorConfig('VC01059', 'Vendor VC01059'),
-  '68184': buildWarrantyTerminalStateVendorConfig('68184', 'Vendor 68184'),
-  '10933': buildWarrantyTerminalStateVendorConfig('10933', 'Vendor 10933'),
+  '0T1Y4': buildWarrantyTerminalStateVendorConfig('0T1Y4', 'BARFIELD PRECISION ELECTRONICS LLC'),
+  VC01059: buildWarrantyTerminalStateVendorConfig('VC01059', 'ARC - ACTION RESEARCH CORPORATION'),
+  '68184': buildWarrantyTerminalStateVendorConfig('68184', 'ARKWIN INDUSTRIES INC'),
+  '10933': buildWarrantyTerminalStateVendorConfig('10933', 'AVIONIC INSTRUMENTS LLC'),
   // 30242 and 0GZF3: real, confirmed difference in the auth-request step —
   // both can surface a "vendor minimum purchase amount" confirmation
   // dialog (see discovery-noprice-recording.ts). Handled generically in
@@ -30,11 +36,11 @@ export const VENDOR_REGISTRY: Readonly<Record<string, VendorConfig>> = Object.fr
   // either vendor at the time this was added) — treat the first real hit
   // on either of these two with the same scrutiny as any other first-time
   // mechanism.
-  '30242': buildWarrantyTerminalStateVendorConfig('30242', 'Vendor 30242'),
-  '0GZF3': buildWarrantyTerminalStateVendorConfig('0GZF3', 'Vendor 0GZF3'),
-  VC00564: buildWarrantyTerminalStateVendorConfig('VC00564', 'Vendor VC00564'),
-  '21844': buildWarrantyTerminalStateVendorConfig('21844', 'Vendor 21844'),
-  '6MXR1': buildWarrantyTerminalStateVendorConfig('6MXR1', 'Vendor 6MXR1'),
+  '30242': buildWarrantyTerminalStateVendorConfig('30242', 'AVTECHTYEE INC'),
+  '0GZF3': buildWarrantyTerminalStateVendorConfig('0GZF3', 'HEADS UP TECHNOLOGIES INC'),
+  VC00564: buildWarrantyTerminalStateVendorConfig('VC00564', 'LUMINATOR HOLDING LP'),
+  '21844': buildWarrantyTerminalStateVendorConfig('21844', 'BARFIELD INSTRUMENT CORP'),
+  '6MXR1': buildWarrantyTerminalStateVendorConfig('6MXR1', 'MEASURETECH INC'),
   // CLAUDE_CODE_PROMPT (vendor 7A9Y2 "shipset" case) — baseline behavior is
   // identical to every other vendor in this family (WARRANTY auth,
   // AUTHORIZATION_ONLY terminal state, FEDEX-2 transport, NET30/717375) —
@@ -44,7 +50,34 @@ export const VENDOR_REGISTRY: Readonly<Record<string, VendorConfig>> = Object.fr
   // see vendorConfig.ts's resolveShipsetCase() and
   // vendorCodeWriteUp.ts's runVendorCodeWriteUp() for where each field is
   // consumed.
-  '7A9Y2': buildWarrantyTerminalStateVendorConfig('7A9Y2', 'Skypaxxx Repairs', {
+  // CLAUDE_CODE_PROMPT (#1, new vendors — pilot). Repair-default family:
+  // genuinely different baseline from every vendor above — REPAIR is the
+  // DEFAULT authFlow (no BN override needed/present), always full flow
+  // (ISSUE_AND_DOCK unconditionally), warrantyEligible: false. Confirmed
+  // against the real recording (discovery-76863-AJS-sn-recording.ts):
+  // Issue Order + Move to Dock both ran even though the line's own serial
+  // isn't BN-prefixed — this vendor simply never uses the warranty path at
+  // all, not a BN-detection edge case. Charge To Account is flat
+  // COLLINSDISPATCH100 (Collins vendors only) regardless of the part-level
+  // receiving notes — hasPartDetailsStep: true still runs that navigation
+  // step for real (confirmed present in the recording), it's just dormant
+  // for this vendor's own account decision (see
+  // shared/partDetailsReceivingNotes.ts). Purchasing Contact/Conditions/
+  // Transportation all inherit the shared family defaults
+  // (717375/NET30/FEDEX-2) — the recording's own 232275 was the operator's
+  // personal ID, not a real vendor-specific value, per explicit user
+  // correction.
+  '76863': buildWarrantyTerminalStateVendorConfig('76863', 'Rockwell - Seattle', {
+    form: buildVendorFormConfig({
+      chargeToAccountSuffix: 'COLLINSDISPATCH100',
+      notesHeader: WARRANTY_TERMINAL_STATE_NOTES_HEADER,
+    }),
+    authFlowPolicy: { default: AUTH_FLOW_REPAIR, overrides: [] },
+    defaultTerminalState: 'ISSUE_AND_DOCK',
+    warrantyEligible: false,
+    hasPartDetailsStep: true,
+  }),
+  '7A9Y2': buildWarrantyTerminalStateVendorConfig('7A9Y2', 'SKYPAXXX INTERIOR REPAIRS', {
     shipsetCase: {
       id: 'SEAT_REFRESH_SHIPSET',
       expectedUsstgTaskName: 'TO_25-079-005-22-JIC (SEAT REFRESH - REMOVE AND INSTALL SEATS)',

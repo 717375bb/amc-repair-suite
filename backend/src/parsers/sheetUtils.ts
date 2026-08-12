@@ -11,6 +11,15 @@ export async function readSheetRows<T>(
   filePath: string,
   sheetName: string | undefined,
   buildRow: (get: (columnName: string) => string | null) => T | null,
+  /**
+   * Optional raw-header -> canonical-name aliases (e.g. "RO ESD" -> "MXI RO
+   * ESD" for CRA OOR — see craOorParser.ts's CRA_OOR_HEADER_ALIASES).
+   * Defaults to none, so every existing caller is unaffected. Registers the
+   * alias's canonical name against the same column as the raw header it was
+   * found under, so `get(canonicalName)` resolves correctly even though the
+   * sheet itself never uses that exact text.
+   */
+  headerAliases: Readonly<Record<string, string>> = {},
 ): Promise<T[]> {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.readFile(filePath);
@@ -25,7 +34,10 @@ export async function readSheetRows<T>(
   const headerIndex = new Map<string, number>();
   sheet.getRow(1).eachCell((cell, colNumber) => {
     const header = cleanCell(cell.value);
-    if (header) headerIndex.set(header, colNumber);
+    if (!header) return;
+    headerIndex.set(header, colNumber);
+    const alias = headerAliases[header];
+    if (alias) headerIndex.set(alias, colNumber);
   });
 
   const rows: T[] = [];

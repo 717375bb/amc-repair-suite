@@ -36,6 +36,20 @@ export function composeDoNotShipNote(reason: string): string {
 }
 
 /**
+ * CLAUDE_CODE_PROMPT (#1, RMA framework) — a fixed literal, not composed
+ * from any per-line reason (RMA is a vendor-membership rule, not a
+ * data-driven one). Reuses the exact same completeCreateOrderOnly /
+ * verifyExternalReferenceCommitted mechanics below as CREATE_ORDER_ONLY's
+ * own DO NOT SHIP note — both are just different note text on the same
+ * aPOExternalReference field, via the same order-level Details path.
+ */
+const AWAITING_RMA_NOTE = 'AWAITING RMA';
+
+export function composeAwaitingRmaNote(): string {
+  return AWAITING_RMA_NOTE;
+}
+
+/**
  * The CREATE_ORDER_ONLY terminal sequence, real from the recording: click
  * into the just-generated order, Details tab, Edit PO Details, fill the
  * External Reference field with the composed note, OK, Close. Terminates
