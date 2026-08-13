@@ -1,13 +1,13 @@
 import 'dotenv/config';
 import Database from 'better-sqlite3';
-import { getPriorMxiWriteEnvironments, insertMxiWrite } from './db/db.js';
-import { createReadyMxiClient } from './mxiWriter/cliMxiClient.js';
-import { assembleNoteText, toMxiDateFormat } from './mxiWriter/esdFormatting.js';
-import { parseEnvFlag } from './mxiWriter/parseEnvFlag.js';
-import { navigateToOrder, readIssuedCount } from './mxiWriter/selectors.js';
-import { writeEsdAndNotes } from './mxiWriter/writeEsdAndNotes.js';
-import { writeToolOutputFlags, type WriteOutcomeByOrder } from './output/writeToolOutputFlags.js';
-import type { InferenceRecord } from './types.js';
+import { getPriorMxiWriteEnvironments, insertMxiWrite } from '../db/db.js';
+import { createReadyMxiClient } from '../mxiWriter/cliMxiClient.js';
+import { assembleNoteText, toMxiDateFormat } from '../mxiWriter/esdFormatting.js';
+import { parseEnvFlag } from '../mxiWriter/parseEnvFlag.js';
+import { navigateToOrder, readIssuedCount } from '../mxiWriter/selectors.js';
+import { writeEsdAndNotes } from '../mxiWriter/writeEsdAndNotes.js';
+import { writeToolOutputFlags, type WriteOutcomeByOrder } from '../output/writeToolOutputFlags.js';
+import type { InferenceRecord } from '../types.js';
 
 /**
  * The real, permanent "approve these specific orders for real" tool —

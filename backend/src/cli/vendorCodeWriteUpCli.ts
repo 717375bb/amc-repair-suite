@@ -1,12 +1,12 @@
 import 'dotenv/config';
 import path from 'node:path';
-import { openDb } from './db/db.js';
-import type { MxiClient } from './mxiWriter/mxiClient.js';
-import { createReadyMxiClient } from './mxiWriter/cliMxiClient.js';
-import { parseEnvFlag } from './mxiWriter/parseEnvFlag.js';
-import { runVendorCodeWriteUp } from './writeUps/shared/vendorCodeWriteUp.js';
-import { getVendorConfig } from './writeUps/shared/vendorRegistry.js';
-import { logVendorCodeOutcome } from './writeUps/shared/vendorCodeOutcomeLogging.js';
+import { openDb } from '../db/db.js';
+import type { MxiClient } from '../mxiWriter/mxiClient.js';
+import { createReadyMxiClient } from '../mxiWriter/cliMxiClient.js';
+import { parseEnvFlag } from '../mxiWriter/parseEnvFlag.js';
+import { runVendorCodeWriteUp } from '../writeUps/shared/vendorCodeWriteUp.js';
+import { getVendorConfig } from '../writeUps/shared/vendorRegistry.js';
+import { logVendorCodeOutcome } from '../writeUps/shared/vendorCodeOutcomeLogging.js';
 
 /**
  * Generic, single-line, manually-invoked CLI for any vendor in

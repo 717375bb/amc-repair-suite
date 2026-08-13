@@ -1,16 +1,16 @@
 import 'dotenv/config';
 import path from 'node:path';
-import { insertWriteUpAction, openDb } from './db/db.js';
-import type { MxiClient } from './mxiWriter/mxiClient.js';
-import { createReadyMxiClient } from './mxiWriter/cliMxiClient.js';
-import { parseEnvFlag } from './mxiWriter/parseEnvFlag.js';
-import { findCandidateLinesForVendorCode } from './writeUps/shared/vendorCodeWriteUp.js';
-import { VENDOR_REGISTRY } from './writeUps/shared/vendorRegistry.js';
+import { insertWriteUpAction, openDb } from '../db/db.js';
+import type { MxiClient } from '../mxiWriter/mxiClient.js';
+import { createReadyMxiClient } from '../mxiWriter/cliMxiClient.js';
+import { parseEnvFlag } from '../mxiWriter/parseEnvFlag.js';
+import { findCandidateLinesForVendorCode } from '../writeUps/shared/vendorCodeWriteUp.js';
+import { VENDOR_REGISTRY } from '../writeUps/shared/vendorRegistry.js';
 import {
   saveVendorCodeEligibleLines,
   VENDOR_CODE_ELIGIBLE_LINES_FILE_PATH,
   type VendorCodeEligibleLineTarget,
-} from './writeUps/shared/vendorCodeEligibleLinesFile.js';
+} from '../writeUps/shared/vendorCodeEligibleLinesFile.js';
 
 /**
  * Read-only batch discovery across EVERY vendor registered in

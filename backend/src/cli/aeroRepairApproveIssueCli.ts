@@ -1,10 +1,10 @@
 import 'dotenv/config';
 import path from 'node:path';
-import { getActionableWriteUpAction, insertWriteUpIssueDecision, openDb } from './db/db.js';
-import type { MxiClient } from './mxiWriter/mxiClient.js';
-import { createReadyMxiClient } from './mxiWriter/cliMxiClient.js';
-import { parseEnvFlag } from './mxiWriter/parseEnvFlag.js';
-import { issueGeneratedOrder, readOrderRealState } from './writeUps/aeroRepair/issueOrder.js';
+import { getActionableWriteUpAction, insertWriteUpIssueDecision, openDb } from '../db/db.js';
+import type { MxiClient } from '../mxiWriter/mxiClient.js';
+import { createReadyMxiClient } from '../mxiWriter/cliMxiClient.js';
+import { parseEnvFlag } from '../mxiWriter/parseEnvFlag.js';
+import { issueGeneratedOrder, readOrderRealState } from '../writeUps/aeroRepair/issueOrder.js';
 
 /**
  * Second phase of the two-phase review gate: explicitly approves and

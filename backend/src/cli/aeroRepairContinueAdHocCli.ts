@@ -1,14 +1,14 @@
 import 'dotenv/config';
 import path from 'node:path';
-import { openDb } from './db/db.js';
-import type { MxiClient } from './mxiWriter/mxiClient.js';
-import { createReadyMxiClient } from './mxiWriter/cliMxiClient.js';
-import { parseEnvFlag } from './mxiWriter/parseEnvFlag.js';
-import { findFirstRepairLineForPart } from './writeUps/aeroRepair/partDetails.js';
-import { readAssignedTasksAreaText } from './writeUps/aeroRepair/selectors.js';
-import { isNoTasksAssignedException } from './writeUps/aeroRepair/noTaskException.js';
-import { markAdHocContinuationProven } from './writeUps/aeroRepair/adHocContinuationProof.js';
-import { logProcessLineResult, processLine } from './writeUps/aeroRepair/processLine.js';
+import { openDb } from '../db/db.js';
+import type { MxiClient } from '../mxiWriter/mxiClient.js';
+import { createReadyMxiClient } from '../mxiWriter/cliMxiClient.js';
+import { parseEnvFlag } from '../mxiWriter/parseEnvFlag.js';
+import { findFirstRepairLineForPart } from '../writeUps/aeroRepair/partDetails.js';
+import { readAssignedTasksAreaText } from '../writeUps/aeroRepair/selectors.js';
+import { isNoTasksAssignedException } from '../writeUps/aeroRepair/noTaskException.js';
+import { markAdHocContinuationProven } from '../writeUps/aeroRepair/adHocContinuationProof.js';
+import { logProcessLineResult, processLine } from '../writeUps/aeroRepair/processLine.js';
 
 /**
  * The ONE-TIME manual confirmation command for the single-candidate

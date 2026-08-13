@@ -6,11 +6,11 @@ import {
   insertWriteUpDockMove,
   openDb,
   type WriteUpIssueDecisionDbRow,
-} from './db/db.js';
-import type { MxiClient } from './mxiWriter/mxiClient.js';
-import { createReadyMxiClient } from './mxiWriter/cliMxiClient.js';
-import { readOutboundShipmentDockState } from './writeUps/aeroRepair/issueOrder.js';
-import type { AeroRepairWriteUpFields } from './writeUps/aeroRepair/writeUp.js';
+} from '../db/db.js';
+import type { MxiClient } from '../mxiWriter/mxiClient.js';
+import { createReadyMxiClient } from '../mxiWriter/cliMxiClient.js';
+import { readOutboundShipmentDockState } from '../writeUps/aeroRepair/issueOrder.js';
+import type { AeroRepairWriteUpFields } from '../writeUps/aeroRepair/writeUp.js';
 
 /**
  * Lists every real order awaiting the second phase of the two-phase review

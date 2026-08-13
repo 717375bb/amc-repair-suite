@@ -1,12 +1,12 @@
 import 'dotenv/config';
 import path from 'node:path';
-import type { MxiClient } from './mxiWriter/mxiClient.js';
-import { createReadyMxiClient } from './mxiWriter/cliMxiClient.js';
-import { parseEnvFlag } from './mxiWriter/parseEnvFlag.js';
-import { discoverEligibleLines, type DiscoveredLine } from './writeUps/aeroRepair/batchDiscovery.js';
-import { appendDiscoveryLogRows, type ExceptionRow } from './writeUps/aeroRepair/discoveryLog.js';
-import { saveEligibleLines, ELIGIBLE_LINES_FILE_PATH } from './writeUps/aeroRepair/eligibleLinesFile.js';
-import { AERO_REPAIR_PART_NUMBERS } from './writeUps/aeroRepair/constants.js';
+import type { MxiClient } from '../mxiWriter/mxiClient.js';
+import { createReadyMxiClient } from '../mxiWriter/cliMxiClient.js';
+import { parseEnvFlag } from '../mxiWriter/parseEnvFlag.js';
+import { discoverEligibleLines, type DiscoveredLine } from '../writeUps/aeroRepair/batchDiscovery.js';
+import { appendDiscoveryLogRows, type ExceptionRow } from '../writeUps/aeroRepair/discoveryLog.js';
+import { saveEligibleLines, ELIGIBLE_LINES_FILE_PATH } from '../writeUps/aeroRepair/eligibleLinesFile.js';
+import { AERO_REPAIR_PART_NUMBERS } from '../writeUps/aeroRepair/constants.js';
 
 const NO_TASK_SUGGESTED_ACTION =
   'Manually assign a task to this work package before a write-up can be created, or confirm no repair is needed.';

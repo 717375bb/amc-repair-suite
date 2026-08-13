@@ -10,6 +10,8 @@ import {
   type Session,
 } from '../auth/sessions.js';
 import { authenticateUser, changePassword, InvalidCredentialsError, registerUser, UsernameTakenError } from '../auth/authService.js';
+import { checkLoginAllowed, recordLoginFailure, recordLoginSuccess } from '../auth/loginRateLimit.js';
+import { insertAuthEvent } from '../db/authDb.js';
 
 /** Attached by requireSession once a valid session is confirmed — route handlers read req.session, never re-derive it. */
 export interface AuthedRequest extends Request {
@@ -50,6 +52,7 @@ export function registerAuthRoutes(app: Express, authDb: Database): void {
     if (!creds) return;
     try {
       const user = registerUser(authDb, creds.username, creds.password);
+      insertAuthEvent(authDb, 'register', user.username);
       const session = createSession(user.id, user.username);
       res.setHeader('Set-Cookie', buildSessionCookieHeader(session.token));
       res.status(201).json({ username: user.username });
@@ -65,13 +68,32 @@ export function registerAuthRoutes(app: Express, authDb: Database): void {
   app.post('/api/auth/login', (req, res) => {
     const creds = readCredentials(req, res);
     if (!creds) return;
+
+    // CLAUDE_CODE_PROMPT (security.md hardening pass) — checked BEFORE
+    // authenticateUser() even runs, so a locked-out username never spends
+    // the scrypt cost on yet another guess, and never gets a "wrong
+    // password" response that would let an attacker keep distinguishing
+    // guesses from a lockout by timing alone.
+    const gate = checkLoginAllowed(creds.username);
+    if (!gate.allowed) {
+      insertAuthEvent(authDb, 'login_failure', creds.username);
+      res.status(429).json({
+        error: `Too many failed login attempts. Try again in ${Math.ceil((gate.retryAfterMs ?? 0) / 60000)} minute(s).`,
+      });
+      return;
+    }
+
     try {
       const user = authenticateUser(authDb, creds.username, creds.password);
+      recordLoginSuccess(user.username);
+      insertAuthEvent(authDb, 'login_success', user.username);
       const session = createSession(user.id, user.username);
       res.setHeader('Set-Cookie', buildSessionCookieHeader(session.token));
       res.status(200).json({ username: user.username });
     } catch (err) {
       if (err instanceof InvalidCredentialsError) {
+        const justLockedOut = recordLoginFailure(creds.username);
+        insertAuthEvent(authDb, justLockedOut ? 'login_locked_out' : 'login_failure', creds.username);
         res.status(401).json({ error: err.message });
       } else {
         res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
@@ -81,7 +103,11 @@ export function registerAuthRoutes(app: Express, authDb: Database): void {
 
   app.post('/api/auth/logout', (req, res) => {
     const token = readSessionTokenFromRequest(req.header('Cookie'));
-    if (token) destroySession(token);
+    if (token) {
+      const session = getSession(token);
+      if (session) insertAuthEvent(authDb, 'logout', session.username);
+      destroySession(token);
+    }
     res.setHeader('Set-Cookie', buildClearSessionCookieHeader());
     res.status(200).json({ ok: true });
   });
@@ -100,6 +126,7 @@ export function registerAuthRoutes(app: Express, authDb: Database): void {
     }
     try {
       changePassword(authDb, session.userId, oldPassword, newPassword);
+      insertAuthEvent(authDb, 'password_change', session.username);
       res.status(200).json({ ok: true });
     } catch (err) {
       if (err instanceof InvalidCredentialsError) {

@@ -32,7 +32,33 @@ CREATE TABLE IF NOT EXISTS users (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS auth_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_type TEXT NOT NULL,
+  username TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 `;
+
+/**
+ * CLAUDE_CODE_PROMPT (security.md hardening pass) — append-only audit trail
+ * of who did what, when: 'register', 'login_success', 'login_failure',
+ * 'login_locked_out', 'logout', 'password_change'. Never stores a password
+ * or any credential material — username + event type + timestamp only.
+ * Real accountability for a tool that writes to production MXI, and the
+ * concrete evidence a repeated login_failure/login_locked_out pattern for
+ * one username is actually happening, not just theoretically possible.
+ */
+export type AuthEventType = 'register' | 'login_success' | 'login_failure' | 'login_locked_out' | 'logout' | 'password_change';
+
+export function insertAuthEvent(db: Database.Database, eventType: AuthEventType, username: string): void {
+  db.prepare('INSERT INTO auth_events (event_type, username, created_at) VALUES (?, ?, ?)').run(
+    eventType,
+    username,
+    new Date().toISOString(),
+  );
+}
 
 export function openAuthDb(dbPath: string): Database.Database {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });

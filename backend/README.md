@@ -46,6 +46,33 @@ on every run.
   swappable AI provider interface (`types.ts`, `anthropicProvider.ts`)
 - `src/db/` — SQLite schema + audit persistence
 - `src/output/` — Excel export
+- `src/cli/` — every standalone CLI entry point (the ones `package.json`'s
+  `scripts` invoke directly with `tsx`) — moved here as of the repo
+  restructuring pass (2026-08-13) so they're not sitting loose alongside the
+  organized module folders above. `server.ts` (the HTTP entry point) and
+  `types.ts` (shared domain types) stay at `src/` root — genuinely different
+  kinds of things from a one-shot CLI script.
 
 See `inference/constants.ts` for the buffer-day constants referenced in the
-decision logic.
+decision logic. This README predates Phase 2/the MXI writer/the web UI and
+hasn't been fully updated to match — `CLAUDE.md` at the repo root is the
+living, currently-accurate reference; treat this file as an introduction to
+the original Phase 1 pipeline specifically.
+
+## Recording a new MXI discovery/codegen script
+
+`npm run mxi:save-storage-state -- [--env production]` logs in and saves an
+authenticated browser session to `data/mxi-{stage,production}-storage-state.json`
+— load it into Playwright codegen so a new recording starts already logged
+in (no credentials typed or captured during the recording itself):
+
+```bash
+npm run mxi:save-storage-state -- --env production
+npx playwright codegen --load-storage=data/mxi-production-storage-state.json \
+  --output=discovery-<vendorcode>-<analystinitials>-<case>-recording.ts \
+  "https://maintenix.psa.aa.com/maintenix/common/ToDoList.jsp"
+```
+
+Swap `production` for `stage` (and the matching storage-state file) to record
+against stage instead. Output files follow the `discovery-*.ts` naming
+convention (`backend/.gitignore` — never committed).

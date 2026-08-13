@@ -2,6 +2,7 @@ import type { Database as DatabaseType } from 'better-sqlite3';
 import 'dotenv/config';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import multer from 'multer';
+import { timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -32,7 +33,17 @@ function requireAutomationKey(req: Request, res: Response, next: NextFunction): 
     res.status(500).json({ error: 'Server misconfigured: AUTOMATION_API_KEY is not set' });
     return;
   }
-  if (req.header('X-Automation-Key') !== expected) {
+  // CLAUDE_CODE_PROMPT (security.md hardening pass) — real gap closed: a
+  // plain `!==` string comparison leaks timing information proportional to
+  // how many leading characters match, letting an attacker recover the key
+  // byte-by-byte over enough requests. timingSafeEqual requires equal-length
+  // buffers (it throws otherwise) — the length check is the guard for that,
+  // not a shortcut around it; length alone isn't the sensitive part, the
+  // key's actual value is.
+  const provided = Buffer.from(req.header('X-Automation-Key') ?? '');
+  const expectedBuf = Buffer.from(expected);
+  const keyMatches = provided.length === expectedBuf.length && timingSafeEqual(provided, expectedBuf);
+  if (!keyMatches) {
     res.status(401).json({ error: 'Unauthorized' });
     return;
   }

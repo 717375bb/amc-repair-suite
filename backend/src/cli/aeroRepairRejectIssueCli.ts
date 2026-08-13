@@ -1,10 +1,10 @@
 import 'dotenv/config';
 import path from 'node:path';
-import { getActionableWriteUpAction, insertWriteUpIssueDecision, openDb } from './db/db.js';
-import type { MxiClient } from './mxiWriter/mxiClient.js';
-import { createReadyMxiClient } from './mxiWriter/cliMxiClient.js';
-import { parseEnvFlag } from './mxiWriter/parseEnvFlag.js';
-import { readOrderRealState } from './writeUps/aeroRepair/issueOrder.js';
+import { getActionableWriteUpAction, insertWriteUpIssueDecision, openDb } from '../db/db.js';
+import type { MxiClient } from '../mxiWriter/mxiClient.js';
+import { createReadyMxiClient } from '../mxiWriter/cliMxiClient.js';
+import { parseEnvFlag } from '../mxiWriter/parseEnvFlag.js';
+import { readOrderRealState } from '../writeUps/aeroRepair/issueOrder.js';
 
 /**
  * Reject/skip path for the two-phase review gate — same shape as the ESD

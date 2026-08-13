@@ -1,11 +1,11 @@
 import 'dotenv/config';
 import path from 'node:path';
-import { insertWriteUpAction, openDb } from './db/db.js';
-import type { MxiClient } from './mxiWriter/mxiClient.js';
-import { createReadyMxiClient } from './mxiWriter/cliMxiClient.js';
-import { parseEnvFlag } from './mxiWriter/parseEnvFlag.js';
-import { AERO_REPAIR_PART_NUMBERS } from './writeUps/aeroRepair/constants.js';
-import { runAeroRepairWriteUp } from './writeUps/aeroRepair/writeUp.js';
+import { insertWriteUpAction, openDb } from '../db/db.js';
+import type { MxiClient } from '../mxiWriter/mxiClient.js';
+import { createReadyMxiClient } from '../mxiWriter/cliMxiClient.js';
+import { parseEnvFlag } from '../mxiWriter/parseEnvFlag.js';
+import { AERO_REPAIR_PART_NUMBERS } from '../writeUps/aeroRepair/constants.js';
+import { runAeroRepairWriteUp } from '../writeUps/aeroRepair/writeUp.js';
 
 /**
  * CLI smoke test for the Aero Repair write-up flow, ONE part number (and

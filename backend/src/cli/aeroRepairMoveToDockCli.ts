@@ -1,10 +1,10 @@
 import 'dotenv/config';
 import path from 'node:path';
-import { getIssuedDecisionForOrder, insertWriteUpDockMove, openDb } from './db/db.js';
-import type { MxiClient } from './mxiWriter/mxiClient.js';
-import { createReadyMxiClient } from './mxiWriter/cliMxiClient.js';
-import { parseEnvFlag } from './mxiWriter/parseEnvFlag.js';
-import { moveOutboundShipmentToDock } from './writeUps/aeroRepair/issueOrder.js';
+import { getIssuedDecisionForOrder, insertWriteUpDockMove, openDb } from '../db/db.js';
+import type { MxiClient } from '../mxiWriter/mxiClient.js';
+import { createReadyMxiClient } from '../mxiWriter/cliMxiClient.js';
+import { parseEnvFlag } from '../mxiWriter/parseEnvFlag.js';
+import { moveOutboundShipmentToDock } from '../writeUps/aeroRepair/issueOrder.js';
 
 /**
  * Real last step of writing up an order, after Issue Order: moves the

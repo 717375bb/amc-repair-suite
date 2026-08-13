@@ -1,9 +1,9 @@
 import 'dotenv/config';
-import { createReadyMxiClient } from './mxiWriter/cliMxiClient.js';
-import type { MxiClient } from './mxiWriter/mxiClient.js';
-import { parseEnvFlag } from './mxiWriter/parseEnvFlag.js';
-import { findOrderByNumber, navigateToOrder, readEsdField, readNoteToReceiver } from './mxiWriter/selectors.js';
-import { writeEsdAndNotes } from './mxiWriter/writeEsdAndNotes.js';
+import { createReadyMxiClient } from '../mxiWriter/cliMxiClient.js';
+import type { MxiClient } from '../mxiWriter/mxiClient.js';
+import { parseEnvFlag } from '../mxiWriter/parseEnvFlag.js';
+import { findOrderByNumber, navigateToOrder, readEsdField, readNoteToReceiver } from '../mxiWriter/selectors.js';
+import { writeEsdAndNotes } from '../mxiWriter/writeEsdAndNotes.js';
 
 /**
  * Read-write smoke test: logs in, reads the current RO ESD (and, if a note

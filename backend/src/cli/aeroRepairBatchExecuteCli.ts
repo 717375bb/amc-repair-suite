@@ -1,11 +1,11 @@
 import 'dotenv/config';
 import path from 'node:path';
-import { openDb } from './db/db.js';
-import type { MxiClient } from './mxiWriter/mxiClient.js';
-import { createReadyMxiClient } from './mxiWriter/cliMxiClient.js';
-import { parseEnvFlag } from './mxiWriter/parseEnvFlag.js';
-import { loadEligibleLines } from './writeUps/aeroRepair/eligibleLinesFile.js';
-import { LOG_FILE_PATH, logProcessLineResult, processLine } from './writeUps/aeroRepair/processLine.js';
+import { openDb } from '../db/db.js';
+import type { MxiClient } from '../mxiWriter/mxiClient.js';
+import { createReadyMxiClient } from '../mxiWriter/cliMxiClient.js';
+import { parseEnvFlag } from '../mxiWriter/parseEnvFlag.js';
+import { loadEligibleLines } from '../writeUps/aeroRepair/eligibleLinesFile.js';
+import { LOG_FILE_PATH, logProcessLineResult, processLine } from '../writeUps/aeroRepair/processLine.js';
 
 /**
  * The full automatic per-line flow, no pause, no human review step — per
