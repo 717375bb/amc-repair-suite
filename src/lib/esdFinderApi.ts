@@ -1,12 +1,12 @@
 /**
  * Open Order ESD Finder API client. Same backend, same 127.0.0.1-bound
  * CORS-restricted server as lib/api.ts's Order Write-Ups client, same
- * VITE_AUTOMATION_API_KEY bundling caveat (acceptable only because this is
- * a local-analyst-only server, never internet-facing) — kept as its own
- * file rather than folded into lib/api.ts because this tab's endpoints are
- * multipart-upload-based, not JSON-body-based, and mixing the two request
- * helpers in one file would make it easy to send the wrong Content-Type
- * for one or the other.
+ * `credentials: 'include'` session-cookie auth as of #6 (see lib/api.ts's
+ * own docstring for the full story) — kept as its own file rather than
+ * folded into lib/api.ts because this tab's endpoints are multipart-
+ * upload-based, not JSON-body-based, and mixing the two request helpers in
+ * one file would make it easy to send the wrong Content-Type for one or
+ * the other.
  */
 
 export type EsdClassification =
@@ -86,8 +86,10 @@ export interface EsdRunStatusResponse {
   writeResults: EsdWriteOrderResult[]
 }
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:3001'
-const API_KEY = import.meta.env.VITE_AUTOMATION_API_KEY ?? ''
+// See lib/api.ts's docstring — same #6 real-bug fix, same reason: '' (a
+// same-origin relative path) proxied through Vite's dev server, not a
+// direct cross-origin request that silently drops the session cookie.
+const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? ''
 
 export class ApiError extends Error {
   status: number
@@ -123,7 +125,8 @@ async function handleResponse<T>(res: Response): Promise<T> {
 function jsonRequest<T>(path: string, init?: RequestInit): Promise<T> {
   return fetch(`${BASE_URL}${path}`, {
     ...init,
-    headers: { 'X-Automation-Key': API_KEY, ...(init?.headers ?? {}) },
+    credentials: 'include',
+    headers: { ...(init?.headers ?? {}) },
   }).then(handleResponse<T>)
 }
 
@@ -139,7 +142,7 @@ function jsonPostRequest<T>(path: string, body: unknown): Promise<T> {
 function uploadRequest<T>(path: string, formData: FormData): Promise<T> {
   return fetch(`${BASE_URL}${path}`, {
     method: 'POST',
-    headers: { 'X-Automation-Key': API_KEY },
+    credentials: 'include',
     body: formData,
   }).then(handleResponse<T>)
 }

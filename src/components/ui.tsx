@@ -1,5 +1,43 @@
 import type { ReactNode } from 'react'
 
+export function TextField({
+  label,
+  type = 'text',
+  value,
+  onChange,
+  autoComplete,
+  autoFocus,
+  disabled = false,
+  error,
+}: {
+  label: string
+  type?: 'text' | 'password'
+  value: string
+  onChange: (value: string) => void
+  autoComplete?: string
+  autoFocus?: boolean
+  disabled?: boolean
+  error?: string
+}) {
+  return (
+    <label className="block">
+      <span className="mb-1.5 block text-sm font-medium text-text">{label}</span>
+      <input
+        type={type}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        autoComplete={autoComplete}
+        autoFocus={autoFocus}
+        disabled={disabled}
+        className={`w-full rounded-md border bg-bg px-3 py-2 text-sm text-text focus:outline-none disabled:cursor-not-allowed disabled:opacity-60 ${
+          error ? 'border-danger' : 'border-border focus:border-accent'
+        }`}
+      />
+      {error && <span className="mt-1 block text-xs text-danger">{error}</span>}
+    </label>
+  )
+}
+
 export function Card({
   children,
   className = '',
@@ -68,14 +106,17 @@ export function PrimaryButton({
   children,
   onClick,
   disabled = false,
+  type = 'button',
 }: {
   children: ReactNode
   onClick?: () => void
   disabled?: boolean
+  /** 'submit' lets this button trigger a wrapping <form>'s onSubmit — every existing call site omits this and keeps today's 'button' behavior unchanged. */
+  type?: 'button' | 'submit'
 }) {
   return (
     <button
-      type="button"
+      type={type}
       onClick={onClick}
       disabled={disabled}
       className="inline-flex items-center gap-2 rounded-md bg-accent px-3.5 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-accent"

@@ -1,12 +1,24 @@
 /**
- * Order Write-Ups API client. Talks directly to backend/src/server.ts
- * (127.0.0.1-bound, CORS-restricted to this dev origin) — never a proxy,
- * per the backend spec's explicit CORS design.
+ * Order Write-Ups API client. Talks to backend/src/server.ts.
  *
- * VITE_AUTOMATION_API_KEY is bundled into the client build and visible in
- * devtools — acceptable ONLY because this server binds to 127.0.0.1 and is
- * built for exactly one local analyst's own browser tab, never a publicly
- * reachable deployment. Do not reuse this pattern for anything internet-facing.
+ * CLAUDE_CODE_PROMPT (#6, login/account system) — this used to send a
+ * VITE_AUTOMATION_API_KEY bundled into the client build (visible in
+ * devtools, acceptable only for a single-local-analyst server). Real
+ * per-user login replaces that: every request now sends `credentials:
+ * 'include'` so the browser attaches the httpOnly session cookie set by
+ * /api/auth/login instead. A 401 here means "not logged in" (see
+ * lib/authContext.tsx), not "misconfigured shared secret."
+ *
+ * CLAUDE_CODE_PROMPT (#6 fix, real bug) — REAL BUG FOUND AND FIXED: this
+ * used to talk directly to http://127.0.0.1:3001 (a genuine cross-origin
+ * request whenever the app is opened as "localhost:5173"), and the session
+ * cookie's SameSite=Lax silently drops on cross-SITE fetch calls — CORS
+ * itself was fine, the cookie just never got attached. Login/register still
+ * "worked" (that response is what sets the cookie) but every subsequent
+ * call 401'd with "Not logged in", confirmed live. BASE_URL now defaults to
+ * '' (a same-origin relative path), proxied through Vite's dev server
+ * (vite.config.ts) to the real backend — no more cross-origin request at
+ * all from the browser's point of view, so nothing for SameSite to block.
  */
 
 export type MxiEnv = 'stage' | 'production'
@@ -74,8 +86,7 @@ export interface RunStatusResponse {
   sourceDiscoveryRunId: string | null
 }
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:3001'
-const API_KEY = import.meta.env.VITE_AUTOMATION_API_KEY ?? ''
+const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? ''
 
 export class ApiError extends Error {
   status: number
@@ -96,9 +107,9 @@ interface ErrorBody {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
     ...init,
+    credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
-      'X-Automation-Key': API_KEY,
       ...(init?.headers ?? {}),
     },
   })

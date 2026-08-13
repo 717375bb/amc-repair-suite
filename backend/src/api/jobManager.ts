@@ -2,8 +2,24 @@ import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 import path from 'node:path';
 import type { MxiEnv } from '../mxiWriter/config.js';
+import type { MxiCredential } from '../auth/authService.js';
 import type { RunLogEvent } from './runLog.js';
 import { listVendors } from './vendors.js';
+
+/**
+ * CLAUDE_CODE_PROMPT (#6, login/account system) — the env vars a spawned
+ * runner's own createReadyMxiClient(env) reads (see cliMxiClient.ts).
+ * "One per user, same for stage and prod" per explicit user direction — no
+ * per-env split, both prefixes get the same logged-in user's credential.
+ */
+export function mxiCredentialEnvOverrides(credential: MxiCredential): Record<string, string> {
+  return {
+    MXI_STAGE_USERNAME: credential.username,
+    MXI_STAGE_PASSWORD: credential.password,
+    MXI_PROD_USERNAME: credential.username,
+    MXI_PROD_PASSWORD: credential.password,
+  };
+}
 
 export type JobKind = 'discovery' | 'execute';
 export type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'partial';
@@ -86,10 +102,27 @@ function tsxCliPath(): string {
  * copying, or logging them, and without a single secret ever appearing in
  * argv (verifiable via `Get-Process`/task manager command-line columns).
  */
-export function spawnRunner(scriptRelPath: string, args: string[], onEnvelope: (envelope: unknown) => void, onExit: (code: number | null) => void): void {
+export function spawnRunner(
+  scriptRelPath: string,
+  args: string[],
+  onEnvelope: (envelope: unknown) => void,
+  onExit: (code: number | null) => void,
+  /**
+   * CLAUDE_CODE_PROMPT (#6, login/account system) — merged OVER process.env
+   * (never replacing it) so the child still inherits everything else the
+   * parent server has (ANTHROPIC_API_KEY, MXI_STAGE_BASE_URL, etc.), with
+   * only the logged-in user's own MXI credential overriding whatever
+   * (if anything) backend/.env itself sets for those specific keys. Before
+   * this, every spawned job silently used the server's own static .env
+   * credential regardless of who was using the UI — see
+   * mxiCredentialEnvOverrides() above for the real per-request values.
+   */
+  envOverrides?: Record<string, string>,
+): void {
   const child = spawn(process.execPath, [tsxCliPath(), path.join(process.cwd(), scriptRelPath), ...args], {
     cwd: process.cwd(),
     stdio: ['ignore', 'pipe', 'pipe'],
+    env: envOverrides ? { ...process.env, ...envOverrides } : process.env,
   });
 
   const rl = readline.createInterface({ input: child.stdout });
@@ -186,7 +219,7 @@ export interface StartJobResult {
   error?: string;
 }
 
-export function startDiscoveryJob(env: MxiEnv, vendorIds: string[]): StartJobResult {
+export function startDiscoveryJob(env: MxiEnv, vendorIds: string[], mxiCredential: MxiCredential): StartJobResult {
   if (activeRunId) return { ok: false, conflictRunId: activeRunId };
 
   const runId = nextRunId('disc');
@@ -216,6 +249,7 @@ export function startDiscoveryJob(env: MxiEnv, vendorIds: string[]): StartJobRes
       job.status = job.fatalError || code !== 0 ? 'failed' : 'completed';
       if (activeRunId === runId) activeRunId = null;
     },
+    mxiCredentialEnvOverrides(mxiCredential),
   );
 
   return { ok: true, runId };
@@ -227,7 +261,12 @@ export interface ExecuteTarget {
   serialNumber: string;
 }
 
-export function startExecuteJob(discoveryRunId: string, selectedLineIds: string[], env: MxiEnv): StartJobResult {
+export function startExecuteJob(
+  discoveryRunId: string,
+  selectedLineIds: string[],
+  env: MxiEnv,
+  mxiCredential: MxiCredential,
+): StartJobResult {
   if (activeRunId) return { ok: false, conflictRunId: activeRunId };
 
   const discoveryJob = jobs.get(discoveryRunId);
@@ -288,6 +327,7 @@ export function startExecuteJob(discoveryRunId: string, selectedLineIds: string[
       }
       if (activeRunId === runId) activeRunId = null;
     },
+    mxiCredentialEnvOverrides(mxiCredential),
   );
 
   return { ok: true, runId };

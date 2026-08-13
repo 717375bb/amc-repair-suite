@@ -1,8 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnRunner } from '../jobManager.js';
+import { mxiCredentialEnvOverrides, spawnRunner } from '../jobManager.js';
 import type { EsdCompareResult } from '../jobRunners/esdCompareRunner.js';
 import type { MxiEnv } from '../../mxiWriter/config.js';
+import type { MxiCredential } from '../../auth/authService.js';
 
 /**
  * Job registry for the Open Order ESD Finder tab — deliberately separate
@@ -152,7 +153,12 @@ export function startEsdCompareJob(vendorFiles: UploadedFileRef[], craFile: Uplo
  * separately rather than reusing the /esd-updates/:orderNumber/approve
  * endpoint's shared client.
  */
-export function startEsdWriteJob(env: MxiEnv, dbRunId: number, orderNumbers: string[]): StartEsdJobResult {
+export function startEsdWriteJob(
+  env: MxiEnv,
+  dbRunId: number,
+  orderNumbers: string[],
+  mxiCredential: MxiCredential,
+): StartEsdJobResult {
   if (activeRunId) return { ok: false, conflictRunId: activeRunId };
 
   const runId = nextRunId();
@@ -187,6 +193,7 @@ export function startEsdWriteJob(env: MxiEnv, dbRunId: number, orderNumbers: str
       job.status = job.fatalError || code !== 0 ? 'failed' : 'completed';
       if (activeRunId === runId) activeRunId = null;
     },
+    mxiCredentialEnvOverrides(mxiCredential),
   );
 
   return { ok: true, runId };

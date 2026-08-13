@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getActionableEsdInference, getPendingEsdUpdates, getPriorMxiWriteEnvironments, insertMxiWrite, openDb } from './db/db.js';
+import { openAuthDb } from './db/authDb.js';
 import { loadMxiConfig, type MxiEnv } from './mxiWriter/config.js';
 import { assembleNoteText, toMxiDateFormat } from './mxiWriter/esdFormatting.js';
 import { MxiClient } from './mxiWriter/mxiClient.js';
@@ -14,6 +15,8 @@ import { getActiveJob, getJob, getVendorList, startDiscoveryJob, startExecuteJob
 import { isKnownVendorId } from './api/vendors.js';
 import { getActiveEsdJob, getEsdJob, startEsdCompareJob, startEsdWriteJob } from './api/esdFinder/esdFinderJobManager.js';
 import { MissingHeadersError, peekEsdFinderFile, validateHeadersOnly } from './api/esdFinder/ingestion.js';
+import { registerAuthRoutes, requireSession, type AuthedRequest } from './api/authRoutes.js';
+import { getMxiCredentialForUser } from './auth/authService.js';
 
 /**
  * Shared-secret gate for the three endpoints Power Automate calls. GET
@@ -75,6 +78,14 @@ function corsMiddleware(req: Request, res: Response, next: NextFunction): void {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Automation-Key');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    // CLAUDE_CODE_PROMPT (#6, login/account system) — required for the
+    // browser to send/receive the httpOnly session cookie cross-origin
+    // (localhost:5173 -> 127.0.0.1:3001 counts as cross-origin even though
+    // both are local). A wildcard Access-Control-Allow-Origin can't be
+    // combined with credentials per the fetch spec, which is exactly why
+    // this only sets it inside the explicit ALLOWED_UI_ORIGINS check above,
+    // never as a blanket '*'.
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
   }
   if (req.method === 'OPTIONS') {
     res.sendStatus(204);
@@ -92,7 +103,7 @@ function parseRequiredEnv(req: Request, res: Response): MxiEnv | null {
   return raw;
 }
 
-export function createApp(db: DatabaseType, mxiClient: MxiClient) {
+export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: DatabaseType) {
   const app = express();
   app.use(corsMiddleware);
   app.use(express.json());
@@ -101,23 +112,34 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient) {
     res.json({ status: 'ok' });
   });
 
-  // --- Order Write-Ups API (carry-forward rule: reuses this same Express
-  // app, this same requireAutomationKey gate, this same error/response
-  // conventions — no second server). ---
+  // CLAUDE_CODE_PROMPT (#6, login/account system) — register/login/logout/
+  // me/change-password. Unauthenticated by design (you can't require a
+  // session to obtain one) except change-password, which requireSession
+  // gates internally (see authRoutes.ts).
+  registerAuthRoutes(app, authDb);
 
-  app.get('/api/vendors', requireAutomationKey, (_req, res) => {
+  // --- Order Write-Ups API (carry-forward rule: reuses this same Express
+  // app, this same error/response conventions — no second server).
+  // requireAutomationKey -> requireSession as of #6: this is the browser
+  // UI's own traffic, now gated by real per-user login instead of the
+  // bundled shared secret. The Power-Automate-facing endpoints further
+  // below (/pending-esd-updates, /esd-updates/...) deliberately keep
+  // requireAutomationKey — a different, machine-to-machine trust boundary,
+  // per explicit user direction. ---
+
+  app.get('/api/vendors', requireSession, (_req, res) => {
     res.json(getVendorList());
   });
 
   // State A needs to know, before even starting a job, whether one is
   // already active — so the UI can disable Run and link to it directly,
   // rather than only discovering the conflict on submit.
-  app.get('/api/active-job', requireAutomationKey, (_req, res) => {
+  app.get('/api/active-job', requireSession, (_req, res) => {
     const job = getActiveJob();
     res.json({ activeRunId: job?.runId ?? null, kind: job?.kind ?? null });
   });
 
-  app.post('/api/discovery', requireAutomationKey, (req, res) => {
+  app.post('/api/discovery', requireSession, (req, res) => {
     const env = parseRequiredEnv(req, res);
     if (!env) return;
     const vendorIds: unknown = req.body?.vendorIds;
@@ -131,7 +153,9 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient) {
       return;
     }
 
-    const result = startDiscoveryJob(env, vendorIds);
+    const session = (req as AuthedRequest).session!;
+    const mxiCredential = getMxiCredentialForUser(authDb, session.userId);
+    const result = startDiscoveryJob(env, vendorIds, mxiCredential);
     if (!result.ok) {
       res.status(409).json({ error: 'A write-up job is already running.', activeRunId: result.conflictRunId });
       return;
@@ -139,7 +163,7 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient) {
     res.status(202).json({ runId: result.runId });
   });
 
-  app.get('/api/runs/:runId', requireAutomationKey, (req, res) => {
+  app.get('/api/runs/:runId', requireSession, (req, res) => {
     const job = getJob(req.params.runId);
     if (!job) {
       res.status(404).json({ error: `No run found for runId "${req.params.runId}".` });
@@ -160,7 +184,7 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient) {
     });
   });
 
-  app.get('/api/runs/:runId/log', requireAutomationKey, (req, res) => {
+  app.get('/api/runs/:runId/log', requireSession, (req, res) => {
     const job = getJob(req.params.runId);
     if (!job) {
       res.status(404).json({ error: `No run found for runId "${req.params.runId}".` });
@@ -171,7 +195,7 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient) {
     res.json({ events, latestSeq: job.log.length > 0 ? job.log[job.log.length - 1].seq : since });
   });
 
-  app.post('/api/execute', requireAutomationKey, (req, res) => {
+  app.post('/api/execute', requireSession, (req, res) => {
     const env = parseRequiredEnv(req, res);
     if (!env) return;
     const { runId, selectedLineIds } = req.body ?? {};
@@ -184,7 +208,9 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient) {
       return;
     }
 
-    const result = startExecuteJob(runId, selectedLineIds, env);
+    const session = (req as AuthedRequest).session!;
+    const mxiCredential = getMxiCredentialForUser(authDb, session.userId);
+    const result = startExecuteJob(runId, selectedLineIds, env, mxiCredential);
     if (!result.ok) {
       if (result.conflictRunId) {
         res.status(409).json({ error: 'A write-up job is already running.', activeRunId: result.conflictRunId });
@@ -198,15 +224,15 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient) {
 
   // --- Open Order ESD Finder API (independent workstream from Order
   // Write-Ups — its own job slot in esdFinderJobManager.ts, so an active
-  // job on one tab never blocks the other — same server, same
-  // requireAutomationKey gate, same conventions, per the spec. ---
+  // job on one tab never blocks the other — same server, same requireSession
+  // gate as the rest of the browser UI (was requireAutomationKey — see #6). ---
 
   const esdUpload = multer({ dest: path.join('data', 'esd-finder-uploads-tmp') });
 
   // State A's per-file preview: row count + immediate header-rejection
   // feedback as each file is dropped, before the analyst commits to a full
   // comparison run.
-  app.post('/api/esd/peek', requireAutomationKey, esdUpload.single('file'), async (req, res) => {
+  app.post('/api/esd/peek', requireSession, esdUpload.single('file'), async (req, res) => {
     const file = req.file;
     const role = req.body?.role;
     if (!file) {
@@ -230,7 +256,7 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient) {
 
   app.post(
     '/api/esd/compare',
-    requireAutomationKey,
+    requireSession,
     esdUpload.fields([
       { name: 'vendorFiles', maxCount: 20 },
       { name: 'craFile', maxCount: 1 },
@@ -291,12 +317,12 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient) {
     },
   );
 
-  app.get('/api/esd/active-job', requireAutomationKey, (_req, res) => {
+  app.get('/api/esd/active-job', requireSession, (_req, res) => {
     const job = getActiveEsdJob();
     res.json({ activeRunId: job?.runId ?? null });
   });
 
-  app.get('/api/esd/runs/:runId', requireAutomationKey, (req, res) => {
+  app.get('/api/esd/runs/:runId', requireSession, (req, res) => {
     const job = getEsdJob(req.params.runId);
     if (!job) {
       res.status(404).json({ error: `No ESD Finder run found for runId "${req.params.runId}".` });
@@ -324,7 +350,7 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient) {
   // job's own stored result, not trusted from the client: anything
   // actionable-but-duplicate, not actionable at all, or simply not present
   // in that run is rejected outright rather than silently dropped.
-  app.post('/api/esd/write', requireAutomationKey, (req, res) => {
+  app.post('/api/esd/write', requireSession, (req, res) => {
     const env = parseRequiredEnv(req, res);
     if (!env) return;
 
@@ -365,7 +391,9 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient) {
       return;
     }
 
-    const result = startEsdWriteJob(env, compareJob.result.dbRunId, orderNumbers);
+    const session = (req as AuthedRequest).session!;
+    const mxiCredential = getMxiCredentialForUser(authDb, session.userId);
+    const result = startEsdWriteJob(env, compareJob.result.dbRunId, orderNumbers, mxiCredential);
     if (!result.ok) {
       res.status(409).json({ error: 'An ESD Finder job is already running.', activeRunId: result.conflictRunId });
       return;
@@ -470,15 +498,19 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient) {
 
 async function main(): Promise<void> {
   const dbPath = process.env.MXI_DB_PATH || path.join('data', 'audit.db');
+  // CLAUDE_CODE_PROMPT (#6, login/account system) — separate file from
+  // audit.db, see db/authDb.ts's docstring for why.
+  const authDbPath = process.env.AUTH_DB_PATH || path.join('data', 'auth.db');
   const port = Number(process.env.PORT) || 3001;
 
   const config = loadMxiConfig(); // throws if MXI_ENV isn't literally "stage" or "production"
 
   const db = openDb(dbPath);
+  const authDb = openAuthDb(authDbPath);
   const mxiClient = new MxiClient(config);
   await mxiClient.initialize();
 
-  const app = createApp(db, mxiClient);
+  const app = createApp(db, mxiClient, authDb);
   // 127.0.0.1 only, never 0.0.0.0 — this now also serves the Order
   // Write-Ups job-spawning endpoints, which is not something to expose on
   // the network even accidentally.
@@ -491,6 +523,7 @@ async function main(): Promise<void> {
     httpServer.close();
     await mxiClient.shutdown();
     db.close();
+    authDb.close();
     process.exit(0);
   };
   process.on('SIGINT', shutdown);
