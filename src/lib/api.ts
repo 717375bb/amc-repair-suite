@@ -23,7 +23,7 @@
 
 export type MxiEnv = 'stage' | 'production'
 export type VendorSearchKind = 'partNumber' | 'vendorCode'
-export type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'partial'
+export type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'partial' | 'cancelled'
 export type LineStatus = 'in_progress' | 'completed' | 'skipped' | 'exception' | 'retrying'
 
 export interface VendorListEntry {
@@ -32,6 +32,13 @@ export interface VendorListEntry {
   code?: string
   displayName: string
   searchKind: VendorSearchKind
+}
+
+export interface UsageParmRow {
+  label: string
+  tsn: string
+  tso: string
+  tsi: string
 }
 
 export interface RunLogEvent {
@@ -48,6 +55,8 @@ export interface RunLogEvent {
   routedTo?: string
   exceptionType?: string
   detail?: string
+  /** Only ever set on exceptionType 'zero_usage' events — for the "Email Maintenance Records" draft button. */
+  usageRows?: UsageParmRow[]
 }
 
 export interface DiscoveredLineSummary {
@@ -84,6 +93,8 @@ export interface RunStatusResponse {
   counts: JobCounts
   lines?: DiscoveredLineSummary[]
   sourceDiscoveryRunId: string | null
+  /** execute jobs only — how many lines were targeted at start (see jobManager.ts's Job.targetLineCount docstring for why this can't be derived from counts.total alone). */
+  targetLineCount: number | null
 }
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? ''
@@ -150,4 +161,9 @@ export function getRunLog(runId: string, since: number): Promise<{ events: RunLo
 
 export function startExecute(runId: string, selectedLineIds: string[], env: MxiEnv): Promise<{ executeRunId: string }> {
   return request('/api/execute', { method: 'POST', body: JSON.stringify({ runId, selectedLineIds, env }) })
+}
+
+/** CLAUDE_CODE_PROMPT (cancel button) — cancels whichever run (discovery or execute) this runId refers to, wherever it currently is. */
+export function cancelRun(runId: string): Promise<{ ok: true }> {
+  return request(`/api/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
 }

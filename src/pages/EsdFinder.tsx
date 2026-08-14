@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useState, type DragEvent } from 'react'
-import { AlertTriangle, CheckCircle2, FileSpreadsheet, Loader2, PlayCircle, RotateCcw, UploadCloud, X } from 'lucide-react'
+import { useEffect, useMemo, useState, type DragEvent } from 'react'
+import { AlertTriangle, CheckCircle2, FileSpreadsheet, Loader2, PlayCircle, RotateCcw, StopCircle, UploadCloud, X } from 'lucide-react'
 import { Badge, Card, CardHeader, PrimaryButton, SecondaryButton } from '../components/ui'
 import { EnvironmentBar } from '../components/EnvironmentBar'
+import { ConfirmDialog } from '../components/ConfirmDialog'
 import {
   ApiError,
   getActiveEsdJob,
-  getEsdRunStatus,
   peekFile,
   startCompare,
   startWrite,
@@ -15,11 +15,14 @@ import {
   type EsdWriteOrderResult,
   type MxiEnv,
 } from '../lib/esdFinderApi'
+import { useEsdFinderRun } from '../lib/esdFinderRun'
 
 type Phase = 'upload' | 'comparing' | 'review'
 type ReviewScreen = 'actionable' | 'non-actionable'
 
-const POLL_MS = 2000
+function isEsdRunTerminal(status: EsdRunStatusResponse['status'] | undefined): boolean {
+  return !!status && status !== 'running' && status !== 'pending'
+}
 
 interface StagedFile {
   file: File
@@ -197,10 +200,19 @@ function flagBadgeTone(flag: EsdCompareResultRow['flag']): 'success' | 'warning'
 // toggle, plain-English summary always visible. Never renders a bare
 // "pending" row as if it were already a success.
 // ---------------------------------------------------------------------------
-function WriteStatusCell({ result }: { result: EsdWriteOrderResult | undefined }) {
+function WriteStatusCell({ result, jobDone }: { result: EsdWriteOrderResult | undefined; jobDone: boolean }) {
   const [showDetail, setShowDetail] = useState(false)
 
   if (!result) {
+    // CLAUDE_CODE_PROMPT (cancel button) — distinguishes "still genuinely
+    // in progress" (perpetual spinner, correct while the job is running)
+    // from "the job is over and this one simply never got attempted"
+    // (e.g. a cancel stopped the run before reaching it) — the old
+    // unconditional "Writing..." would otherwise spin forever here even
+    // after the whole run had already stopped.
+    if (jobDone) {
+      return <span className="text-xs text-muted">Not attempted — cancelled</span>
+    }
     return (
       <span className="flex items-center gap-1.5 text-xs text-muted">
         <Loader2 size={13} className="animate-spin" />
@@ -242,19 +254,40 @@ function WriteStatusCell({ result }: { result: EsdWriteOrderResult | undefined }
 // Main page
 // ---------------------------------------------------------------------------
 export default function EsdFinder() {
-  const [phase, setPhase] = useState<Phase>('upload')
   const [vendorStaged, setVendorStaged] = useState<StagedFile[]>([])
   const [craStaged, setCraStaged] = useState<StagedFile[]>([])
   const [loadError, setLoadError] = useState<string | null>(null)
   const [activeJobRunId, setActiveJobRunId] = useState<string | null>(null)
 
-  const [runStatus, setRunStatus] = useState<EsdRunStatusResponse | null>(null)
   const [reviewScreen, setReviewScreen] = useState<ReviewScreen>('actionable')
   const [removedOrderNumbers, setRemovedOrderNumbers] = useState<Set<string>>(new Set())
-
   const [env, setEnv] = useState<MxiEnv>('stage')
-  const [writeStatus, setWriteStatus] = useState<EsdRunStatusResponse | null>(null)
-  const [isWriting, setIsWriting] = useState(false)
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
+
+  // CLAUDE_CODE_PROMPT (persistent run state + cancel button) — compare AND
+  // write state + their polling loops both live in a provider mounted at
+  // the app root (see components/RequireAuth.tsx), not in this page
+  // component, so they survive navigating away and back. See
+  // lib/esdFinderRun.tsx's own docstring.
+  const {
+    compareRunId,
+    compareRun: runStatus,
+    writeRunId,
+    writeRun: writeStatus,
+    startCompareTracking,
+    startWriteTracking,
+    cancelActive,
+    clearAll,
+  } = useEsdFinderRun()
+
+  const isWriting = !!writeRunId && !isEsdRunTerminal(writeStatus?.status)
+  const effectivePhase: Phase = useMemo(() => {
+    if (compareRunId) {
+      return isEsdRunTerminal(runStatus?.status) ? 'review' : 'comparing'
+    }
+    return 'upload'
+  }, [compareRunId, runStatus])
 
   useEffect(() => {
     getActiveEsdJob()
@@ -285,7 +318,7 @@ export default function EsdFinder() {
 
   const validVendorFiles = vendorStaged.filter((s) => !s.error && s.rowCount !== null)
   const validCraFile = craStaged.find((s) => !s.error && s.rowCount !== null)
-  const jobIsActive = phase === 'comparing' || isWriting || !!activeJobRunId
+  const jobIsActive = effectivePhase === 'comparing' || isWriting || !!activeJobRunId
 
   const handleRun = async () => {
     if (!validCraFile) return
@@ -295,10 +328,8 @@ export default function EsdFinder() {
         validVendorFiles.map((s) => s.file),
         validCraFile.file,
       )
-      setPhase('comparing')
       setRemovedOrderNumbers(new Set())
-      setWriteStatus(null)
-      pollRun(newRunId)
+      startCompareTracking(newRunId)
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         setLoadError(`An ESD Finder job is already running (${err.activeRunId ?? 'unknown'}).`)
@@ -308,48 +339,12 @@ export default function EsdFinder() {
     }
   }
 
-  const pollRun = useCallback((id: string) => {
-    const tick = async () => {
-      try {
-        const status = await getEsdRunStatus(id)
-        setRunStatus(status)
-        if (status.status === 'running' || status.status === 'pending') {
-          setTimeout(tick, POLL_MS)
-        } else {
-          setPhase('review')
-        }
-      } catch (err) {
-        setLoadError(err instanceof Error ? err.message : String(err))
-      }
-    }
-    tick()
-  }, [])
-
-  const pollWrite = useCallback((id: string) => {
-    const tick = async () => {
-      try {
-        const status = await getEsdRunStatus(id)
-        setWriteStatus(status)
-        if (status.status === 'running' || status.status === 'pending') {
-          setTimeout(tick, POLL_MS)
-        } else {
-          setIsWriting(false)
-        }
-      } catch (err) {
-        setLoadError(err instanceof Error ? err.message : String(err))
-        setIsWriting(false)
-      }
-    }
-    tick()
-  }, [])
-
   const handleRunUpdates = async (orderNumbers: string[]) => {
     if (!runStatus || orderNumbers.length === 0) return
     setLoadError(null)
     try {
-      const { runId: writeRunId } = await startWrite(runStatus.runId, orderNumbers, env)
-      setIsWriting(true)
-      pollWrite(writeRunId)
+      const { runId: newWriteRunId } = await startWrite(runStatus.runId, orderNumbers, env)
+      startWriteTracking(newWriteRunId)
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         setLoadError(`An ESD Finder job is already running (${err.activeRunId ?? 'unknown'}).`)
@@ -360,15 +355,30 @@ export default function EsdFinder() {
   }
 
   const resetToStart = () => {
-    setPhase('upload')
+    clearAll()
     setVendorStaged([])
     setCraStaged([])
-    setRunStatus(null)
-    setWriteStatus(null)
     setRemovedOrderNumbers(new Set())
     getActiveEsdJob()
       .then((r) => setActiveJobRunId(r.activeRunId))
       .catch(() => {})
+  }
+
+  // CLAUDE_CODE_PROMPT (cancel button) — cancelling a compare (read)
+  // discards it entirely (nothing was written); cancelling a write leaves
+  // whatever already succeeded standing and just stops there — the review
+  // screen keeps showing the same compare results, with not-yet-attempted
+  // orders retry-eligible (see WriteStatusCell/failedOrderNumbers below).
+  const handleCancelConfirmed = async () => {
+    setShowCancelConfirm(false)
+    setCancelling(true)
+    try {
+      await cancelActive()
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setCancelling(false)
+    }
   }
 
   const canRun = !jobIsActive && validVendorFiles.length > 0 && !!validCraFile
@@ -381,13 +391,13 @@ export default function EsdFinder() {
         </div>
       )}
 
-      {activeJobRunId && phase === 'upload' && (
+      {activeJobRunId && effectivePhase === 'upload' && (
         <div className="flex items-center justify-between rounded-md border border-l-4 border-warning border-l-warning bg-warning-soft px-4 py-3 text-sm text-text">
           <span>An ESD Finder job is already running ({activeJobRunId}). Wait for it to finish before starting a new one.</span>
         </div>
       )}
 
-      {phase === 'upload' && (
+      {effectivePhase === 'upload' && (
         <div className="space-y-4">
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <DropZone
@@ -420,21 +430,27 @@ export default function EsdFinder() {
         </div>
       )}
 
-      {phase === 'comparing' && (
-        <Card className="flex items-center gap-3 p-6">
-          <Loader2 size={20} className="animate-spin text-accent" />
-          <div>
-            <p className="text-sm font-semibold text-text">
-              Running comparison{runStatus?.phase ? ` — ${runStatus.phase}` : ''}...
-            </p>
-            <p className="mt-0.5 text-xs text-muted">
-              AI inference over the matched orders can take a few minutes — this isn't hung.
-            </p>
+      {effectivePhase === 'comparing' && (
+        <Card className="flex items-center justify-between gap-3 p-6">
+          <div className="flex items-center gap-3">
+            <Loader2 size={20} className="animate-spin text-accent" />
+            <div>
+              <p className="text-sm font-semibold text-text">
+                Running comparison{runStatus?.phase ? ` — ${runStatus.phase}` : ''}...
+              </p>
+              <p className="mt-0.5 text-xs text-muted">
+                AI inference over the matched orders can take a few minutes — this isn't hung.
+              </p>
+            </div>
           </div>
+          <SecondaryButton onClick={() => setShowCancelConfirm(true)} disabled={cancelling}>
+            <StopCircle size={16} />
+            {cancelling ? 'Cancelling...' : 'Cancel'}
+          </SecondaryButton>
         </Card>
       )}
 
-      {phase === 'review' && runStatus && (
+      {effectivePhase === 'review' && runStatus && (
         <ReviewState
           runStatus={runStatus}
           reviewScreen={reviewScreen}
@@ -454,6 +470,23 @@ export default function EsdFinder() {
           writeStatus={writeStatus}
           onRunUpdates={handleRunUpdates}
           onReset={resetToStart}
+          onCancelClick={isWriting ? () => setShowCancelConfirm(true) : undefined}
+          cancelling={cancelling}
+        />
+      )}
+
+      {showCancelConfirm && (
+        <ConfirmDialog
+          title={effectivePhase === 'comparing' ? 'Cancel this comparison?' : 'Cancel this write?'}
+          message={
+            effectivePhase === 'comparing'
+              ? "This will stop the comparison where it's at and discard whatever's been found so far. Nothing was written, so there's nothing to undo."
+              : "This will stop the write where it's at. Orders that already wrote successfully are untouched — only orders that haven't been attempted yet are stopped, and stay retry-eligible below."
+          }
+          confirmLabel="Yes, cancel"
+          cancelLabel="Never mind"
+          onConfirm={handleCancelConfirmed}
+          onCancel={() => setShowCancelConfirm(false)}
         />
       )}
     </div>
@@ -475,6 +508,8 @@ function ReviewState({
   writeStatus,
   onRunUpdates,
   onReset,
+  onCancelClick,
+  cancelling,
 }: {
   runStatus: EsdRunStatusResponse
   reviewScreen: ReviewScreen
@@ -487,6 +522,9 @@ function ReviewState({
   writeStatus: EsdRunStatusResponse | null
   onRunUpdates: (orderNumbers: string[]) => void
   onReset: () => void
+  /** Undefined whenever a write isn't currently in progress — nothing to cancel. */
+  onCancelClick?: () => void
+  cancelling: boolean
 }) {
   if (runStatus.status === 'failed' || !runStatus.result) {
     return (
@@ -515,6 +553,15 @@ function ReviewState({
   const writeResultByOrder = new Map((writeStatus?.writeResults ?? []).map((r) => [r.orderNumber, r]))
   const failedOrderNumbers = (writeStatus?.writeResults ?? []).filter((r) => r.status === 'failed').map((r) => r.orderNumber)
   const writeDone = hasWriteRun && !isWriting
+  // CLAUDE_CODE_PROMPT (cancel button) — a cancelled write can leave orders
+  // with NO result at all (never reached before the runner stopped), not
+  // just failed ones — both are equally retry-eligible, so they're merged
+  // into one list rather than only ever offering genuine failures.
+  const writeWasCancelled = writeStatus?.status === 'cancelled'
+  const notAttemptedOrderNumbers = writeWasCancelled
+    ? writeableRows.map((r) => r.orderNumber).filter((o) => !writeResultByOrder.has(o))
+    : []
+  const retryableOrderNumbers = [...failedOrderNumbers, ...notAttemptedOrderNumbers]
 
   return (
     <div className="space-y-4">
@@ -535,6 +582,15 @@ function ReviewState({
       <DuplicateBanner duplicates={duplicates} />
 
       <EnvironmentBar env={env} onChange={onEnvChange} disabled={isWriting} />
+
+      {isWriting && onCancelClick && (
+        <div className="flex justify-end">
+          <SecondaryButton onClick={onCancelClick} disabled={cancelling}>
+            <StopCircle size={16} />
+            {cancelling ? 'Cancelling...' : 'Cancel write'}
+          </SecondaryButton>
+        </div>
+      )}
 
       <div className="flex overflow-hidden rounded-md border border-border w-fit">
         <button
@@ -563,7 +619,9 @@ function ReviewState({
             title="Actionable rows"
             description={
               hasWriteRun
-                ? `Write run against ${writeStatus?.writeEnv ?? env}: ${writeStatus?.writeResults.filter((r) => r.status === 'success').length ?? 0} written, ${failedOrderNumbers.length} failed.`
+                ? writeWasCancelled
+                  ? `Write cancelled against ${writeStatus?.writeEnv ?? env}: ${writeStatus?.writeResults.filter((r) => r.status === 'success').length ?? 0} written before stopping, ${notAttemptedOrderNumbers.length} never attempted.`
+                  : `Write run against ${writeStatus?.writeEnv ?? env}: ${writeStatus?.writeResults.filter((r) => r.status === 'success').length ?? 0} written, ${failedOrderNumbers.length} failed.`
                 : `${writeableRows.length} of ${actionable.length} row(s) will be written to MXI.`
             }
             action={
@@ -572,10 +630,10 @@ function ReviewState({
                   {isWriting ? <Loader2 size={16} className="animate-spin" /> : <PlayCircle size={16} />}
                   Run Updates in MXI
                 </PrimaryButton>
-              ) : writeDone && failedOrderNumbers.length > 0 ? (
-                <SecondaryButton onClick={() => onRunUpdates(failedOrderNumbers)} disabled={isWriting}>
+              ) : writeDone && retryableOrderNumbers.length > 0 ? (
+                <SecondaryButton onClick={() => onRunUpdates(retryableOrderNumbers)} disabled={isWriting}>
                   <RotateCcw size={16} />
-                  Retry {failedOrderNumbers.length} failed
+                  Retry {retryableOrderNumbers.length} {writeWasCancelled ? 'remaining' : 'failed'}
                 </SecondaryButton>
               ) : undefined
             }
@@ -636,7 +694,7 @@ function ReviewState({
                           {excluded ? (
                             <span className="text-xs text-muted">Not submitted (excluded)</span>
                           ) : wasAttempted ? (
-                            <WriteStatusCell result={writeResult} />
+                            <WriteStatusCell result={writeResult} jobDone={writeDone} />
                           ) : null}
                         </td>
                       )}

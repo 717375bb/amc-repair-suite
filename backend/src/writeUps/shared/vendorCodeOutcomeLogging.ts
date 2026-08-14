@@ -106,6 +106,7 @@ export function logVendorCodeOutcome(
     }
     case 'zero_usage': {
       dbOutcome = 'zero_usage';
+      filledFieldsJson = JSON.stringify({ serialNumber: outcome.serialNumber, usageRows: outcome.usageRows }, null, 2);
       console.error(`Part ${outcome.partNumber} / SN ${outcome.serialNumber}: Current Usage shows all-zero — records-error exception, unchanged from Aero Repair's.`);
       success = false;
       break;
@@ -115,6 +116,16 @@ export function logVendorCodeOutcome(
       console.error(
         `Part ${outcome.partNumber} / SN ${outcome.serialNumber}: Usage Table Absent (Unexpected) — no usage table ` +
           `found and this line did not match the BN override. Nothing filled.`,
+      );
+      success = false;
+      break;
+    }
+    case 'receiving_notes_flagged_account': {
+      dbOutcome = 'receiving_notes_flagged_account';
+      filledFieldsJson = JSON.stringify({ serialNumber: outcome.serialNumber, receivingNotes: outcome.receivingNotes }, null, 2);
+      console.error(
+        `Part ${outcome.partNumber} / SN ${outcome.serialNumber}: receiving notes mention "account" — flagged for ` +
+          `manual review per explicit instruction. Nothing filled.`,
       );
       success = false;
       break;

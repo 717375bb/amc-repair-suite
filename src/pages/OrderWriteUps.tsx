@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, CheckCircle2, Clock, Loader2, PlayCircle, RefreshCw, Search, XCircle } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { AlertTriangle, CheckCircle2, Clock, ClipboardCopy, Loader2, Mail, PlayCircle, RefreshCw, Search, StopCircle, XCircle } from 'lucide-react'
 import { Badge, Card, CardHeader, PrimaryButton, SecondaryButton } from '../components/ui'
+import { ConfirmDialog } from '../components/ConfirmDialog'
 import {
   ApiError,
   getActiveJob,
-  getRunStatus,
   getVendors,
   startDiscovery,
   startExecute,
@@ -14,12 +14,15 @@ import {
   type RunStatusResponse,
   type VendorListEntry,
 } from '../lib/api'
-import { useExecuteRun } from '../lib/executeRun'
+import { useOrderWriteUpsRun } from '../lib/orderWriteUpsRun'
 
 type Phase = 'select' | 'discovering' | 'review' | 'executing' | 'execute-done'
 
-const POLL_MS = 2000
 const CLOCK_TICK_MS = 15000
+
+function isRunTerminal(status: RunStatusResponse['status'] | undefined): boolean {
+  return !!status && status !== 'running' && status !== 'pending'
+}
 
 /**
  * "Snapshot age" / "elapsed time" displays need the current time, but
@@ -141,9 +144,54 @@ function statusVisual(status: RunLogEvent['status'] | DiscoveredLineSummary['sta
   }
 }
 
+// ---------------------------------------------------------------------------
+// CLAUDE_CODE_PROMPT (email-maintenance-records button, 2026-08-14) — per
+// explicit user instruction: a zero-times-and-cycles exception line gets a
+// draft email to Maintenance Records, with the exact requested blurb plus
+// the real times/cycles table for that specific part. Mechanism: a
+// mailto: link (opens whatever mail client is registered as the OS
+// default, pre-filled — user reviews and hits Send themselves, nothing is
+// auto-sent) PLUS a Copy button right next to it, since a mailto: link
+// does nothing useful on a machine with no registered handler (a real,
+// plausible gap in a corporate Office365/Outlook-web environment — not a
+// security block, just a missing association) — confirmed with the user
+// before building this. Same plain-text "Usage Parm\tTSN\tTSO\tTSI" table
+// shape already used in the real Notes to Vendor text elsewhere in this
+// codebase (composeNotesForNormalLine), not a new format.
+// ---------------------------------------------------------------------------
+const MAINTENANCE_RECORDS_EMAIL = 'DL_PSA_MaintenanceRecords@psaairlines.com'
+
+function buildMaintenanceRecordsEmailDraft(event: RunLogEvent): { subject: string; body: string } {
+  const subject = `Zero Times & Cycles — PN ${event.partNumber} / SN ${event.serialNumber}`
+  const tableHeader = 'Usage Parm\tTSN\tTSO\tTSI'
+  const tableRows = (event.usageRows ?? []).map((row) => `${row.label}\t${row.tsn}\t${row.tso}\t${row.tsi}`)
+  const body = [
+    'Good morning Maintenance Records team!',
+    '',
+    'This part is showing with zero times and cycles. Can you please have this corrected? Thank you!',
+    tableHeader,
+    ...tableRows,
+  ].join('\n')
+  return { subject, body }
+}
+
 function LogRow({ event }: { event: RunLogEvent }) {
   const [showDetail, setShowDetail] = useState(false)
+  const [copied, setCopied] = useState(false)
   const { icon: Icon, className, border } = statusVisual(event.status)
+  const showEmailDraft = event.exceptionType === 'zero_usage' && !!event.usageRows?.length
+
+  const handleCopy = async () => {
+    const { body } = buildMaintenanceRecordsEmailDraft(event)
+    try {
+      await navigator.clipboard.writeText(body)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      // Clipboard access can fail (permissions, non-secure context) — the
+      // mailto: link right next to this button is the primary path either way.
+    }
+  }
 
   return (
     <div className={`border-l-4 ${border} bg-surface px-4 py-3`}>
@@ -157,11 +205,31 @@ function LogRow({ event }: { event: RunLogEvent }) {
             <p className="mt-0.5 text-sm text-muted">{event.summary}</p>
           </div>
         </div>
-        {event.detail && (
-          <button type="button" onClick={() => setShowDetail((s) => !s)} className="shrink-0 text-xs text-accent hover:underline">
-            {showDetail ? 'Hide' : 'Show'} technical details
-          </button>
-        )}
+        <div className="flex shrink-0 items-center gap-3">
+          {showEmailDraft && (
+            <>
+              <a
+                href={(() => {
+                  const { subject, body } = buildMaintenanceRecordsEmailDraft(event)
+                  return `mailto:${MAINTENANCE_RECORDS_EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
+                })()}
+                className="flex items-center gap-1 text-xs text-accent hover:underline"
+              >
+                <Mail size={13} />
+                Email Maintenance Records
+              </a>
+              <button type="button" onClick={handleCopy} className="flex items-center gap-1 text-xs text-accent hover:underline">
+                <ClipboardCopy size={13} />
+                {copied ? 'Copied!' : 'Copy draft'}
+              </button>
+            </>
+          )}
+          {event.detail && (
+            <button type="button" onClick={() => setShowDetail((s) => !s)} className="text-xs text-accent hover:underline">
+              {showDetail ? 'Hide' : 'Show'} technical details
+            </button>
+          )}
+        </div>
       </div>
       {showDetail && event.detail && (
         <pre className="mt-2 whitespace-pre-wrap rounded bg-bg p-2.5 text-xs text-muted">{event.detail}</pre>
@@ -174,21 +242,42 @@ function LogRow({ event }: { event: RunLogEvent }) {
 // Main page
 // ---------------------------------------------------------------------------
 export default function OrderWriteUps() {
-  const [phase, setPhase] = useState<Phase>('select')
   const [env, setEnv] = useState<MxiEnv>('stage')
   const [vendors, setVendors] = useState<VendorListEntry[]>([])
   const [selectedVendorIds, setSelectedVendorIds] = useState<Set<string>>(new Set())
   const [loadError, setLoadError] = useState<string | null>(null)
   const [activeJobRunId, setActiveJobRunId] = useState<string | null>(null)
+  // CLAUDE_CODE_PROMPT (cancel button) — tracks DESELECTIONS from an
+  // implicit "everything eligible is selected by default" baseline,
+  // instead of the selected set itself. The eligible set changes out from
+  // under this page (a fresh discovery completing, or an execute cancel
+  // reverting to review with a smaller not-yet-attempted set) — deriving
+  // "selected" as eligible-minus-deselected at render time means a new
+  // eligible set is correctly all-selected for free, with no effect
+  // needed to re-initialize anything (a stale deselected id from an
+  // earlier, unrelated eligible set simply never matches any current row).
+  const [deselectedLineIds, setDeselectedLineIds] = useState<Set<string>>(new Set())
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
 
-  const [discoveryRun, setDiscoveryRun] = useState<RunStatusResponse | null>(null)
-  const [selectedLineIds, setSelectedLineIds] = useState<Set<string>>(new Set())
-
-  // CLAUDE_CODE_PROMPT_WRITEUP_FAILSAFE.md frontend QOL #2 — execute run
-  // state + its polling loop now live in a provider mounted at the app
-  // root (see main.tsx), not in this page component, so they survive
-  // navigating away and back. See lib/executeRun.tsx's own docstring.
-  const { runId: trackedExecuteRunId, run: executeRun, events: executeEvents, totalLines: executeTotalLines, done: executeDone, startTracking, clearTracking } = useExecuteRun()
+  // CLAUDE_CODE_PROMPT (persistent run state + cancel button) — discovery
+  // AND execute state + their polling loops both live in a provider
+  // mounted at the app root (see components/RequireAuth.tsx), not in this
+  // page component, so they survive navigating away and back. See
+  // lib/orderWriteUpsRun.tsx's own docstring for the full design,
+  // including cancel semantics and notYetAttemptedLines.
+  const {
+    discoveryRunId,
+    discoveryRun,
+    executeRunId,
+    executeRun,
+    executeEvents,
+    notYetAttemptedLines,
+    startDiscoveryTracking,
+    startExecuteTracking,
+    cancelActive,
+    clearAll,
+  } = useOrderWriteUpsRun()
 
   // Initial load: vendor list + whether a job is already active (State A's
   // "disabled while a job is active, with a link to the running job").
@@ -203,21 +292,40 @@ export default function OrderWriteUps() {
       })
   }, [])
 
-  // Re-attach, derived rather than synced via an effect (no setState-in-
-  // effect cascade): whenever a tracked execute run exists and the raw
-  // local `phase` hasn't itself advanced past 'select' (either this page
-  // just mounted fresh while a run from earlier in the session is still
-  // going, or the ExecuteRunProvider re-attached to an already-running job
-  // on app start), the execute view is what should actually render —
-  // regardless of what `phase` itself says. Once `phase` is explicitly
-  // 'discovering' or 'review', those take priority (a tracked run only
-  // ever means an EARLIER execute step, never overrides in-flight discovery).
-  const effectivePhase: Phase =
-    phase === 'discovering' || phase === 'review'
-      ? phase
-      : trackedExecuteRunId
-        ? (executeDone ? 'execute-done' : 'executing')
-        : phase
+  // Fully derived from context — no separate local `phase` state to keep
+  // in sync. An execute run that was cancelled routes back to 'review'
+  // (see the module docstring); everything else is a straightforward
+  // "which run, if any, is tracked and is it done" read.
+  const effectivePhase: Phase = useMemo(() => {
+    if (executeRunId) {
+      if (executeRun?.status === 'cancelled') return 'review'
+      if (executeRun && isRunTerminal(executeRun.status)) return 'execute-done'
+      return 'executing'
+    }
+    if (discoveryRunId) {
+      if (discoveryRun && isRunTerminal(discoveryRun.status)) return 'review'
+      return 'discovering'
+    }
+    return 'select'
+  }, [executeRunId, executeRun, discoveryRunId, discoveryRun])
+
+  const cancelledExecute = executeRunId && executeRun?.status === 'cancelled' ? executeRun : null
+
+  // The current eligible set — every 'completed' discovery line normally,
+  // or only the not-yet-attempted subset after an execute cancel (see the
+  // module docstring for why re-offering an already-completed line would
+  // risk a duplicate order).
+  const eligibleLineIds = useMemo(() => {
+    if (cancelledExecute) return new Set((notYetAttemptedLines ?? []).map((l) => l.lineId))
+    if (discoveryRun?.lines) return new Set(discoveryRun.lines.filter((l) => l.status === 'completed').map((l) => l.lineId))
+    return new Set<string>()
+  }, [cancelledExecute, notYetAttemptedLines, discoveryRun])
+
+  const selectedLineIds = useMemo(() => {
+    const result = new Set<string>()
+    for (const id of eligibleLineIds) if (!deselectedLineIds.has(id)) result.add(id)
+    return result
+  }, [eligibleLineIds, deselectedLineIds])
 
   const toggleVendor = (id: string) => {
     setSelectedVendorIds((prev) => {
@@ -232,8 +340,7 @@ export default function OrderWriteUps() {
     setLoadError(null)
     try {
       const { runId } = await startDiscovery([...selectedVendorIds], env)
-      setPhase('discovering')
-      pollDiscovery(runId)
+      startDiscoveryTracking(runId)
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         setLoadError(`A job is already running (${err.activeRunId ?? 'unknown'}).`)
@@ -243,32 +350,11 @@ export default function OrderWriteUps() {
     }
   }
 
-  const pollDiscovery = useCallback((runId: string) => {
-    const tick = async () => {
-      try {
-        const status = await getRunStatus(runId)
-        setDiscoveryRun(status)
-        if (status.status === 'running' || status.status === 'pending') {
-          setTimeout(tick, POLL_MS)
-        } else {
-          // All lines default-selected, per State B's spec — exceptions are
-          // never selectable (informational only).
-          const selectable = (status.lines ?? []).filter((l) => l.status === 'completed').map((l) => l.lineId)
-          setSelectedLineIds(new Set(selectable))
-          setPhase('review')
-        }
-      } catch (err) {
-        setLoadError(err instanceof Error ? err.message : String(err))
-      }
-    }
-    tick()
-  }, [])
-
   const toggleLine = (id: string) => {
-    setSelectedLineIds((prev) => {
+    setDeselectedLineIds((prev) => {
       const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
+      if (next.has(id)) next.delete(id) // re-select
+      else next.add(id) // deselect
       return next
     })
   }
@@ -277,9 +363,8 @@ export default function OrderWriteUps() {
     if (!discoveryRun) return
     setLoadError(null)
     try {
-      const { executeRunId } = await startExecute(discoveryRun.runId, [...selectedLineIds], env)
-      startTracking(executeRunId, selectedLineIds.size)
-      setPhase('executing')
+      const { executeRunId: newExecuteRunId } = await startExecute(discoveryRun.runId, [...selectedLineIds], env)
+      startExecuteTracking(newExecuteRunId)
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         setLoadError(`A job is already running (${err.activeRunId ?? 'unknown'}).`)
@@ -295,10 +380,7 @@ export default function OrderWriteUps() {
   // as `${vendorId}::${partNumber}::${serialNumber}` (see jobManager.ts's own
   // lineIdFor), matching the ORIGINAL discovery run's still-in-scope lines
   // (a line execute-time-failed but discovery-time-eligible is still
-  // 'completed'/selectable there). Only available within the same session
-  // that ran discovery — if this page was freshly re-mounted mid-run
-  // (discoveryRun lost, execute run re-attached from the provider instead),
-  // this control simply doesn't render; a known, acceptable limitation.
+  // 'completed'/selectable there).
   const handleRetryFailed = async () => {
     if (!discoveryRun) return
     const failedLineIds = [
@@ -311,9 +393,8 @@ export default function OrderWriteUps() {
     if (failedLineIds.length === 0) return
     setLoadError(null)
     try {
-      const { executeRunId } = await startExecute(discoveryRun.runId, failedLineIds, env)
-      startTracking(executeRunId, failedLineIds.length)
-      setPhase('executing')
+      const { executeRunId: newExecuteRunId } = await startExecute(discoveryRun.runId, failedLineIds, env)
+      startExecuteTracking(newExecuteRunId)
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         setLoadError(`A job is already running (${err.activeRunId ?? 'unknown'}).`)
@@ -324,14 +405,28 @@ export default function OrderWriteUps() {
   }
 
   const resetToStart = () => {
-    setPhase('select')
-    setDiscoveryRun(null)
-    clearTracking()
-    setSelectedLineIds(new Set())
+    clearAll()
+    setDeselectedLineIds(new Set())
     setSelectedVendorIds(new Set())
     getActiveJob()
       .then((r) => setActiveJobRunId(r.activeRunId))
       .catch(() => {})
+  }
+
+  // CLAUDE_CODE_PROMPT (cancel button) — the confirmation dialog's own copy
+  // differs by phase: a cancelled read is silently discarded (nothing was
+  // written), a cancelled write leaves already-completed lines' real orders
+  // standing and returns to review with only the untouched lines re-offered.
+  const handleCancelConfirmed = async () => {
+    setShowCancelConfirm(false)
+    setCancelling(true)
+    try {
+      await cancelActive()
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setCancelling(false)
+    }
   }
 
   const jobIsActive =
@@ -363,16 +458,23 @@ export default function OrderWriteUps() {
         />
       )}
 
-      {effectivePhase === 'discovering' && <RunningBanner label="Running discovery" env={env} />}
+      {effectivePhase === 'discovering' && (
+        <RunningBanner label="Running discovery" env={env} onCancelClick={() => setShowCancelConfirm(true)} cancelling={cancelling} />
+      )}
 
       {effectivePhase === 'review' && discoveryRun && (
         <ReviewState
           run={discoveryRun}
           selectedLineIds={selectedLineIds}
           onToggleLine={toggleLine}
-          onSelectAll={(ids) => setSelectedLineIds(new Set(ids))}
+          onSelectAll={(ids) => {
+            const idSet = new Set(ids)
+            setDeselectedLineIds(new Set([...eligibleLineIds].filter((id) => !idSet.has(id))))
+          }}
           onConfirm={handleConfirm}
           onCancel={resetToStart}
+          restrictToLineIds={cancelledExecute ? eligibleLineIds : null}
+          cancelledExecuteSummary={cancelledExecute ? cancelledExecute.counts : null}
         />
       )}
 
@@ -380,26 +482,59 @@ export default function OrderWriteUps() {
         <ExecuteState
           run={executeRun}
           events={executeEvents}
-          totalLines={executeTotalLines}
+          totalLines={executeRun?.targetLineCount ?? 0}
           done={effectivePhase === 'execute-done'}
           onReset={resetToStart}
           onRetryFailed={discoveryRun ? handleRetryFailed : undefined}
+          onCancelClick={effectivePhase === 'executing' ? () => setShowCancelConfirm(true) : undefined}
+          cancelling={cancelling}
+        />
+      )}
+
+      {showCancelConfirm && (
+        <ConfirmDialog
+          title={effectivePhase === 'discovering' ? 'Cancel this scan?' : 'Cancel this run?'}
+          message={
+            effectivePhase === 'discovering'
+              ? "This will stop the scan where it's at and discard whatever's been found so far. Nothing was written, so there's nothing to undo."
+              : "This will stop the run where it's at. Lines that already completed keep their real orders — only lines that haven't started yet are stopped. You'll return to the review screen with just the not-yet-attempted lines to continue with, if you want to."
+          }
+          confirmLabel="Yes, cancel"
+          cancelLabel="Never mind"
+          onConfirm={handleCancelConfirmed}
+          onCancel={() => setShowCancelConfirm(false)}
         />
       )}
     </div>
   )
 }
 
-function RunningBanner({ label, env }: { label: string; env: MxiEnv }) {
+function RunningBanner({
+  label,
+  env,
+  onCancelClick,
+  cancelling,
+}: {
+  label: string
+  env: MxiEnv
+  onCancelClick: () => void
+  cancelling: boolean
+}) {
   return (
-    <Card className="flex items-center gap-3 p-6">
-      <Loader2 size={20} className="animate-spin text-accent" />
-      <div>
-        <p className="text-sm font-semibold text-text">
-          {label} ({env})...
-        </p>
-        <p className="mt-0.5 text-xs text-muted">This can take a few minutes — results appear once discovery finishes.</p>
+    <Card className="flex items-center justify-between gap-3 p-6">
+      <div className="flex items-center gap-3">
+        <Loader2 size={20} className="animate-spin text-accent" />
+        <div>
+          <p className="text-sm font-semibold text-text">
+            {label} ({env})...
+          </p>
+          <p className="mt-0.5 text-xs text-muted">This can take a few minutes — results appear once discovery finishes.</p>
+        </div>
       </div>
+      <SecondaryButton onClick={onCancelClick} disabled={cancelling}>
+        <StopCircle size={16} />
+        {cancelling ? 'Cancelling...' : 'Cancel'}
+      </SecondaryButton>
     </Card>
   )
 }
@@ -496,6 +631,8 @@ function ReviewState({
   onSelectAll,
   onConfirm,
   onCancel,
+  restrictToLineIds,
+  cancelledExecuteSummary,
 }: {
   run: RunStatusResponse
   selectedLineIds: Set<string>
@@ -503,9 +640,15 @@ function ReviewState({
   onSelectAll: (ids: string[]) => void
   onConfirm: () => void
   onCancel: () => void
+  /** CLAUDE_CODE_PROMPT (cancel button) — non-null after an execute cancel: only these not-yet-attempted lineIds are offered, so re-confirming can never duplicate an already-completed line's real order. Null for a fresh discovery (every completed line is offered, as before). */
+  restrictToLineIds: Set<string> | null
+  /** Counts from the cancelled execute run, shown as context for why the offered list is smaller than the original discovery. */
+  cancelledExecuteSummary: RunStatusResponse['counts'] | null
 }) {
   const lines = run.lines ?? []
-  const selectable = lines.filter((l) => l.status === 'completed')
+  const selectable = (restrictToLineIds ? lines.filter((l) => restrictToLineIds.has(l.lineId)) : lines).filter(
+    (l) => l.status === 'completed',
+  )
   const exceptions = lines.filter((l) => l.status === 'exception')
 
   const now = useNow(CLOCK_TICK_MS)
@@ -514,6 +657,15 @@ function ReviewState({
 
   return (
     <div className="space-y-4">
+      {cancelledExecuteSummary && (
+        <div className="flex items-center gap-2 rounded-md border border-warning bg-warning-soft px-4 py-2.5 text-sm text-text">
+          <StopCircle size={15} className="text-warning" />
+          Run cancelled — {cancelledExecuteSummary.completed} line(s) already completed (real orders, untouched) and{' '}
+          {cancelledExecuteSummary.exception + cancelledExecuteSummary.skipped} needed review. Only the lines below never
+          got attempted.
+        </div>
+      )}
+
       <div
         className={`flex items-center gap-2 rounded-md border px-4 py-2.5 text-sm ${
           isStale ? 'border-warning bg-warning-soft text-text' : 'border-border bg-surface text-muted'
@@ -629,6 +781,8 @@ function ExecuteState({
   done,
   onReset,
   onRetryFailed,
+  onCancelClick,
+  cancelling,
 }: {
   run: RunStatusResponse | null
   events: RunLogEvent[]
@@ -637,6 +791,9 @@ function ExecuteState({
   onReset: () => void
   /** Undefined when the original discovery run is out of scope (e.g. this page was freshly re-mounted mid-run) — the manual retry control simply doesn't render then. */
   onRetryFailed?: () => void
+  /** Undefined once the run is done — nothing left to cancel. */
+  onCancelClick?: () => void
+  cancelling: boolean
 }) {
   const counts = run?.counts ?? { completed: 0, skipped: 0, exception: 0, inProgress: 0, total: 0 }
   const currentLine = Math.min(counts.total + (counts.inProgress > 0 ? 1 : 0), totalLines || counts.total)
@@ -665,11 +822,19 @@ function ExecuteState({
               </div>
             )}
           </div>
-          {run && (
-            <Badge tone={run.status === 'failed' ? 'danger' : run.status === 'partial' ? 'warning' : run.status === 'completed' ? 'success' : 'accent'}>
-              {run.status}
-            </Badge>
-          )}
+          <div className="flex items-center gap-2">
+            {run && (
+              <Badge tone={run.status === 'failed' ? 'danger' : run.status === 'partial' ? 'warning' : run.status === 'completed' ? 'success' : 'accent'}>
+                {run.status}
+              </Badge>
+            )}
+            {onCancelClick && (
+              <SecondaryButton onClick={onCancelClick} disabled={cancelling}>
+                <StopCircle size={16} />
+                {cancelling ? 'Cancelling...' : 'Cancel'}
+              </SecondaryButton>
+            )}
+          </div>
         </div>
         {run?.fatalError && (
           <div className="mt-3 rounded-md border border-danger bg-danger-soft px-3 py-2 text-sm text-text">

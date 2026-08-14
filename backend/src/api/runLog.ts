@@ -1,6 +1,7 @@
 import type { ProcessLineResult } from '../writeUps/aeroRepair/processLine.js';
 import type { DiscoveredLine } from '../writeUps/aeroRepair/batchDiscovery.js';
 import type { VendorCodeWriteUpOutcome } from '../writeUps/shared/vendorCodeWriteUp.js';
+import type { UsageParmRow } from '../writeUps/shared/partOwnDetails.js';
 
 /**
  * Frontend-facing structured event — never raw CLI stdout. One plain-English
@@ -31,6 +32,14 @@ export interface RunLogEvent {
   exceptionType?: string;
   /** Full technical text — collapsed by default behind "Show technical details." */
   detail?: string;
+  /**
+   * CLAUDE_CODE_PROMPT (email-maintenance-records button, 2026-08-14) —
+   * only ever set on exceptionType 'zero_usage' events, for the frontend's
+   * "Email Maintenance Records" draft button. Structured (not folded into
+   * `detail`) so the frontend can build a clean plain-text table rather
+   * than parsing it back out of a free-text technical-details blob.
+   */
+  usageRows?: UsageParmRow[];
 }
 
 /**
@@ -185,7 +194,15 @@ export function aeroRepairResultToLogEvent(
     case 'unrecognized_station':
       return { ...base, status: 'exception', summary: "This line's station isn't in the routing table yet. Needs manual review.", exceptionType: 'unrecognized_station' };
     case 'zero_usage':
-      return { ...base, status: 'exception', summary: 'Times and cycles read as zero — records issue. Needs manual review.', exceptionType: 'zero_usage' };
+      return {
+        ...base,
+        partNumber: result.partNumber,
+        serialNumber: result.serialNumber,
+        status: 'exception',
+        summary: 'Times and cycles read as zero — records issue. Needs manual review.',
+        exceptionType: 'zero_usage',
+        usageRows: result.usageRows,
+      };
     case 'unassigned_task_multiple_present':
       return {
         ...base,
@@ -299,9 +316,27 @@ export function vendorCodeOutcomeToLogEvent(
     case 'no_removal_task_info_found':
       return { ...base, partNumber: outcome.partNumber, serialNumber: outcome.serialNumber, status: 'exception', summary: 'No task info available for this line. Needs manual review.', exceptionType: 'no_removal_task_info_found' };
     case 'zero_usage':
-      return { ...base, partNumber: outcome.partNumber, serialNumber: outcome.serialNumber, status: 'exception', summary: 'Times and cycles read as zero — records issue. Needs manual review.', exceptionType: 'zero_usage' };
+      return {
+        ...base,
+        partNumber: outcome.partNumber,
+        serialNumber: outcome.serialNumber,
+        status: 'exception',
+        summary: 'Times and cycles read as zero — records issue. Needs manual review.',
+        exceptionType: 'zero_usage',
+        usageRows: outcome.usageRows,
+      };
     case 'usage_table_absent_unexpected':
       return { ...base, partNumber: outcome.partNumber, serialNumber: outcome.serialNumber, status: 'exception', summary: 'Expected to find times and cycles but no table was there. Needs manual review.', exceptionType: 'usage_table_absent_unexpected' };
+    case 'receiving_notes_flagged_account':
+      return {
+        ...base,
+        partNumber: outcome.partNumber,
+        serialNumber: outcome.serialNumber,
+        status: 'exception',
+        summary: 'Receiving notes mention "account" — flagged rather than risk the wrong Charge To Account. Needs manual review.',
+        exceptionType: 'receiving_notes_flagged_account',
+        detail: outcome.receivingNotes,
+      };
     case 'authorization_not_confirmed':
       return {
         ...base,

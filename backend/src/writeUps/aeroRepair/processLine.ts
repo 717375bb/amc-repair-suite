@@ -6,6 +6,7 @@ import { appendDiscoveryLogRows, type CompletedRow, type ExceptionRow } from './
 import { issueGeneratedOrder, moveOutboundShipmentToDock, readOrderRealState } from './issueOrder.js';
 import { isSessionLossError } from './retryBackoff.js';
 import { runAeroRepairWriteUp } from './writeUp.js';
+import type { UsageParmRow } from './partDetails.js';
 
 export const LOG_FILE_PATH = path.join('data', 'aero-repair-writeup-log.xlsx');
 const REVIEWED_BY = 'batch-execute-automated';
@@ -32,7 +33,14 @@ export type ProcessLineResult =
   | { status: 'multiple_candidate_tasks'; stationCode: string; candidateNames: string[] }
   | { status: 'ad_hoc_pending_manual_continuation'; serialNumber: string; taskName: string }
   | { status: 'unrecognized_station'; stationCode: string }
-  | { status: 'zero_usage' }
+  /**
+   * CLAUDE_CODE_PROMPT (email-maintenance-records button, 2026-08-14) —
+   * partNumber/serialNumber/usageRows added (previously carried nothing at
+   * all) per explicit user instruction, so the frontend can build a
+   * plain-text times/cycles table for the new "email Maintenance Records"
+   * draft button without re-reading MXI.
+   */
+  | { status: 'zero_usage'; partNumber: string; serialNumber: string; usageRows: UsageParmRow[] }
   | { status: 'unassigned_task_multiple_present'; candidateCount: number }
   | { status: 'unassigned_task_detection_suspect' }
   | { status: 'no_removal_task_info_found' }
@@ -275,11 +283,11 @@ async function processLineInner(
       outcome: 'zero_usage',
       stationCode: null,
       routedLocation: null,
-      filledFieldsJson: JSON.stringify({ serialNumber: writeUpOutcome.serialNumber }, null, 2),
+      filledFieldsJson: JSON.stringify({ serialNumber: writeUpOutcome.serialNumber, usageRows: writeUpOutcome.usageRows }, null, 2),
       errorMessage: null,
       orderNumber: null,
     });
-    return { status: 'zero_usage' };
+    return { status: 'zero_usage', partNumber, serialNumber: writeUpOutcome.serialNumber, usageRows: writeUpOutcome.usageRows };
   }
   if (writeUpOutcome.status === 'unassigned_task_multiple_present') {
     insertWriteUpAction(db, {

@@ -17,7 +17,7 @@ export type EsdClassification =
   | 'quote_sent_reference'
   | 'none'
 export type EsdFlag = 'ok' | 'no_esd_found' | 'orphaned_vendor_row' | 'orphaned_cra_row'
-export type EsdJobStatus = 'pending' | 'running' | 'completed' | 'failed'
+export type EsdJobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
 export type EsdJobKind = 'compare' | 'write'
 export type MxiEnv = 'stage' | 'production'
 
@@ -84,6 +84,8 @@ export interface EsdRunStatusResponse {
   result: EsdCompareResult | null
   writeEnv: MxiEnv | null
   writeResults: EsdWriteOrderResult[]
+  /** kind === 'write' only — the compare run this write came from (see esdFinderJobManager.ts's Job.sourceCompareRunId docstring). */
+  sourceCompareRunId: string | null
 }
 
 // See lib/api.ts's docstring — same #6 real-bug fix, same reason: '' (a
@@ -154,7 +156,7 @@ export function peekFile(file: File, role: 'vendor' | 'cra'): Promise<{ fileName
   return uploadRequest('/api/esd/peek', formData)
 }
 
-export function getActiveEsdJob(): Promise<{ activeRunId: string | null }> {
+export function getActiveEsdJob(): Promise<{ activeRunId: string | null; kind: EsdJobKind | null }> {
   return jsonRequest('/api/esd/active-job')
 }
 
@@ -171,4 +173,9 @@ export function getEsdRunStatus(runId: string): Promise<EsdRunStatusResponse> {
 
 export function startWrite(runId: string, orderNumbers: string[], env: MxiEnv): Promise<{ runId: string; env: MxiEnv }> {
   return jsonPostRequest('/api/esd/write', { runId, orderNumbers, env })
+}
+
+/** CLAUDE_CODE_PROMPT (cancel button) — cancels whichever ESD Finder run (compare or write) this runId refers to. */
+export function cancelEsdRun(runId: string): Promise<{ ok: true }> {
+  return jsonPostRequest(`/api/esd/runs/${encodeURIComponent(runId)}/cancel`, {})
 }

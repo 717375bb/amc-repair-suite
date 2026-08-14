@@ -25,6 +25,7 @@ import {
   openPartOwnDetails,
   readPartOwnDetails,
   recheckRepairLineForSchedule,
+  type UsageParmRow,
 } from './partDetails.js';
 import { isSessionLossError } from './retryBackoff.js';
 import { routeStationToAeroRepairLocation, type RoutingResult } from './routing.js';
@@ -93,7 +94,12 @@ type AeroRepairWriteUpOutcomeVariant =
       taskName: string;
     }
   | { status: 'unrecognized_station'; partNumber: string; stationCode: string }
-  | { status: 'zero_usage'; partNumber: string; serialNumber: string }
+  /**
+   * CLAUDE_CODE_PROMPT (email-maintenance-records button, 2026-08-14) —
+   * usageRows added per explicit user instruction, same shape/reasoning as
+   * the shared vendor-code engine's own zero_usage outcome.
+   */
+  | { status: 'zero_usage'; partNumber: string; serialNumber: string; usageRows: UsageParmRow[] }
   /**
    * CLAUDE_CODE_PROMPT ("Create Order Only" terminal state) — confirmed
    * scope: applies to Aero Repair too, not excluded. The RO was created
@@ -480,7 +486,7 @@ export async function runAeroRepairWriteUp(
         );
       } else {
         await closePartOwnDetails(page);
-        return { status: 'zero_usage', partNumber, serialNumber, unassignedTaskWasAssigned };
+        return { status: 'zero_usage', partNumber, serialNumber, usageRows: partOwnDetails.usageRows, unassignedTaskWasAssigned };
       }
     }
 

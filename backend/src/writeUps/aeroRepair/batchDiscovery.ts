@@ -417,10 +417,19 @@ export async function findNoWorkPackageLinesForPart(
   }));
 }
 
-export async function discoverEligibleLines(client: MxiClient): Promise<DiscoveredLine[]> {
+/**
+ * CLAUDE_CODE_PROMPT (cancel button) — optional cooperative-cancellation
+ * signal, checked once per part number (this loop's natural unit of work,
+ * same granularity discoveryRunner.ts already uses between vendors). Never
+ * checked mid-Playwright-action — see cancellationWatcher.ts's docstring.
+ * Omitted entirely by every other caller (unaffected, undefined is never
+ * "aborted").
+ */
+export async function discoverEligibleLines(client: MxiClient, signal?: AbortSignal): Promise<DiscoveredLine[]> {
   const results: DiscoveredLine[] = [];
 
   for (const partNumber of AERO_REPAIR_PART_NUMBERS) {
+    if (signal?.aborted) break;
     const candidates = await findCandidateLinesWithRetry(client, partNumber);
     const page = await client.getAuthenticatedPage();
 

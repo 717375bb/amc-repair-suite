@@ -6,6 +6,7 @@ import { createReadyMxiClient } from '../../mxiWriter/cliMxiClient.js';
 import type { MxiEnv } from '../../mxiWriter/config.js';
 import { assembleNoteText, toMxiDateFormat } from '../../mxiWriter/esdFormatting.js';
 import { writeEsdAndNotes } from '../../mxiWriter/writeEsdAndNotes.js';
+import { watchStdinForCancellation } from './cancellationWatcher.js';
 
 /**
  * Open Order ESD Finder — write job runner. Spawned by
@@ -105,9 +106,14 @@ async function main(): Promise<void> {
     return;
   }
 
+  // CLAUDE_CODE_PROMPT (cancel button) — checked before each order, never
+  // mid-write. See cancellationWatcher.ts's docstring for the mechanism.
+  const cancelSignal = watchStdinForCancellation();
+
   const client = await createReadyMxiClient(env);
   try {
     for (const row of rows) {
+      if (cancelSignal.aborted) break;
       // Defense-in-depth for the retry-only-failed-orders requirement:
       // never re-attempt an order this esd_inference_id already has a real
       // successful mxi_writes row for, regardless of what the caller

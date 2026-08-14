@@ -7,6 +7,7 @@ import { findCandidateLinesForVendorCode } from '../../writeUps/shared/vendorCod
 import { getVendorConfig } from '../../writeUps/shared/vendorRegistry.js';
 import { AERO_REPAIR_VENDOR_ID, listVendors } from '../vendors.js';
 import { discoveredLineToLogEvent, type RunLogEvent } from '../runLog.js';
+import { watchStdinForCancellation } from './cancellationWatcher.js';
 
 /**
  * READ/WRITE BOUNDARY, ENFORCED STRUCTURALLY (carry-forward rule 6): this
@@ -53,8 +54,13 @@ function parseArgs(): { env: MxiEnv; vendorIds: string[] } {
   return { env: rawEnv, vendorIds: rawVendors.split(',').filter(Boolean) };
 }
 
-async function runAeroRepairDiscovery(client: MxiClient, vendorDisplayName: string, seqRef: { seq: number }): Promise<void> {
-  const lines = await discoverEligibleLines(client);
+async function runAeroRepairDiscovery(
+  client: MxiClient,
+  vendorDisplayName: string,
+  seqRef: { seq: number },
+  signal: AbortSignal,
+): Promise<void> {
+  const lines = await discoverEligibleLines(client, signal);
   for (const line of lines) {
     emit({ type: 'line', event: discoveredLineToLogEvent(seqRef.seq++, AERO_REPAIR_VENDOR_ID, vendorDisplayName, line) });
   }
@@ -88,18 +94,24 @@ async function main(): Promise<void> {
   const { env, vendorIds } = parseArgs();
   const vendorList = listVendors();
   const seqRef = { seq: 0 };
+  // CLAUDE_CODE_PROMPT (cancel button) — cooperative cancellation, checked
+  // between vendors (and, for Aero Repair, between part numbers — see
+  // discoverEligibleLines' own signal param) rather than mid-Playwright-
+  // action. See cancellationWatcher.ts's docstring for why.
+  const cancelSignal = watchStdinForCancellation();
 
   let client: MxiClient | undefined;
   try {
     client = await createReadyMxiClient(env);
 
     for (const vendorId of vendorIds) {
+      if (cancelSignal.aborted) break;
       const vendorMeta = vendorList.find((v) => v.id === vendorId);
       const vendorDisplayName = vendorMeta?.displayName ?? vendorId;
       emit({ type: 'vendor-started', vendorId });
 
       if (vendorId === AERO_REPAIR_VENDOR_ID) {
-        await runAeroRepairDiscovery(client, vendorDisplayName, seqRef);
+        await runAeroRepairDiscovery(client, vendorDisplayName, seqRef, cancelSignal);
       } else {
         await runVendorCodeDiscovery(client, vendorId, vendorDisplayName, seqRef);
       }

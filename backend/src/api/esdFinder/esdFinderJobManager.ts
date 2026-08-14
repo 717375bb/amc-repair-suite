@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { mxiCredentialEnvOverrides, spawnRunner } from '../jobManager.js';
+import type { ChildProcess } from 'node:child_process';
+import { mxiCredentialEnvOverrides, requestCancellation, spawnRunner } from '../jobManager.js';
 import type { EsdCompareResult } from '../jobRunners/esdCompareRunner.js';
 import type { MxiEnv } from '../../mxiWriter/config.js';
 import type { MxiCredential } from '../../auth/authService.js';
@@ -22,7 +23,8 @@ import type { MxiCredential } from '../../auth/authService.js';
  */
 
 export type EsdJobKind = 'compare' | 'write';
-export type EsdJobStatus = 'pending' | 'running' | 'completed' | 'failed';
+/** 'cancelled' — CLAUDE_CODE_PROMPT (cancel button) — same meaning as jobManager.ts's own JobStatus['cancelled']; see cancelEsdJob(). */
+export type EsdJobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
 
 export interface EsdWriteOrderResult {
   orderNumber: string;
@@ -44,6 +46,19 @@ export interface EsdJob {
   writeEnv: MxiEnv | null;
   /** kind === 'write' only — grows live as each order finishes. */
   writeResults: EsdWriteOrderResult[];
+  /**
+   * CLAUDE_CODE_PROMPT (cancel button) — kind === 'write' only: the
+   * in-memory compare job's own string runId (NOT the SQL `runs.id` this
+   * write job separately carries via dbRunId) — needed so a freshly
+   * re-attached page (e.g. after a cancel-and-revert, or a browser reload
+   * mid-write) can re-fetch the full compare result to show the review
+   * screen again, without a client-side-only reference to fall back on.
+   */
+  sourceCompareRunId: string | null;
+  /** The spawned runner's own process handle — needed so cancelEsdJob() can signal it. Null only in the brief window before spawnRunner() returns. */
+  process: ChildProcess | null;
+  /** True once cancelEsdJob() has been called for this run. */
+  cancelRequested: boolean;
 }
 
 const jobs = new Map<string, EsdJob>();
@@ -109,6 +124,9 @@ export function startEsdCompareJob(vendorFiles: UploadedFileRef[], craFile: Uplo
     result: null,
     writeEnv: null,
     writeResults: [],
+    sourceCompareRunId: null,
+    process: null,
+    cancelRequested: false,
   };
   jobs.set(runId, job);
   activeRunId = runId;
@@ -117,7 +135,7 @@ export function startEsdCompareJob(vendorFiles: UploadedFileRef[], craFile: Uplo
     fs.rm(runDir, { recursive: true, force: true }, () => {});
   };
 
-  spawnRunner(
+  job.process = spawnRunner(
     'src/api/jobRunners/esdCompareRunner.ts',
     ['--vendor-files', JSON.stringify(stagedVendorFiles), '--cra-file', JSON.stringify(stagedCraFile)],
     (envelope) => {
@@ -132,9 +150,13 @@ export function startEsdCompareJob(vendorFiles: UploadedFileRef[], craFile: Uplo
     },
     (code) => {
       job.completedAt = new Date().toISOString();
-      job.status = job.fatalError || code !== 0 || !job.result ? 'failed' : 'completed';
-      if (!job.fatalError && job.status === 'failed') {
-        job.fatalError = 'Runner exited without producing a result.';
+      if (job.cancelRequested) {
+        job.status = 'cancelled';
+      } else {
+        job.status = job.fatalError || code !== 0 || !job.result ? 'failed' : 'completed';
+        if (!job.fatalError && job.status === 'failed') {
+          job.fatalError = 'Runner exited without producing a result.';
+        }
       }
       if (activeRunId === runId) activeRunId = null;
       cleanup();
@@ -158,6 +180,7 @@ export function startEsdWriteJob(
   dbRunId: number,
   orderNumbers: string[],
   mxiCredential: MxiCredential,
+  sourceCompareRunId: string,
 ): StartEsdJobResult {
   if (activeRunId) return { ok: false, conflictRunId: activeRunId };
 
@@ -173,11 +196,14 @@ export function startEsdWriteJob(
     result: null,
     writeEnv: env,
     writeResults: [],
+    sourceCompareRunId,
+    process: null,
+    cancelRequested: false,
   };
   jobs.set(runId, job);
   activeRunId = runId;
 
-  spawnRunner(
+  job.process = spawnRunner(
     'src/api/jobRunners/esdWriteRunner.ts',
     ['--env', env, '--esd-run-id', String(dbRunId), '--order-numbers', JSON.stringify(orderNumbers)],
     (envelope) => {
@@ -190,11 +216,31 @@ export function startEsdWriteJob(
     },
     (code) => {
       job.completedAt = new Date().toISOString();
-      job.status = job.fatalError || code !== 0 ? 'failed' : 'completed';
+      job.status = job.cancelRequested ? 'cancelled' : job.fatalError || code !== 0 ? 'failed' : 'completed';
       if (activeRunId === runId) activeRunId = null;
     },
     mxiCredentialEnvOverrides(mxiCredential),
   );
 
   return { ok: true, runId };
+}
+
+export interface CancelEsdJobResult {
+  ok: boolean;
+  error?: string;
+}
+
+/** CLAUDE_CODE_PROMPT (cancel button) — mirrors jobManager.ts's own cancelJob(); see its docstring for the full mechanism. */
+export function cancelEsdJob(runId: string): CancelEsdJobResult {
+  const job = jobs.get(runId);
+  if (!job) return { ok: false, error: `No ESD Finder run found for runId "${runId}".` };
+  if (job.status !== 'running' && job.status !== 'pending') {
+    return { ok: false, error: `Run ${runId} is already ${job.status} — nothing to cancel.` };
+  }
+  if (job.cancelRequested) return { ok: true };
+  job.cancelRequested = true;
+  job.status = 'cancelled';
+  if (activeRunId === runId) activeRunId = null;
+  if (job.process) requestCancellation(job.process);
+  return { ok: true };
 }

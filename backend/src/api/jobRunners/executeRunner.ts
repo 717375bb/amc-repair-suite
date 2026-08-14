@@ -11,6 +11,7 @@ import { getVendorConfig } from '../../writeUps/shared/vendorRegistry.js';
 import { logVendorCodeOutcome } from '../../writeUps/shared/vendorCodeOutcomeLogging.js';
 import { AERO_REPAIR_VENDOR_ID, listVendors } from '../vendors.js';
 import { aeroRepairResultToLogEvent, quarantinedLineToLogEvent, vendorCodeOutcomeToLogEvent, type RunLogEvent } from '../runLog.js';
+import { watchStdinForCancellation } from './cancellationWatcher.js';
 
 /**
  * The one file in this feature with a real import path to write/submit
@@ -48,8 +49,15 @@ function emit(envelope: ExecuteEnvelope): void {
  */
 const SECOND_PASS_SETTLE_DELAY_MS = 120_000;
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/** CLAUDE_CODE_PROMPT (cancel button) — resolves early if cancelled mid-wait, so a cancel during the settle delay doesn't force waiting out the full 2 minutes. */
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal.addEventListener('abort', () => {
+      clearTimeout(timer);
+      resolve();
+    }, { once: true });
+  });
 }
 
 function parseArgs(): { env: MxiEnv; targets: ExecuteTarget[] } {
@@ -81,6 +89,11 @@ async function main(): Promise<void> {
   // attempt, immediate-finalize behavior (no evidence tied that family to
   // this failure class, and this fix stays scoped to what was evidenced).
   const quarantined: ExecuteTarget[] = [];
+  // CLAUDE_CODE_PROMPT (cancel button) — checked before each line (main
+  // pass), before/during the settle delay, and before each quarantined
+  // line (second pass) — never mid-Playwright-action. See
+  // cancellationWatcher.ts's docstring for the full mechanism.
+  const cancelSignal = watchStdinForCancellation();
 
   try {
     client = await createReadyMxiClient(env);
@@ -89,6 +102,7 @@ async function main(): Promise<void> {
     // burned here regardless of outcome; a retryable Aero Repair failure
     // is quarantined and moved past immediately.
     for (const target of targets) {
+      if (cancelSignal.aborted) break;
       const vendorMeta = vendorList.find((v) => v.id === target.vendorId);
       const vendorDisplayName = vendorMeta?.displayName ?? target.vendorId;
 
@@ -134,24 +148,27 @@ async function main(): Promise<void> {
     // outstanding in_progress count from the main pass (see
     // jobManager.ts's applyExecuteEnvelope) that only this pass's
     // terminal event resolves.
-    if (quarantined.length > 0) {
+    if (quarantined.length > 0 && !cancelSignal.aborted) {
       console.error(`[second-pass] ${quarantined.length} line(s) quarantined — settling ${SECOND_PASS_SETTLE_DELAY_MS / 1000}s before automatic retry.`);
-      await sleep(SECOND_PASS_SETTLE_DELAY_MS);
+      await sleep(SECOND_PASS_SETTLE_DELAY_MS, cancelSignal);
 
-      console.error('[second-pass] re-running discovery fresh before reprocessing quarantined line(s)...');
-      try {
-        const freshLines = await discoverEligibleLines(client);
-        console.error(`[second-pass] fresh discovery found ${freshLines.length} real line(s) across all Aero Repair part numbers.`);
-      } catch (err) {
-        console.error(`[second-pass] fresh discovery failed (${err instanceof Error ? err.message : String(err)}) — proceeding to reprocess quarantined line(s) anyway.`);
-      }
+      if (!cancelSignal.aborted) {
+        console.error('[second-pass] re-running discovery fresh before reprocessing quarantined line(s)...');
+        try {
+          const freshLines = await discoverEligibleLines(client);
+          console.error(`[second-pass] fresh discovery found ${freshLines.length} real line(s) across all Aero Repair part numbers.`);
+        } catch (err) {
+          console.error(`[second-pass] fresh discovery failed (${err instanceof Error ? err.message : String(err)}) — proceeding to reprocess quarantined line(s) anyway.`);
+        }
 
-      for (const target of quarantined) {
-        const vendorMeta = vendorList.find((v) => v.id === target.vendorId);
-        const vendorDisplayName = vendorMeta?.displayName ?? target.vendorId;
-        const result = await processLine(db, client, env, target.partNumber, target.serialNumber, 'second');
-        await logProcessLineResult(target, result, env);
-        emit({ type: 'line', event: aeroRepairResultToLogEvent(seq++, target.vendorId, vendorDisplayName, target, result) });
+        for (const target of quarantined) {
+          if (cancelSignal.aborted) break;
+          const vendorMeta = vendorList.find((v) => v.id === target.vendorId);
+          const vendorDisplayName = vendorMeta?.displayName ?? target.vendorId;
+          const result = await processLine(db, client, env, target.partNumber, target.serialNumber, 'second');
+          await logProcessLineResult(target, result, env);
+          emit({ type: 'line', event: aeroRepairResultToLogEvent(seq++, target.vendorId, vendorDisplayName, target, result) });
+        }
       }
     }
 

@@ -12,9 +12,9 @@ import { loadMxiConfig, type MxiEnv } from './mxiWriter/config.js';
 import { assembleNoteText, toMxiDateFormat } from './mxiWriter/esdFormatting.js';
 import { MxiClient } from './mxiWriter/mxiClient.js';
 import { writeEsdAndNotes } from './mxiWriter/writeEsdAndNotes.js';
-import { getActiveJob, getJob, getVendorList, startDiscoveryJob, startExecuteJob } from './api/jobManager.js';
+import { cancelJob, getActiveJob, getJob, getVendorList, startDiscoveryJob, startExecuteJob } from './api/jobManager.js';
 import { isKnownVendorId } from './api/vendors.js';
-import { getActiveEsdJob, getEsdJob, startEsdCompareJob, startEsdWriteJob } from './api/esdFinder/esdFinderJobManager.js';
+import { cancelEsdJob, getActiveEsdJob, getEsdJob, startEsdCompareJob, startEsdWriteJob } from './api/esdFinder/esdFinderJobManager.js';
 import { MissingHeadersError, peekEsdFinderFile, validateHeadersOnly } from './api/esdFinder/ingestion.js';
 import { registerAuthRoutes, requireSession, type AuthedRequest } from './api/authRoutes.js';
 import { getMxiCredentialForUser } from './auth/authService.js';
@@ -192,6 +192,7 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
       counts: job.counts,
       lines: job.lines ? Array.from(job.lines.values()) : undefined,
       sourceDiscoveryRunId: job.sourceDiscoveryRunId,
+      targetLineCount: job.targetLineCount,
     });
   });
 
@@ -204,6 +205,18 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
     const since = Number(req.query.since ?? -1);
     const events = job.log.filter((e) => e.seq > since);
     res.json({ events, latestSeq: job.log.length > 0 ? job.log[job.log.length - 1].seq : since });
+  });
+
+  // CLAUDE_CODE_PROMPT (cancel button) — cancels whichever job (discovery
+  // or execute) this runId refers to, at whatever point it's currently at.
+  // See jobManager.ts's cancelJob() docstring for the real stop mechanism.
+  app.post('/api/runs/:runId/cancel', requireSession, (req, res) => {
+    const result = cancelJob(req.params.runId);
+    if (!result.ok) {
+      res.status(400).json({ error: result.error });
+      return;
+    }
+    res.json({ ok: true });
   });
 
   app.post('/api/execute', requireSession, (req, res) => {
@@ -330,7 +343,7 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
 
   app.get('/api/esd/active-job', requireSession, (_req, res) => {
     const job = getActiveEsdJob();
-    res.json({ activeRunId: job?.runId ?? null });
+    res.json({ activeRunId: job?.runId ?? null, kind: job?.kind ?? null });
   });
 
   app.get('/api/esd/runs/:runId', requireSession, (req, res) => {
@@ -350,7 +363,18 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
       result: job.result,
       writeEnv: job.writeEnv,
       writeResults: job.writeResults,
+      sourceCompareRunId: job.sourceCompareRunId,
     });
+  });
+
+  // CLAUDE_CODE_PROMPT (cancel button) — mirrors /api/runs/:runId/cancel above.
+  app.post('/api/esd/runs/:runId/cancel', requireSession, (req, res) => {
+    const result = cancelEsdJob(req.params.runId);
+    if (!result.ok) {
+      res.status(400).json({ error: result.error });
+      return;
+    }
+    res.json({ ok: true });
   });
 
   // Writes the surviving, non-X'd, actionable, non-duplicate rows from a
@@ -404,7 +428,7 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
 
     const session = (req as AuthedRequest).session!;
     const mxiCredential = getMxiCredentialForUser(authDb, session.userId);
-    const result = startEsdWriteJob(env, compareJob.result.dbRunId, orderNumbers, mxiCredential);
+    const result = startEsdWriteJob(env, compareJob.result.dbRunId, orderNumbers, mxiCredential, runId);
     if (!result.ok) {
       res.status(409).json({ error: 'An ESD Finder job is already running.', activeRunId: result.conflictRunId });
       return;

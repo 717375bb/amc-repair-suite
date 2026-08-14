@@ -8,6 +8,7 @@ import { assembleNoteText } from '../../mxiWriter/esdFormatting.js';
 import { exportExcel } from '../../output/exportExcel.js';
 import type { InferenceRecord, RunSummary } from '../../types.js';
 import { ingestEsdFinderFiles, type DuplicateOrderNumber } from '../esdFinder/ingestion.js';
+import { watchStdinForCancellation } from './cancellationWatcher.js';
 
 /**
  * Open Order ESD Finder — comparison job runner. Spawned by
@@ -105,15 +106,28 @@ async function main(): Promise<void> {
     throw new Error('ANTHROPIC_API_KEY is not set.');
   }
 
+  // CLAUDE_CODE_PROMPT (cancel button) — this runner never opens an MXI
+  // browser (pure file parsing + AI inference + Excel export), so there's
+  // no orphaned-session risk to guard against — checked between phases
+  // purely to skip real, avoidable cost (most importantly the real
+  // Anthropic API calls in 'inferring') once a cancel has been requested,
+  // not to protect a shared resource. See cancellationWatcher.ts's
+  // docstring for the general mechanism this shares with the other 3
+  // runners.
+  const cancelSignal = watchStdinForCancellation();
+
   emit({ type: 'phase', phase: 'ingesting' });
   const { vendorRows, craRows, duplicates } = await ingestEsdFinderFiles(vendorFiles, craFile);
+  if (cancelSignal.aborted) return;
 
   emit({ type: 'phase', phase: 'matching' });
   const matched = matchOrders(vendorRows, craRows);
+  if (cancelSignal.aborted) return;
 
   emit({ type: 'phase', phase: 'inferring' });
   const provider = new AnthropicEsdProvider(apiKey);
   const { records, summary } = await applyInferenceRules(matched, provider);
+  if (cancelSignal.aborted) return;
 
   const db = openDb(path.join('data', 'audit.db'));
   const dbRunId = insertRun(db, {

@@ -1,8 +1,17 @@
 import type { Page } from 'playwright';
 import type { MxiClient } from '../../mxiWriter/mxiClient.js';
 import { waitBeforeRetry } from '../aeroRepair/retryBackoff.js';
-import { AUTH_FLOW_REPAIR, resolveAuthFlowPolicy, resolveShipsetCase, type ResolvedAuthFlowPolicy, type ShipsetCaseConfig, type TerminalState, type VendorConfig } from './vendorConfig.js';
-import { buildChargeToAccountWithSuffix } from './chargeToAccount.js';
+import {
+  AUTH_FLOW_REPAIR,
+  resolveAuthFlowPolicy,
+  resolveShipsetCase,
+  WARRANTY_TERMINAL_STATE_CHARGE_TO_ACCOUNT_SUFFIX,
+  type ResolvedAuthFlowPolicy,
+  type ShipsetCaseConfig,
+  type TerminalState,
+  type VendorConfig,
+} from './vendorConfig.js';
+import { buildChargeToAccountWithSuffix, buildDefaultRepairChargeToAccount } from './chargeToAccount.js';
 import { classifyUsageTable } from './usageTable.js';
 import {
   createAdHocTaskForCandidate,
@@ -30,7 +39,7 @@ import { clickRequestAuthorization, confirmAuthorizationRequest, selectAuthFlow 
 import { issueGeneratedOrder, moveOutboundShipmentToDock, readOrderRealState } from './issueAndDock.js';
 import { isUnassignedTaskPresent, navigateToUnassignedTasksView, closeUnassignedTasksView, waitForUnassignedTasksSectionResolved } from './unassignedTasks.js';
 import { isNoTasksAssignedException } from '../aeroRepair/noTaskException.js';
-import { closePartOwnDetails, openPartOwnDetails, readPartOwnDetails, type PartOwnDetails } from './partOwnDetails.js';
+import { closePartOwnDetails, openPartOwnDetails, readPartOwnDetails, type PartOwnDetails, type UsageParmRow } from './partOwnDetails.js';
 import { completeCreateOrderOnly, composeAwaitingRmaNote, composeDoNotShipNote, verifyExternalReferenceCommitted, ZERO_USAGE_DO_NOT_SHIP_REASON } from './createOrderOnly.js';
 import { closePartDetailsReceivingNotes, openPartDetailsReceivingNotes, readPartDetailsReceivingNotes } from './partDetailsReceivingNotes.js';
 import { isRmaVendor } from './rmaVendors.js';
@@ -379,8 +388,28 @@ export type VendorCodeWriteUpOutcome =
   | { status: 'no_candidate_lines'; vendorCode: string }
   | { status: 'unassigned_task_present'; partNumber: string; serialNumber: string; taskDetail: string }
   | { status: 'no_removal_task_info_found'; partNumber: string; serialNumber: string }
-  | { status: 'zero_usage'; partNumber: string; serialNumber: string }
+  /**
+   * CLAUDE_CODE_PROMPT (email-maintenance-records button, 2026-08-14) —
+   * usageRows added per explicit user instruction, so the frontend can
+   * build a plain-text times/cycles table for the new "email Maintenance
+   * Records" draft button without re-reading MXI. Same UsageParmRow shape
+   * already used everywhere else this table is read/composed
+   * (shared/partOwnDetails.ts).
+   */
+  | { status: 'zero_usage'; partNumber: string; serialNumber: string; usageRows: UsageParmRow[] }
   | { status: 'usage_table_absent_unexpected'; partNumber: string; serialNumber: string }
+  /**
+   * CLAUDE_CODE_PROMPT (new vendor batch, 2026-08-14) — per explicit user
+   * instruction: "If anything comes up in the part notes that reads in the
+   * word 'account', flag it and move on. I don't want wrong accounts."
+   * Fires only for vendors with hasPartDetailsStep set, checked BEFORE
+   * Schedule Work Package is clicked — no order is created for this line,
+   * same "refuse to guess" discipline as usage_table_absent_unexpected
+   * above. A case-insensitive plain substring match on the real receiving-
+   * notes text (shared/partDetailsReceivingNotes.ts), not a keyword list —
+   * the instruction was specifically "the word 'account'".
+   */
+  | { status: 'receiving_notes_flagged_account'; partNumber: string; serialNumber: string; receivingNotes: string }
   | {
       status: 'authorization_not_confirmed';
       partNumber: string;
@@ -621,7 +650,12 @@ export async function runVendorCodeWriteUp(
           );
         } else {
           await closePartOwnDetails(page);
-          return { status: 'zero_usage', partNumber: candidate.partNumber, serialNumber: candidate.serialNumber };
+          return {
+            status: 'zero_usage',
+            partNumber: candidate.partNumber,
+            serialNumber: candidate.serialNumber,
+            usageRows: partOwnDetails.usageRows,
+          };
         }
       }
       if (usageClassification === 'absent' && resolved.usageTableExpectation !== 'expectedAbsent') {
@@ -645,20 +679,36 @@ export async function runVendorCodeWriteUp(
       // CLAUDE_CODE_PROMPT (#1, new vendors) — the part-level Details /
       // receiving-notes step, real from discovery-76863-AJS-sn-recording.ts.
       // Only vendors confirmed to show this in their own recording opt in
-      // (76863, 1DH10) — confirmed ABSENT from 4X623's recording, so never
-      // assumed universal. Dormant read: the value is logged for visibility
-      // but not consumed by any charge-to-account decision this batch
-      // (that's Aerotron 2N512's rule, deferred). Real recorded sequence
-      // runs this AFTER closePartOwnDetails and BEFORE the recheck below —
-      // not the other way around.
+      // (originally 76863, 1DH10; the 2026-08-14 batch enables it for all 26
+      // new vendors per explicit user instruction — "let live testing
+      // confirm" — so a vendor that genuinely lacks this step will surface
+      // as a real, visible failure the first time it's run, not a silent
+      // guess). Real recorded sequence runs this AFTER closePartOwnDetails
+      // and BEFORE the recheck below — not the other way around. The
+      // read value is now consumed: see the "account" flag check right
+      // below (CLAUDE_CODE_PROMPT, new vendor batch, 2026-08-14).
       if (config.hasPartDetailsStep) {
         await openPartDetailsReceivingNotes(page, candidate.linkText, candidate.partNumber);
         const receivingNotes = await readPartDetailsReceivingNotes(page);
         console.log(
           `[vendor-config] ${config.id}: part-level receiving notes for ${candidate.partNumber}/${candidate.serialNumber}: ` +
-            `${receivingNotes ? JSON.stringify(receivingNotes) : '(none found)'} — dormant, not used in any decision this batch.`,
+            `${receivingNotes ? JSON.stringify(receivingNotes) : '(none found)'}.`,
         );
         await closePartDetailsReceivingNotes(page);
+
+        if (receivingNotes && /account/i.test(receivingNotes)) {
+          console.error(
+            `[vendor-config] ${config.id} ${candidate.partNumber}/${candidate.serialNumber}: receiving notes ` +
+              `mention "account" — flagging for manual review per explicit instruction rather than risk writing ` +
+              `to the wrong Charge To Account. Nothing filled, no order created.`,
+          );
+          return {
+            status: 'receiving_notes_flagged_account',
+            partNumber: candidate.partNumber,
+            serialNumber: candidate.serialNumber,
+            receivingNotes,
+          };
+        }
       }
     }
 
@@ -714,7 +764,21 @@ export async function runVendorCodeWriteUp(
         }
       }
     } else {
-      chargeToAccountAfter = buildChargeToAccountWithSuffix(chargeToAccountBefore, config.form.chargeToAccountSuffix);
+      // CLAUDE_CODE_PROMPT (charge-to-account default rule, 2026-08-14) —
+      // per explicit user instruction: unless a vendor is explicitly stated
+      // otherwise, this suite always lands on "<CR-prefix>REPAIR" here,
+      // regardless of what the removal site left autofilled — the ONLY
+      // exception in this shared engine is Collins (76863's own fixed
+      // COLLINSDISPATCH100 suffix, which still needs an exact-shape match
+      // since it's a real, different value, not "REPAIR" with a different
+      // prefix). Aero Repair's separate WHEELSBRAKES flow lives in its own
+      // module entirely and is untouched by this. See
+      // chargeToAccount.ts's buildDefaultRepairChargeToAccount for the
+      // "default to CR7 if no CR-prefix is present at all" rule.
+      chargeToAccountAfter =
+        config.form.chargeToAccountSuffix === WARRANTY_TERMINAL_STATE_CHARGE_TO_ACCOUNT_SUFFIX
+          ? buildDefaultRepairChargeToAccount(chargeToAccountBefore)
+          : buildChargeToAccountWithSuffix(chargeToAccountBefore, config.form.chargeToAccountSuffix);
       await fillChargeToAccount(page, chargeToAccountAfter);
     }
     await fillPurchasingContact(page, config.form.purchasingContact);

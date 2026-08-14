@@ -110,6 +110,75 @@ export const VENDOR_REGISTRY: Readonly<Record<string, VendorConfig>> = Object.fr
       chargeToAccount: 'CR7HMV',
     },
   }),
+  // CLAUDE_CODE_PROMPT (new vendor batch, 2026-08-14) — 26 vendors added at
+  // once, all confirmed by explicit user direction to be the SAME real
+  // process as the family above (vendor-code search + BN-prefix override +
+  // warranty terminal state) — no per-vendor Playwright recording exists
+  // for this batch (a deliberate departure from this project's usual
+  // practice, at explicit user direction: "let live testing confirm"). All
+  // 26 get hasPartDetailsStep: true per explicit instruction, even though
+  // only two vendors in the whole family (76863, 1DH10) have ever had this
+  // step confirmed present in a real recording — a vendor that genuinely
+  // lacks it will surface as a real, visible failure the first time it
+  // runs, not a silent guess. Real receiving notes are now checked for the
+  // word "account" (case-insensitive) and flagged for manual review rather
+  // than risking a wrong Charge To Account — see vendorCodeWriteUp.ts's
+  // 'receiving_notes_flagged_account' outcome.
+  //
+  // 3 of these 26 are RMA vendors (see shared/rmaVendors.ts's
+  // RMA_VENDOR_IDS) — a separate, pure vendor-code-membership rule, not
+  // anything set on the VendorConfig itself here.
+  //
+  // DCM GROUP INC's code: an earlier one-off correction from the user gave
+  // "VC005241", but that correction was applied to a vendor list later
+  // found to be entirely wrong (certificate numbers, not vendor codes).
+  // The FINAL corrected list (the one the user explicitly called "the
+  // correct list") gives "VC00524" (no trailing "1") — using that value
+  // here since it's the later, more authoritative, and most thoroughly
+  // reconciled source. Flagged to the user rather than silently picking
+  // one, per this project's "never guess on vendor codes" discipline.
+  VC00814: buildWarrantyTerminalStateVendorConfig('VC00814', 'AIRGROUP DYNAMICS INC', { hasPartDetailsStep: true }),
+  VC00584: buildWarrantyTerminalStateVendorConfig('VC00584', 'AIRLINE COMPONENT PARTS LLC', { hasPartDetailsStep: true }),
+  '5YRM0': buildWarrantyTerminalStateVendorConfig('5YRM0', 'CAMTRONICS LLC', { hasPartDetailsStep: true }),
+  VC00569: buildWarrantyTerminalStateVendorConfig('VC00569', 'CHAMPION AEROSPACE LLC', { hasPartDetailsStep: true }),
+  VC00870: buildWarrantyTerminalStateVendorConfig('VC00870', 'CIRCOR AEROSPACE INC', { hasPartDetailsStep: true }),
+  '1BAY3': buildWarrantyTerminalStateVendorConfig('1BAY3', 'CSI AEROSPACE INC', { hasPartDetailsStep: true }),
+  VC00524: buildWarrantyTerminalStateVendorConfig('VC00524', 'DCM GROUP INC', { hasPartDetailsStep: true }),
+  // RMA vendor — see shared/rmaVendors.ts's RMA_VENDOR_IDS.
+  '8719': buildWarrantyTerminalStateVendorConfig('8719', 'DUCOMMUN TECHONOLGIES', { hasPartDetailsStep: true }),
+  '2750': buildWarrantyTerminalStateVendorConfig('2750', 'EATON CORPORATION', { hasPartDetailsStep: true }),
+  '59875': buildWarrantyTerminalStateVendorConfig('59875', 'EATON INDUSTRIAL CORPORATION', { hasPartDetailsStep: true }),
+  VC00879: buildWarrantyTerminalStateVendorConfig('VC00879', 'FIRSTMARK AEROSPACE CORPORATION', { hasPartDetailsStep: true }),
+  // Real recording evidence exists for this vendor
+  // (discovery-7A9Y2-AJS--recording (5).ts, reviewed during the Skypaxxx
+  // investigation): real order P000BDWB, direct-fill Charge To Account
+  // "CR7REPAIR" — matches this family's own default suffix exactly, no
+  // override needed. hasPartDetailsStep independently confirmed present
+  // for this vendor too, not just applied via the batch-wide default.
+  '1DH10': buildWarrantyTerminalStateVendorConfig('1DH10', 'HRD AERO SYSTEMS INC', { hasPartDetailsStep: true }),
+  // RMA vendor — see shared/rmaVendors.ts's RMA_VENDOR_IDS.
+  '58657': buildWarrantyTerminalStateVendorConfig('58657', 'LEACH - CA', { hasPartDetailsStep: true }),
+  VC01014: buildWarrantyTerminalStateVendorConfig('VC01014', 'LEADING EDGE AEROSPACE', { hasPartDetailsStep: true }),
+  // Two distinct real vendors, per explicit user correction — NOT a
+  // duplicate/merge (an earlier working assumption, made obsolete once the
+  // corrected code list gave each its own real code).
+  VC01197: buildWarrantyTerminalStateVendorConfig('VC01197', 'LIEBHERR AEROSPACE - NORTH MAPLE RD', { hasPartDetailsStep: true }),
+  '8S625': buildWarrantyTerminalStateVendorConfig('8S625', 'LIEBHERR AEROSPACE SALINE INC', { hasPartDetailsStep: true }),
+  '76227': buildWarrantyTerminalStateVendorConfig('76227', 'LIEBHERR-AEROSPACE LINDENBERG GMBH', { hasPartDetailsStep: true }),
+  '0B9R9': buildWarrantyTerminalStateVendorConfig('0B9R9', 'MEGGITT AIRCRAFT BRAKING SYSTEMS', { hasPartDetailsStep: true }),
+  '0VXA1': buildWarrantyTerminalStateVendorConfig('0VXA1', 'MIDWEST AERO SUPPORT LLC', { hasPartDetailsStep: true }),
+  VC00445: buildWarrantyTerminalStateVendorConfig('VC00445', 'REXNORD INDUSTRIES LLC', { hasPartDetailsStep: true }),
+  // RMA vendor — see shared/rmaVendors.ts's RMA_VENDOR_IDS.
+  '75521': buildWarrantyTerminalStateVendorConfig('75521', 'ROTRON INC.', { hasPartDetailsStep: true }),
+  '16630': buildWarrantyTerminalStateVendorConfig('16630', 'TAT-LIMCO', { hasPartDetailsStep: true }),
+  // Real recording evidence exists for this vendor
+  // (discovery-7A9Y2-AJS--recording (4).ts): real order P000BDV4,
+  // direct-fill Charge To Account "CR7REPAIR" — matches this family's own
+  // default suffix exactly, no override needed.
+  VC00399: buildWarrantyTerminalStateVendorConfig('VC00399', 'THALES AVIONICS, INC.', { hasPartDetailsStep: true }),
+  '67107': buildWarrantyTerminalStateVendorConfig('67107', 'TRIUMPH CONTROLS INC', { hasPartDetailsStep: true }),
+  '67365': buildWarrantyTerminalStateVendorConfig('67365', 'WOODWARD INC', { hasPartDetailsStep: true }),
+  '19710': buildWarrantyTerminalStateVendorConfig('19710', 'WOODWARD MPC', { hasPartDetailsStep: true }),
 });
 
 /**

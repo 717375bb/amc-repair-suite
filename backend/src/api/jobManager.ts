@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import readline from 'node:readline';
 import path from 'node:path';
 import type { MxiEnv } from '../mxiWriter/config.js';
@@ -22,7 +22,15 @@ export function mxiCredentialEnvOverrides(credential: MxiCredential): Record<str
 }
 
 export type JobKind = 'discovery' | 'execute';
-export type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'partial';
+/**
+ * 'cancelled' — CLAUDE_CODE_PROMPT (cancel button) — a user-initiated stop,
+ * distinct from 'failed' (an unexpected error). Set by cancelJob() the
+ * moment cancellation is requested, and left untouched by the runner's own
+ * exit handler regardless of the child's real exit code — a runner that
+ * exits 0 after honoring a cancel request is still a cancelled run, not a
+ * completed one.
+ */
+export type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'partial' | 'cancelled';
 
 export interface DiscoveredLineSummary {
   lineId: string;
@@ -58,9 +66,22 @@ export interface Job {
   fatalError: string | null;
   /** discovery jobs only — the reviewable snapshot; keyed by lineId for O(1) selection lookups at execute time. */
   lines: Map<string, DiscoveredLineSummary> | null;
+  /**
+   * CLAUDE_CODE_PROMPT (cancel button) — execute jobs only: how many lines
+   * were targeted at start. counts.total only grows as terminal events
+   * arrive, so it can't answer "how many total" on its own — needed so a
+   * freshly re-attached page (e.g. after a cancel-and-revert, or a browser
+   * reload mid-run) can still render an accurate "line X of Y" without the
+   * original selectedLineIds list, which is never itself persisted.
+   */
+  targetLineCount: number | null;
   /** execute jobs only — the discovery runId this execution was confirmed against. */
   sourceDiscoveryRunId: string | null;
   counts: JobCounts;
+  /** The spawned runner's own process handle — needed so cancelJob() can signal it. Null only in the brief window before spawnRunner() returns. */
+  process: ChildProcess | null;
+  /** True once cancelJob() has been called for this run — the runner's own exit handler checks this first, before fatalError/exit-code, to decide final status. */
+  cancelRequested: boolean;
 }
 
 // In-memory registry — acceptable for v1 (localhost, single analyst). Every
@@ -118,10 +139,14 @@ export function spawnRunner(
    * mxiCredentialEnvOverrides() above for the real per-request values.
    */
   envOverrides?: Record<string, string>,
-): void {
+): ChildProcess {
+  // stdin is now 'pipe' (was 'ignore') so requestCancellation() below can
+  // write a cancel message into it — see cancellationWatcher.ts's docstring
+  // for why this cooperative approach exists instead of relying on
+  // ChildProcess.kill()'s signal argument (unreliable on Windows).
   const child = spawn(process.execPath, [tsxCliPath(), path.join(process.cwd(), scriptRelPath), ...args], {
     cwd: process.cwd(),
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe'],
     env: envOverrides ? { ...process.env, ...envOverrides } : process.env,
   });
 
@@ -150,6 +175,35 @@ export function spawnRunner(
     }
     onExit(code);
   });
+
+  return child;
+}
+
+/**
+ * CLAUDE_CODE_PROMPT (cancel button) — sends the cooperative cancel
+ * message (see cancellationWatcher.ts) and starts a grace-period fallback:
+ * if the child hasn't exited on its own within CANCEL_GRACE_PERIOD_MS
+ * (meaning it's hung well past its own next checkpoint, or never reaches
+ * one), it's force-killed as a last resort. `child.kill()`'s signal
+ * argument is meaningless on Windows (force-terminates immediately
+ * regardless) — this is accepted here only as the rare fallback, not the
+ * primary mechanism.
+ */
+const CANCEL_GRACE_PERIOD_MS = 10_000;
+
+export function requestCancellation(child: ChildProcess): void {
+  try {
+    child.stdin?.write(JSON.stringify({ type: 'cancel' }) + '\n');
+  } catch {
+    // stdin may already be closed if the child is on its way out anyway —
+    // the grace-period fallback below still applies regardless.
+  }
+  setTimeout(() => {
+    if (child.exitCode === null && !child.killed) {
+      console.warn('[job-manager] Runner did not exit within the cancel grace period — force-killing.');
+      child.kill();
+    }
+  }, CANCEL_GRACE_PERIOD_MS);
 }
 
 function applyDiscoveryEnvelope(job: Job, envelope: any): void {
@@ -235,18 +289,21 @@ export function startDiscoveryJob(env: MxiEnv, vendorIds: string[], mxiCredentia
     fatalError: null,
     lines: new Map(),
     sourceDiscoveryRunId: null,
+    targetLineCount: null,
     counts: { completed: 0, skipped: 0, exception: 0, inProgress: 0, total: 0 },
+    process: null,
+    cancelRequested: false,
   };
   jobs.set(runId, job);
   activeRunId = runId;
 
-  spawnRunner(
+  job.process = spawnRunner(
     'src/api/jobRunners/discoveryRunner.ts',
     ['--env', env, '--vendors', vendorIds.join(',')],
     (envelope) => applyDiscoveryEnvelope(job, envelope),
     (code) => {
       job.completedAt = new Date().toISOString();
-      job.status = job.fatalError || code !== 0 ? 'failed' : 'completed';
+      job.status = job.cancelRequested ? 'cancelled' : job.fatalError || code !== 0 ? 'failed' : 'completed';
       if (activeRunId === runId) activeRunId = null;
     },
     mxiCredentialEnvOverrides(mxiCredential),
@@ -305,18 +362,23 @@ export function startExecuteJob(
     fatalError: null,
     lines: null,
     sourceDiscoveryRunId: discoveryRunId,
+    targetLineCount: targets.length,
     counts: { completed: 0, skipped: 0, exception: 0, inProgress: 0, total: 0 },
+    process: null,
+    cancelRequested: false,
   };
   jobs.set(runId, job);
   activeRunId = runId;
 
-  spawnRunner(
+  job.process = spawnRunner(
     'src/api/jobRunners/executeRunner.ts',
     ['--env', env, '--targets', JSON.stringify(targets)],
     (envelope) => applyExecuteEnvelope(job, envelope),
     (code) => {
       job.completedAt = new Date().toISOString();
-      if (job.fatalError) {
+      if (job.cancelRequested) {
+        job.status = 'cancelled';
+      } else if (job.fatalError) {
         job.status = 'failed';
       } else if (code !== 0) {
         job.status = 'failed';
@@ -331,6 +393,34 @@ export function startExecuteJob(
   );
 
   return { ok: true, runId };
+}
+
+export interface CancelJobResult {
+  ok: boolean;
+  error?: string;
+}
+
+/**
+ * CLAUDE_CODE_PROMPT (cancel button) — real cancel of a real run, not a
+ * frontend-only "stop watching." Marks the job cancelled immediately (so a
+ * poll landing right after this call already sees the new status, even
+ * before the child process has actually exited) and asks the runner to
+ * stop at its next safe checkpoint — see requestCancellation()/
+ * cancellationWatcher.ts for the full mechanism and why it isn't a raw
+ * process signal.
+ */
+export function cancelJob(runId: string): CancelJobResult {
+  const job = jobs.get(runId);
+  if (!job) return { ok: false, error: `No run found for runId "${runId}".` };
+  if (job.status !== 'running' && job.status !== 'pending') {
+    return { ok: false, error: `Run ${runId} is already ${job.status} — nothing to cancel.` };
+  }
+  if (job.cancelRequested) return { ok: true }; // already in progress — idempotent
+  job.cancelRequested = true;
+  job.status = 'cancelled';
+  if (activeRunId === runId) activeRunId = null;
+  if (job.process) requestCancellation(job.process);
+  return { ok: true };
 }
 
 /** Re-derived from the real registry every call, never hardcoded — used by GET /api/vendors. */

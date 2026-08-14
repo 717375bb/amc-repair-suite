@@ -369,6 +369,11 @@ export interface WriteUpActionInsert {
     | 'order_created_awaiting_rma'
     | 'no_candidate_lines'
     | 'usage_table_absent_unexpected'
+    // CLAUDE_CODE_PROMPT (new vendor batch, 2026-08-14) — receiving notes
+    // (shared/partDetailsReceivingNotes.ts) mention "account"; flagged for
+    // manual review rather than risking a write to the wrong Charge To
+    // Account, per explicit user instruction.
+    | 'receiving_notes_flagged_account'
     | 'authorization_not_confirmed'
     | 'no_removal_task_info_found'
     | 'grid_state_indeterminate'

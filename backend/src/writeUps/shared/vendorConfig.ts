@@ -95,17 +95,18 @@ export interface VendorConfig {
   /** Optional — only vendors with a genuine alternate-case trigger (today: just 7A9Y2) set this. */
   shipsetCase?: ShipsetCaseConfig;
   /**
-   * CLAUDE_CODE_PROMPT (#1, new vendors) — optional. True only for vendors
-   * whose real recording shows a part-level "Details" step (a receiving-
-   * notes box that may carry a special charge-to-account code) before
-   * Schedule Work Package. Confirmed present for 76863 and 1DH10; confirmed
-   * ABSENT for 4X623 (and therefore 6FVE5, modeled on it), 75818, and
-   * VC00399 — not universal across this vendor family, so this must be an
-   * explicit per-vendor opt-in, never a default. Dormant for this batch: the
-   * read value (shared/partDetailsReceivingNotes.ts) isn't consumed by any
-   * vendor's charge-to-account decision yet — that's Aerotron 2N512's rule,
-   * deferred. Undefined/false means the step is skipped entirely, matching
-   * every existing vendor's real behavior unchanged.
+   * CLAUDE_CODE_PROMPT (#1, new vendors) — optional. True for vendors whose
+   * real recording shows (or, for the 2026-08-14 batch, are expected by
+   * explicit user instruction to show) a part-level "Details" step (a
+   * receiving-notes box that may carry a special charge-to-account code)
+   * before Schedule Work Package. Originally confirmed present only for
+   * 76863 and 1DH10 (confirmed ABSENT for 4X623/6FVE5/75818/VC00399) — the
+   * 2026-08-14 batch enables it for all 26 new vendors regardless, per
+   * explicit instruction to let live testing confirm rather than guess
+   * per-vendor. Undefined/false means the step is skipped entirely. Live:
+   * shared/vendorCodeWriteUp.ts reads the receiving-notes text and flags
+   * (returns 'receiving_notes_flagged_account', no write) any line whose
+   * notes mention "account" (case-insensitive) — not just logged anymore.
    */
   hasPartDetailsStep?: boolean;
 }
