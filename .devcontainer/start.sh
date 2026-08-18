@@ -16,8 +16,8 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 REPO_ROOT="$(pwd)"
 
-echo "==> Starting backend (npm run server)..."
-(cd "$REPO_ROOT/backend" && setsid nohup npm run server < /dev/null > /tmp/amc-backend.log 2>&1 &)
+echo "==> Starting backend (npm run server:codespaces, headed via xvfb-run — MXI's Akamai edge blocks headless traffic)..."
+(cd "$REPO_ROOT/backend" && setsid nohup npm run server:codespaces < /dev/null > /tmp/amc-backend.log 2>&1 &)
 
 echo "==> Starting frontend (npm run dev)..."
 (cd "$REPO_ROOT" && setsid nohup npm run dev < /dev/null > /tmp/amc-frontend.log 2>&1 &)

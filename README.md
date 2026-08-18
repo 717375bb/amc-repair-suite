@@ -17,9 +17,15 @@ data-handling model.
    optional secrets and what each one affects.
 2. Click the badge above and wait for the container to build (installs
    dependencies + Playwright's Chromium, a few minutes the first time).
-3. Both servers start automatically in two terminal panels (you may see a
-   one-time "Allow Automatic Tasks?" prompt — click Allow); once the
-   frontend is ready, a notification offers to open it in your browser.
+3. Both servers *should* start automatically in two terminal panels — this
+   has proven unreliable, though. **If nothing starts within a minute or
+   two, open a terminal and run:**
+   ```bash
+   bash .devcontainer/start.sh
+   ```
+   This has worked every time it's been tried manually. Once the frontend
+   is ready, a notification offers to open it in your browser (or open the
+   **Ports** tab and click the globe icon next to port 5173).
 4. Create an account using your real MXI username/password — same login
    model as running this locally (see `security.md` §1.1).
 

@@ -148,8 +148,26 @@ structure Round 3 above fixed), moving the Linux-specific wrapping into
 the new `server:codespaces` npm script instead so `tasks.json` itself
 never has to change shape — just which script name it calls.
 
-**Still to be confirmed**: this fix hasn't yet been proven by an actual
-fresh launch with both changes in place.
+**That fix didn't hold either** — reverting `tasks.json` to the exact same
+shape that had previously worked (only the command string differed, same
+structure otherwise) still produced zero task terminals on the next
+launch. That rules out a `tasks.json` schema/content problem specifically
+(the content was byte-for-byte proven-good structure) and points instead
+at `runOn: "folderOpen"` itself being unreliable in this environment —
+possibly tied to whether the codespace was rebuilt vs. just reloaded/
+reattached (VS Code's automatic-task permission state and the underlying
+"did a folder actually (re)open" signal aren't something visible from
+outside the client, unlike `postCreateCommand`/`postStartCommand`, which
+at least log to the creation log). Rather than keep iterating blind on an
+opaque, unobservable, client-side mechanism, **stopped treating full
+zero-click auto-start as the requirement**. `.devcontainer/start.sh`
+(already updated to use `server:codespaces`, carrying the Akamai/`xvfb`
+fix too) has worked every single time it's been run manually across this
+whole debugging process — that's now the documented, reliable path, with
+the `tasks.json` auto-start left in place as a bonus if it happens to fire
+but no longer something to chase further. `README.md`'s Codespaces
+instructions were updated to say so plainly rather than promise
+automation that hasn't held up.
 
 ### Other items, still open
 
