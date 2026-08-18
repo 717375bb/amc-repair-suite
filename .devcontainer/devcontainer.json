@@ -17,6 +17,10 @@
     }
   },
 
-  "postCreateCommand": "bash .devcontainer/setup.sh",
-  "postStartCommand": "bash .devcontainer/start.sh"
+  // Absolute paths (via the devcontainer.json ${containerWorkspaceFolder}
+  // variable) rather than relative ones — a relative path here silently
+  // depends on lifecycle commands running with cwd = the workspace folder,
+  // which isn't guaranteed everywhere and is cheap to just not depend on.
+  "postCreateCommand": "bash ${containerWorkspaceFolder}/.devcontainer/setup.sh",
+  "postStartCommand": "bash ${containerWorkspaceFolder}/.devcontainer/start.sh"
 }
