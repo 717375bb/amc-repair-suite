@@ -179,6 +179,7 @@ export const VENDOR_REGISTRY: Readonly<Record<string, VendorConfig>> = Object.fr
   '67107': buildWarrantyTerminalStateVendorConfig('67107', 'TRIUMPH CONTROLS INC', { hasPartDetailsStep: true }),
   '67365': buildWarrantyTerminalStateVendorConfig('67365', 'WOODWARD INC', { hasPartDetailsStep: true }),
   '19710': buildWarrantyTerminalStateVendorConfig('19710', 'WOODWARD MPC', { hasPartDetailsStep: true }),
+  '67KR8': buildWarrantyTerminalStateVendorConfig('67KR8', 'VANGUARD AEROSPACE LLC', { hasPartDetailsStep: true }),
 });
 
 /**

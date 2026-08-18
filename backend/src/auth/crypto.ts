@@ -1,4 +1,5 @@
 import { randomBytes, scryptSync, timingSafeEqual, createCipheriv, createDecipheriv } from 'node:crypto';
+import { getSecretProvider } from '../security/secretProvider.js';
 
 /**
  * CLAUDE_CODE_PROMPT (#6, login/account system) — two DIFFERENT primitives
@@ -37,43 +38,109 @@ const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
 const IV_BYTES = 12;
 
 /**
+ * CLAUDE_CODE_PROMPT (#6-hardening, key-rotation, Part A) — factored out of
+ * loadEncryptionKey() below (same 32-byte check, same message shape) so
+ * rotateEncryptionKey.ts can validate an explicit OLD/NEW key the same way,
+ * without duplicating this logic.
+ */
+export function parseEncryptionKeyHex(hex: string, varNameForError: string): Buffer {
+  const key = Buffer.from(hex, 'hex');
+  if (key.length !== 32) {
+    throw new Error(`${varNameForError} must be exactly 32 bytes (64 hex characters) — got ${key.length} byte(s).`);
+  }
+  return key;
+}
+
+/**
  * Reads CREDENTIAL_ENCRYPTION_KEY once per call rather than caching at
  * module load — this module can be imported before dotenv/config has run
  * in some entry points, and a stale empty read would silently make every
  * encrypt/decrypt call fail confusingly later instead of failing loudly here.
  */
 function loadEncryptionKey(): Buffer {
-  const hex = process.env.CREDENTIAL_ENCRYPTION_KEY;
-  if (!hex) {
-    throw new Error(
-      'CREDENTIAL_ENCRYPTION_KEY is not set. Generate one with: ' +
-        `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))" ` +
-        'and add it to backend/.env — never commit the real value.',
-    );
-  }
-  const key = Buffer.from(hex, 'hex');
-  if (key.length !== 32) {
-    throw new Error(`CREDENTIAL_ENCRYPTION_KEY must be exactly 32 bytes (64 hex characters) — got ${key.length} byte(s).`);
-  }
-  return key;
+  // CLAUDE_CODE_PROMPT (#6-hardening, secrets-seam) — routed through
+  // SecretProvider; secretProvider.get() throws its own clear error if this
+  // is missing, same timing (first actual use) as the check this replaced.
+  const hex = getSecretProvider().get('CREDENTIAL_ENCRYPTION_KEY');
+  return parseEncryptionKeyHex(hex, 'CREDENTIAL_ENCRYPTION_KEY');
 }
 
-/** `iv:authTag:ciphertext`, all hex. A fresh random IV every call, per AES-GCM's own requirement (never reuse an IV under the same key). */
-export function encryptSecret(plaintext: string): string {
-  const key = loadEncryptionKey();
+/**
+ * CLAUDE_CODE_PROMPT (#6-hardening, key-rotation, Part A) — version tag
+ * format: "v<N>:iv:authTag:ciphertext", hex throughout. N=1 is implicit (no
+ * tag at all) — every row created before this seam, and every row written
+ * by the normal encryptSecret() call below, stays in that original
+ * untagged shape; only rotateEncryptionKey.ts ever writes a tagged value,
+ * bumping N each time it successfully re-wraps a row. A "v" character can
+ * never appear as the first byte of a real hex-encoded IV (hex is 0-9a-f
+ * only), so a tagged value can never be mistaken for an untagged one or
+ * vice versa — no ambiguity, no forced migration of existing rows.
+ */
+const VERSION_TAG_PATTERN = /^v(\d+):(.+)$/;
+
+interface ParsedCiphertext {
+  version: number;
+  ivHex: string;
+  authTagHex: string;
+  encryptedHex: string;
+}
+
+function parseStoredCiphertext(stored: string): ParsedCiphertext {
+  const tagMatch = stored.match(VERSION_TAG_PATTERN);
+  const rest = tagMatch ? tagMatch[2] : stored;
+  const version = tagMatch ? Number(tagMatch[1]) : 1;
+
+  const [ivHex, authTagHex, encryptedHex] = rest.split(':');
+  if (!ivHex || !authTagHex || !encryptedHex) {
+    throw new Error('Stored encrypted value is not in the expected "[vN:]iv:authTag:ciphertext" shape — refusing to guess.');
+  }
+  return { version, ivHex, authTagHex, encryptedHex };
+}
+
+/**
+ * CLAUDE_CODE_PROMPT (#6-hardening, key-rotation, Part A) — exported for
+ * rotateEncryptionKey.ts's own bookkeeping (it needs a row's CURRENT
+ * version to compute the next one when re-wrapping); not used by any
+ * normal signup/login/change-password call site.
+ */
+export function getCiphertextVersion(stored: string): number {
+  return parseStoredCiphertext(stored).version;
+}
+
+/**
+ * `iv:authTag:ciphertext`, all hex. A fresh random IV every call, per
+ * AES-GCM's own requirement (never reuse an IV under the same key).
+ *
+ * `options.keyOverride`/`options.version` are ONLY ever passed by
+ * rotateEncryptionKey.ts — every existing call site (authService.ts's
+ * register/changePassword) keeps calling this with just `plaintext`, which
+ * reproduces today's exact output byte-for-byte: current active key, no
+ * version tag. NOTE: new writes stay untagged until Seam 3 tags
+ * register/changePassword with an explicit v1 marker; we'll make new
+ * signups precisely tagged at Seam 3, where authService.ts is already
+ * being modified.
+ */
+export function encryptSecret(plaintext: string, options?: { keyOverride?: Buffer; version?: number }): string {
+  const key = options?.keyOverride ?? loadEncryptionKey();
   const iv = randomBytes(IV_BYTES);
   const cipher = createCipheriv(ENCRYPTION_ALGORITHM, key, iv);
   const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
   const authTag = cipher.getAuthTag();
-  return `${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted.toString('hex')}`;
+  const body = `${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted.toString('hex')}`;
+  return options?.version ? `v${options.version}:${body}` : body;
 }
 
-export function decryptSecret(stored: string): string {
-  const key = loadEncryptionKey();
-  const [ivHex, authTagHex, encryptedHex] = stored.split(':');
-  if (!ivHex || !authTagHex || !encryptedHex) {
-    throw new Error('Stored encrypted value is not in the expected "iv:authTag:ciphertext" shape — refusing to guess.');
-  }
+/**
+ * `keyOverride` is ONLY ever passed by rotateEncryptionKey.ts, to decrypt
+ * with an explicit OLD or NEW key rather than whatever's currently
+ * configured. Every existing call site (authService.ts's
+ * getMxiCredentialForUser) keeps calling this with just `stored`, which
+ * behaves exactly as before — reads the one active key, decrypts either
+ * ciphertext shape (tagged or untagged) transparently.
+ */
+export function decryptSecret(stored: string, keyOverride?: Buffer): string {
+  const key = keyOverride ?? loadEncryptionKey();
+  const { ivHex, authTagHex, encryptedHex } = parseStoredCiphertext(stored);
   const decipher = createDecipheriv(ENCRYPTION_ALGORITHM, key, Buffer.from(ivHex, 'hex'));
   decipher.setAuthTag(Buffer.from(authTagHex, 'hex'));
   const decrypted = Buffer.concat([decipher.update(Buffer.from(encryptedHex, 'hex')), decipher.final()]);

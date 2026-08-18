@@ -19,7 +19,7 @@ Login passwords are never stored in a recoverable form. On account creation, the
 ### 1.3 MXI credential storage
 The Playwright automation that actually logs into Maintenix needs the *real* password, not a hash — a one-way hash cannot be reversed to produce it. So the same password value is *also* stored separately, encrypted with **AES-256-GCM** under a master key (`CREDENTIAL_ENCRYPTION_KEY`) that lives only in that analyst's local `backend/.env` file, generated once per machine and never committed to source control. This is standard envelope encryption: the database holds ciphertext only; decryption requires both the ciphertext and the local machine's key.
 
-**Operational note:** losing or rotating `CREDENTIAL_ENCRYPTION_KEY` makes every already-stored MXI password on that machine permanently undecryptable — every account would need to be re-created. There is currently no automated key-rotation tooling; back the key up separately from the database file if it's ever regenerated.
+**Operational note:** losing `CREDENTIAL_ENCRYPTION_KEY` with no backup makes every already-stored MXI password on that machine permanently undecryptable — every account would need to be re-created. Rotating the key deliberately (or recovering from a suspected compromise) no longer requires that: see §8 for the offline re-encryption tool that re-wraps every stored credential under a new key in place. Back the key up separately from the database file regardless — the tool re-encrypts from an old key you still have to a new one; it cannot help if the old key itself is already gone.
 
 ### 1.4 Account creation
 Self-serve — anyone who can reach the login page can create an account (there is no separate admin approval step; this matches the tool's current single-machine, single-analyst deployment model). Usernames are enforced unique at the database level (`users.username UNIQUE`), so two accounts can never collide on the same identity.
@@ -83,7 +83,7 @@ Documented honestly rather than left implicit. None of these are currently explo
 | No HTTPS | Accepted, by design | No network segment exists for traffic to cross — see 3. Must be revisited before any deployment beyond one machine. |
 | Sessions/lockout state lost on restart | Accepted | Same v1 tradeoff already used elsewhere in this codebase; low impact for a single local analyst. |
 | No CSRF token beyond `SameSite=Lax` | Accepted for now | No public network exposure exists to exploit; revisit if that changes. |
-| No automated encryption-key rotation | Not yet built | Manual rotation is possible but not tooled — see 1.3. |
+| No automated encryption-key rotation | Built — see §8 | An offline `npm run rotate-encryption-key` tool re-encrypts every stored MXI credential from an old key to a new one, atomically and idempotently. Still manual (run by hand, never on the request path) and still requires the key itself to be backed up separately — the tool has nothing to recover *from* if the old key is gone. |
 | No password complexity requirements | Intentional | The password *is* the analyst's real MXI password; enforcing an app-specific rule risks rejecting a legitimate, already-real password. |
 | Each analyst runs a separate local copy/database | Accepted, temporary | Centralizing to an Azure-hosted store is planned (see section 6) — the current schema was deliberately kept small and self-contained to make that migration straightforward. |
 | No rate limiting on account *creation* | Accepted for now | Lower-value target than login brute-forcing; revisit if abuse is ever observed. |
@@ -92,11 +92,52 @@ Documented honestly rather than left implicit. None of these are currently explo
 ## 6. Planned future work
 
 - Migrate `auth.db`'s schema to an Azure-hosted database, so credentials and sessions are centralized across analysts' machines instead of one independent copy per machine.
-- Automated encryption-key rotation tooling.
+- ~~Automated encryption-key rotation tooling.~~ Built — see §8.
 - `privacy.md` (in progress) and a broader repository restructuring toward a more enterprise-oriented layout (proposal pending review).
 
 ## 7. If a credential is suspected compromised
 
 - **A user's MXI password may be compromised:** they should change their real MXI password through normal channels, then use "Change password" in this tool (section 1.5) to bring the two back in sync. Their existing session remains valid until they log out or it expires (12 hours) — log out explicitly if immediate invalidation is needed.
-- **`CREDENTIAL_ENCRYPTION_KEY` itself is suspected compromised:** rotate it (generate a new 32-byte value) and have every user on that machine re-create their account. There is currently no way to re-encrypt existing rows under a new key without each user re-entering their password.
+- **`CREDENTIAL_ENCRYPTION_KEY` itself is suspected compromised:** generate a new 32-byte value, then run the re-encryption tool (§8) with the compromised key as OLD and the new value as NEW — this re-wraps every stored MXI credential under the new key without any user re-entering their password. Update `CREDENTIAL_ENCRYPTION_KEY` in `.env` to the new value afterward so the running app actually uses it, restart the server, and treat the old key as burned (delete any backup copy of it).
 - **`AUTOMATION_API_KEY` is suspected compromised:** generate a new value, update `backend/.env`, and update the Power Automate flow's stored credential to match. This key is unrelated to any individual user account and rotating it does not affect anyone's login.
+
+## 8. Key rotation
+
+An offline tool (`backend/src/security/rotateEncryptionKey.ts`, run via `npm run rotate-encryption-key`) re-encrypts every stored MXI credential from an old `CREDENTIAL_ENCRYPTION_KEY` to a new one — for a planned rotation, or to recover from a suspected key compromise (§7). It never runs automatically and is never reachable from any HTTP route; it's a manual, by-hand operation only.
+
+### 8.1 Backing up the key itself
+
+`CREDENTIAL_ENCRYPTION_KEY` has no recovery path if lost — this tool re-wraps credentials from a key you still have to a key you still have; it cannot help if the *old* key is already gone. Before rotating, or as routine practice, store the current key value somewhere separate from `backend/.env` and separate from the database file itself (a password manager, a sealed physical copy, whatever your organization's secret-custody process is) — never in the git repository, never in the same backup as `auth.db`.
+
+### 8.2 Running the tool
+
+Generate a new key the same way the original was generated:
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+Set two environment variables for this one invocation — never add these to `.env` itself, they're a one-time input, not standing config:
+```bash
+OLD_CREDENTIAL_ENCRYPTION_KEY=<the current, real value from .env> \
+NEW_CREDENTIAL_ENCRYPTION_KEY=<the freshly generated value> \
+npm run rotate-encryption-key -- --dry-run
+```
+
+`--dry-run` is read-only — it scans every account and reports, in one complete pass (never stopping at the first problem), which would be re-wrapped, which are already on the new key, and which fail to decrypt with *either* key. Review that output before the real run — any "failed both keys" row needs investigating, not overriding.
+
+Drop `--dry-run` to actually rotate:
+```bash
+OLD_CREDENTIAL_ENCRYPTION_KEY=<...> NEW_CREDENTIAL_ENCRYPTION_KEY=<...> npm run rotate-encryption-key
+```
+
+This backs up `auth.db` first, unconditionally, to `backend/data/auth-db-backups/` (timestamped, every run, no exceptions), then re-encrypts every row inside a single database transaction — either every account is rewrapped and the change commits together, or one row that fails to decrypt with both keys aborts the *entire* run and nothing is written, never a partial rotation. It's safe to re-run: an account already on the new key is detected and skipped, so running the same old/new pair a second time is a harmless no-op.
+
+**After a successful rotation**, update `CREDENTIAL_ENCRYPTION_KEY` in `backend/.env` to the new value and restart the server — the tool only touches the database; it does not change which key the running app itself uses.
+
+### 8.3 What it never prints
+
+The summary reports row counts and usernames only, in both dry-run and real-run output and in every error message — never key material, never ciphertext, never a decrypted plaintext password.
+
+### 8.4 Looking ahead to Azure Key Vault
+
+Once `CREDENTIAL_ENCRYPTION_KEY` moves from a local `.env` value to Azure Key Vault (§6), this same tool becomes the Key-Vault-rewrap path: the same old-key/new-key re-encryption logic applies, just sourcing both keys from Key Vault instead of two temporary environment variables. See `backend/src/security/secretProvider.ts`'s `keyvault` seam for where that swap plugs in.

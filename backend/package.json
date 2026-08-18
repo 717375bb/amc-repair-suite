@@ -24,6 +24,7 @@
     "vendor:batch-discovery": "tsx src/cli/vendorCodeBatchDiscoveryCli.ts",
     "vendor:batch-execute": "tsx src/cli/vendorCodeBatchExecuteCli.ts",
     "approve-and-write": "tsx src/cli/approveAndWrite.ts",
+    "rotate-encryption-key": "tsx src/security/rotateEncryptionKey.ts",
     "verify-gitignore": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-gitignore.ps1",
     "build": "tsc -b",
     "typecheck": "tsc --noEmit"

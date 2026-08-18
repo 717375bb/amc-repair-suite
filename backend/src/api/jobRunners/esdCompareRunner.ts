@@ -9,6 +9,7 @@ import { exportExcel } from '../../output/exportExcel.js';
 import type { InferenceRecord, RunSummary } from '../../types.js';
 import { ingestEsdFinderFiles, type DuplicateOrderNumber } from '../esdFinder/ingestion.js';
 import { watchStdinForCancellation } from './cancellationWatcher.js';
+import { getSecretProvider } from '../../security/secretProvider.js';
 
 /**
  * Open Order ESD Finder — comparison job runner. Spawned by
@@ -101,10 +102,12 @@ async function main(): Promise<void> {
   const startedAt = new Date().toISOString();
   const { vendorFiles, craFile } = parseArgs();
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    throw new Error('ANTHROPIC_API_KEY is not set.');
-  }
+  // CLAUDE_CODE_PROMPT (#6-hardening, secrets-seam) — this runner never
+  // touches MXI, so it never goes through cliMxiClient.ts's embedded
+  // init() call — needs its own.
+  const secretProvider = getSecretProvider();
+  await secretProvider.init();
+  const apiKey = secretProvider.get('ANTHROPIC_API_KEY');
 
   // CLAUDE_CODE_PROMPT (cancel button) — this runner never opens an MXI
   // browser (pure file parsing + AI inference + Excel export), so there's

@@ -1,3 +1,5 @@
+import { getOptionalSecret } from '../security/secretProvider.js';
+
 export type MxiEnv = 'stage' | 'production';
 
 export interface MxiConfig {
@@ -32,11 +34,18 @@ export function loadMxiConfig(): MxiConfig {
   const baseUrl =
     (env === 'production' ? process.env.MXI_PROD_BASE_URL : process.env.MXI_STAGE_BASE_URL) ?? '';
 
+  // CLAUDE_CODE_PROMPT (#6-hardening, secrets-seam) — routed through
+  // SecretProvider via getOptionalSecret, which preserves the exact old
+  // `?? ''` behavior (empty string, never a throw) rather than get()'s
+  // throw-if-missing — these two are genuinely optional at this call site
+  // today (the shared boot-time client these feed is only actually used by
+  // the two Power-Automate-facing endpoints; every browser-UI action uses a
+  // per-user credential instead, see jobManager.ts).
   return {
     env,
     baseUrl,
-    username: process.env.MXI_USERNAME ?? '',
-    password: process.env.MXI_PASSWORD ?? '',
+    username: getOptionalSecret('MXI_USERNAME'),
+    password: getOptionalSecret('MXI_PASSWORD'),
     headless: readHeadlessFlag(),
   };
 }

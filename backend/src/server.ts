@@ -18,6 +18,7 @@ import { cancelEsdJob, getActiveEsdJob, getEsdJob, startEsdCompareJob, startEsdW
 import { MissingHeadersError, peekEsdFinderFile, validateHeadersOnly } from './api/esdFinder/ingestion.js';
 import { registerAuthRoutes, requireSession, type AuthedRequest } from './api/authRoutes.js';
 import { getMxiCredentialForUser } from './auth/authService.js';
+import { getOptionalSecret, getSecretProvider } from './security/secretProvider.js';
 
 /**
  * Shared-secret gate for the three endpoints Power Automate calls. GET
@@ -28,7 +29,10 @@ import { getMxiCredentialForUser } from './auth/authService.js';
  * X-Automation-Key header, nothing else.
  */
 function requireAutomationKey(req: Request, res: Response, next: NextFunction): void {
-  const expected = process.env.AUTOMATION_API_KEY;
+  // CLAUDE_CODE_PROMPT (#6-hardening, secrets-seam) — getOptionalSecret
+  // preserves the exact old behavior (empty string, not a throw, when
+  // unset) — this stays a per-request 500 "misconfigured," never a crash.
+  const expected = getOptionalSecret('AUTOMATION_API_KEY');
   if (!expected) {
     res.status(500).json({ error: 'Server misconfigured: AUTOMATION_API_KEY is not set' });
     return;
@@ -532,6 +536,12 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
 }
 
 async function main(): Promise<void> {
+  // CLAUDE_CODE_PROMPT (#6-hardening, secrets-seam) — loaded once, before
+  // anything below that needs a secret (loadMxiConfig()'s MXI_USERNAME/
+  // MXI_PASSWORD read, and every later per-request AUTOMATION_API_KEY /
+  // CREDENTIAL_ENCRYPTION_KEY read via crypto.ts).
+  await getSecretProvider().init();
+
   const dbPath = process.env.MXI_DB_PATH || path.join('data', 'audit.db');
   // CLAUDE_CODE_PROMPT (#6, login/account system) — separate file from
   // audit.db, see db/authDb.ts's docstring for why.
