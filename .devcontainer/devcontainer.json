@@ -1,0 +1,22 @@
+{
+  "name": "AMC Repair Suite",
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:22",
+
+  // Only the frontend dev server is forwarded publicly. The backend
+  // (backend/src/server.ts) deliberately binds 127.0.0.1 only and is
+  // reached exclusively via Vite's server-side /api proxy (vite.config.ts)
+  // — never directly from the browser, in Codespaces or locally. Port 3001
+  // is intentionally NOT listed here so it stays container-internal, the
+  // same "not reachable from any other machine" posture security.md
+  // documents for local runs.
+  "forwardPorts": [5173],
+  "portsAttributes": {
+    "5173": {
+      "label": "AMC Repair Suite",
+      "onAutoForward": "openBrowser"
+    }
+  },
+
+  "postCreateCommand": "bash .devcontainer/setup.sh",
+  "postStartCommand": "bash .devcontainer/start.sh"
+}

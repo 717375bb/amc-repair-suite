@@ -757,6 +757,15 @@ convention.
 
 ## Running it
 
+**Or run the whole app (frontend + backend) with one click via GitHub
+Codespaces** — see the badge in root `README.md` and full details in
+`docs/CODESPACES.md` (secret list, what's auto-generated vs. required,
+what's proven vs. still unverified from a real launch). Backend stays
+bound to `127.0.0.1` exactly as it does locally — only the frontend port
+is forwarded — so the security posture documented in `security.md` is
+unchanged, just running inside a container instead of on the analyst's
+own machine.
+
 ```bash
 cd backend
 npm install          # already done in this environment

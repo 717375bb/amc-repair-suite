@@ -1,0 +1,4 @@
+# Shell scripts must always use LF line endings regardless of the
+# committing/checking-out machine's line-ending settings — a CRLF shebang
+# line breaks execution inside the Linux devcontainer (.devcontainer/*.sh).
+*.sh text eol=lf

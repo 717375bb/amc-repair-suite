@@ -6,6 +6,9 @@ import tailwindcss from '@tailwindcss/vite'
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
+    // Binding only to localhost (Vite's default) isn't reachable through
+    // GitHub Codespaces' port-forwarding path. Harmless for local dev too.
+    host: true,
     proxy: {
       // CLAUDE_CODE_PROMPT (#6 fix, real bug) — the browser was calling the
       // backend directly cross-origin (this dev server on :5173, the API on

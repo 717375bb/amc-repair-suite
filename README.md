@@ -1,4 +1,37 @@
-# React + TypeScript + Vite
+# AMC Repair Suite
+
+Automation tooling for PSA Airlines' component repair team — infers estimated
+ship dates from vendor reports, and drives real order write-ups/writes into
+Maintenix (MXI) via a login-gated web app. See `CLAUDE.md` for the full,
+living project reference; `security.md`/`privacy.md` for the security and
+data-handling model.
+
+## Run it with one click (GitHub Codespaces)
+
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/717375bb/amc-repair-suite?quickstart=1)
+
+1. **Before clicking**, optionally set `ANTHROPIC_API_KEY` as a Codespaces
+   secret (repo Settings → Secrets and variables → Codespaces) — required
+   for ESD Finder's AI classification step. Everything else works without
+   any secret configured. See `docs/CODESPACES.md` for the full list of
+   optional secrets and what each one affects.
+2. Click the badge above and wait for the container to build (installs
+   dependencies + Playwright's Chromium, a few minutes the first time).
+3. Both servers start automatically and the app opens in a browser tab.
+4. Create an account using your real MXI username/password — same login
+   model as running this locally (see `security.md` §1.1).
+
+Full details, secret list, and known-untested items: `docs/CODESPACES.md`.
+
+## Running it locally instead
+
+See the root `CLAUDE.md` ("How to run this for a normal week") and
+`backend/README.md` for the local, terminal-based setup this project has
+always used.
+
+---
+
+## Frontend scaffold (React + TypeScript + Vite)
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
