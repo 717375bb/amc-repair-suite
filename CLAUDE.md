@@ -9,6 +9,13 @@ parts live in this repo:
   `package.json`/`node_modules`, deliberately decoupled from the frontend.
   This is where all work has happened.
 
+**Picking this up fresh? Read `docs/INVOICE_PRICE_WRITER_HANDOFF.md` first**
+— it covers the most recent session's work (a new Invoice Price Writer
+feature, ESD writer date-push/note-only changes, a backend-wide Pino
+logging migration, and a local-launcher fix) and names the exact next
+step still pending: a live, single-order test of the Invoice Price Writer
+that was set up but never run.
+
 ## How to run this for a normal week (start here — no project history required)
 
 All commands run from `backend/`, with `.env` already filled in (real
