@@ -1,0 +1,33 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "AMC: Start Backend",
+      "type": "shell",
+      "command": "npm run server",
+      "options": { "cwd": "${workspaceFolder}/backend" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "amc-repair-suite"
+      },
+      "runOptions": { "runOn": "folderOpen" }
+    },
+    {
+      "label": "AMC: Start Frontend",
+      "type": "shell",
+      "command": "npm run dev",
+      "options": { "cwd": "${workspaceFolder}" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "amc-repair-suite"
+      },
+      "runOptions": { "runOn": "folderOpen" }
+    }
+  ]
+}

@@ -17,10 +17,26 @@
     }
   },
 
-  // Absolute paths (via the devcontainer.json ${containerWorkspaceFolder}
-  // variable) rather than relative ones — a relative path here silently
+  // Absolute path (via the devcontainer.json ${containerWorkspaceFolder}
+  // variable) rather than a relative one — a relative path here silently
   // depends on lifecycle commands running with cwd = the workspace folder,
   // which isn't guaranteed everywhere and is cheap to just not depend on.
+  // One-time setup only (installs deps, Playwright Chromium, prepares
+  // .env) — confirmed reliable via a real launch's creation log.
   "postCreateCommand": "bash ${containerWorkspaceFolder}/.devcontainer/setup.sh",
-  "postStartCommand": "bash ${containerWorkspaceFolder}/.devcontainer/start.sh"
+
+  // Deliberately NOT using postStartCommand to launch the two dev servers
+  // — confirmed via a real launch's creation log that it runs and exits 0,
+  // but its process context is torn down afterward regardless of nohup/
+  // setsid (postStartCommand isn't meant for long-running daemons). The
+  // two servers are instead launched by .vscode/tasks.json's
+  // runOn: "folderOpen" tasks, which run in a real, persistent VS Code
+  // terminal — the one thing confirmed to actually survive.
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "task.allowAutomaticTasks": "on"
+      }
+    }
+  }
 }

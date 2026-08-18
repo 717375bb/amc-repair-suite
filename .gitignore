@@ -15,6 +15,10 @@ dist-ssr
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
+# Needed for real: Codespaces' auto-start-the-dev-servers mechanism (see
+# .devcontainer/devcontainer.json, docs/CODESPACES.md) — not personal
+# editor state, this is committed, functional project config.
+!.vscode/tasks.json
 .idea
 .DS_Store
 *.suo

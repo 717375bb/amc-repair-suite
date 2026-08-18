@@ -64,27 +64,53 @@ discipline (see `CLAUDE.md`, `PHASE2_MXI_WRITER_SPEC.md`): this setup was
 built and reasoned through carefully, then actually proven/corrected
 against a real Codespace, not just assumed to work.
 
-### Real bug found and fixed: `postStartCommand`'s background processes didn't survive
+### Real bug found and fixed, in three rounds: `postStartCommand` cannot host the long-running servers at all
 
-First real launch: `postCreateCommand` ran correctly (both `npm install`s
-completed, `backend/.env` was created), but neither server was running —
-no `node`/`vite`/`tsx` processes, and `/tmp/amc-*.log` didn't even exist,
-meaning `start.sh` itself never got a chance to run to completion.
-Manually running `bash .devcontainer/start.sh` in an interactive terminal
-worked immediately and stayed running — which initially looked like a
-contradiction, but is actually the tell: an interactive terminal's session
-isn't torn down the way a lifecycle command's process group is once the
-command itself returns. Plain `nohup ... &` only blocks `SIGHUP`; it does
-nothing to protect against Codespaces cleaning up the whole process group
-`postStartCommand` ran in. Fixed by adding `setsid` (`.devcontainer/start.sh`),
-which puts each server in a brand new session — a different process group
-entirely, immune to that teardown. This is the standard fix for this exact
-class of devcontainer/Codespaces issue.
+**Round 1**: first real launch — `postCreateCommand` ran correctly (both
+`npm install`s completed, `backend/.env` was created), but neither server
+was running: no `node`/`vite`/`tsx` processes, and `/tmp/amc-*.log` didn't
+even exist. Manually running `bash .devcontainer/start.sh` in an
+interactive terminal worked immediately and stayed running — the first
+clue, since an interactive terminal's session isn't torn down the way a
+lifecycle command's process group is. Hypothesized plain `nohup ... &`
+wasn't enough (it only blocks `SIGHUP`) and added `setsid` to fully detach
+each server into its own session.
 
-**Still to be confirmed**: this fix is based on live-tested diagnosis of
-the actual root cause, but hasn't yet been proven by an actual Codespace
-restart/rebuild with the fixed script in place (the bug could only be
-observed after the fact, from inside the already-broken session).
+**Round 2**: identical symptoms persisted after a rebuild — but the actual
+cause turned out to be that the codespace's checkout was still on the
+pre-fix commit (`Codespaces: Rebuild Container` rebuilds the container
+image, it does **not** re-pull the git repo). Fixed the process by having
+the user `git pull` before rebuilding, and separately hardened
+`devcontainer.json` to use an absolute path
+(`${containerWorkspaceFolder}/...`) for the lifecycle command instead of a
+relative one, removing a second, independent assumption.
+
+**Round 3, the real root cause**: with both of the above genuinely in
+place, a fresh launch's own creation log (`Codespaces: View Creation Log`)
+showed `postStartCommand` running to completion and exiting `0` —
+`setsid` and all — yet nothing survived, not even the log **files**,
+which should exist on disk regardless of whether the processes lived.
+That's the real tell: `postStartCommand` (and `postCreateCommand`) run in
+a one-shot provisioning context that gets torn down after use; they were
+never meant to host long-running daemons, and no amount of
+`nohup`/`setsid` fixes that, because the whole context — not just the
+process group — goes away. **Fixed by not fighting it**: removed
+`postStartCommand` entirely and replaced it with `.vscode/tasks.json`, two
+tasks (`AMC: Start Backend`, `AMC: Start Frontend`) with
+`"runOptions": { "runOn": "folderOpen" }`, which is VS Code's own
+documented mechanism for "run this in a real terminal automatically when
+the project opens" — the exact context already twice confirmed to
+actually survive. `devcontainer.json` also sets
+`task.allowAutomaticTasks: "on"` so the one-time "Allow Automatic Tasks?"
+permission prompt VS Code normally shows doesn't block this on first open.
+`.devcontainer/start.sh` is kept only as a manual fallback/restart
+convenience now, not the primary launch path.
+
+**Still to be confirmed**: this is the standard, documented pattern for
+auto-starting dev servers in a devcontainer, and is architecturally
+different from the previous two (failed) attempts rather than a third
+variation on the same idea — but it hasn't yet been proven by an actual
+fresh launch.
 
 ### Other items, still open
 

@@ -17,7 +17,9 @@ data-handling model.
    optional secrets and what each one affects.
 2. Click the badge above and wait for the container to build (installs
    dependencies + Playwright's Chromium, a few minutes the first time).
-3. Both servers start automatically and the app opens in a browser tab.
+3. Both servers start automatically in two terminal panels (you may see a
+   one-time "Allow Automatic Tasks?" prompt — click Allow); once the
+   frontend is ready, a notification offers to open it in your browser.
 4. Create an account using your real MXI username/password — same login
    model as running this locally (see `security.md` §1.1).
 
