@@ -41,6 +41,29 @@ function tomorrowInMxiFormat(): string {
 }
 
 /**
+ * Real bug found live, user-reported: MXI pads Unit Price to two decimal
+ * places on display/re-read (e.g. "941.70"), but the sheet's own "Extended
+ * Amt" cell frequently has fewer ("941.7") — a plain string comparison
+ * flagged every one of these as a verification failure even though the
+ * write genuinely succeeded. Compares numerically instead, in integer
+ * cents (not raw float equality, which is exactly the kind of thing that
+ * silently breaks on currency values) so "941.70" and "941.7" — or any
+ * other equivalent decimal formatting — correctly match.
+ */
+function parsePriceToCents(value: string): number | null {
+  const numeric = Number(value.replace(/,/g, '').trim());
+  if (!Number.isFinite(numeric)) return null;
+  return Math.round(numeric * 100);
+}
+
+function pricesMatch(confirmed: string | null, expected: string): boolean {
+  if (confirmed === null) return false;
+  const confirmedCents = parsePriceToCents(confirmed);
+  const expectedCents = parsePriceToCents(expected);
+  return confirmedCents !== null && expectedCents !== null && confirmedCents === expectedCents;
+}
+
+/**
  * Invoice Price Writer's combined orchestrator, mirroring
  * writeEsdAndNotes()'s shape: navigate, read-before-write for the
  * serial-number cross-check (skip immediately, no mutation at all, on a
@@ -123,7 +146,7 @@ export async function writePriceLineUpdate(
     const confirmedPrice = await readUnitPrice(page);
     const confirmedEsd = await readEsdField(page);
 
-    const priceOk = confirmedPrice !== null && confirmedPrice.replace(/,/g, '') === newPrice.replace(/,/g, '');
+    const priceOk = pricesMatch(confirmedPrice, newPrice);
     const esdOk = confirmedEsd === promiseByTomorrow;
 
     if (!priceOk || !esdOk) {
