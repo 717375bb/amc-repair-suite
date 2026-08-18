@@ -194,6 +194,18 @@ function flagBadgeTone(flag: EsdCompareResultRow['flag']): 'success' | 'warning'
   return 'neutral'
 }
 
+// CLAUDE_CODE_PROMPT (ESD writer changes, A5) — note-only-reissue rows are
+// a real MXI write (a real reissue), just distinct from an ESD write, so
+// they stay in the Actionable tab rather than a confusing third top-level
+// tab — this badge is what makes the distinction visible at a glance.
+function actionTypeLabel(actionType: EsdCompareResultRow['actionType']): string {
+  return actionType === 'esd_write' ? 'ESD Write' : 'Note Only'
+}
+
+function actionTypeBadgeTone(actionType: EsdCompareResultRow['actionType']): 'accent' | 'neutral' {
+  return actionType === 'esd_write' ? 'accent' : 'neutral'
+}
+
 // ---------------------------------------------------------------------------
 // Per-row write status — a distinct, never-hidden "Write failed — needs
 // retry" state (amber/red), verbatim error behind a technical-details
@@ -644,6 +656,7 @@ function ReviewState({
                 <tr className="border-b border-border text-xs uppercase tracking-wide text-muted">
                   <th className="px-5 py-3 font-medium"></th>
                   <th className="px-5 py-3 font-medium">Order #</th>
+                  <th className="px-5 py-3 font-medium">Action</th>
                   <th className="px-5 py-3 font-medium">Vendor</th>
                   <th className="px-5 py-3 font-medium">P/N</th>
                   <th className="px-5 py-3 font-medium">Serial</th>
@@ -679,6 +692,9 @@ function ReviewState({
                         )}
                       </td>
                       <td className="px-5 py-3 font-medium text-accent">{row.orderNumber}</td>
+                      <td className="px-5 py-3">
+                        <Badge tone={actionTypeBadgeTone(row.actionType)}>{actionTypeLabel(row.actionType)}</Badge>
+                      </td>
                       <td className="px-5 py-3 text-muted">{row.vendorName ?? '—'}</td>
                       <td className="px-5 py-3 text-muted">{row.partNumber ?? '—'}</td>
                       <td className="px-5 py-3 text-muted">{row.serialNumber ?? '—'}</td>
@@ -703,7 +719,7 @@ function ReviewState({
                 })}
                 {actionable.length === 0 && (
                   <tr>
-                    <td colSpan={hasWriteRun ? 11 : 10} className="px-5 py-6 text-center text-muted">
+                    <td colSpan={hasWriteRun ? 12 : 11} className="px-5 py-6 text-center text-muted">
                       No actionable rows found.
                     </td>
                   </tr>

@@ -2,11 +2,16 @@ import 'dotenv/config';
 import Database from 'better-sqlite3';
 import path from 'node:path';
 import { insertMxiWrite } from '../../db/db.js';
+import { classifyRowAction } from '../../inference/classifyRowAction.js';
 import { createReadyMxiClient } from '../../mxiWriter/cliMxiClient.js';
 import type { MxiEnv } from '../../mxiWriter/config.js';
 import { assembleNoteText, toMxiDateFormat } from '../../mxiWriter/esdFormatting.js';
 import { writeEsdAndNotes } from '../../mxiWriter/writeEsdAndNotes.js';
 import { watchStdinForCancellation } from './cancellationWatcher.js';
+import { createLogger } from '../../logging/logger.js';
+import type { EsdFlag } from '../../types.js';
+
+const log = createLogger('esd');
 
 /**
  * Open Order ESD Finder — write job runner. Spawned by
@@ -43,8 +48,12 @@ function emit(envelope: EsdWriteEnvelope): void {
 interface EsdInferenceRowForWrite {
   id: number;
   order_number: string;
-  inferred_esd: string;
+  // CLAUDE_CODE_PROMPT (ESD writer changes, A4) — inferred_esd is now
+  // nullable at this call site: a note_only_reissue row (flag =
+  // 'no_esd_found') genuinely has no usable ESD, by definition.
+  inferred_esd: string | null;
   vendor_notes: string | null;
+  flag: string;
 }
 
 function parseArgs(): { env: MxiEnv; dbRunId: number; orderNumbers: string[] } {
@@ -75,16 +84,18 @@ async function main(): Promise<void> {
   const { env, dbRunId, orderNumbers } = parseArgs();
   const db = new Database(path.join('data', 'audit.db'));
 
-  // Same run-scoped, flag='ok'-gated query approveAndWrite.ts uses —
-  // scoped to the SPECIFIC compare run, never "whatever the latest run
-  // happens to be" (getActionableEsdInference's own hardcoded MAX(id)
-  // semantics would be wrong here: a later, unrelated run could exist by
-  // the time a write actually happens).
+  // CLAUDE_CODE_PROMPT (ESD writer changes, A4) — broadened from
+  // flag='ok'-only to also include flag='no_esd_found' rows, since those
+  // can now be genuinely actionable (note_only_reissue). Scoped to the
+  // SPECIFIC compare run, never "whatever the latest run happens to be"
+  // (getActionableEsdInference's own hardcoded MAX(id) semantics would be
+  // wrong here: a later, unrelated run could exist by the time a write
+  // actually happens) — unchanged from before.
   const placeholders = orderNumbers.map(() => '?').join(',');
   const rows = db
     .prepare(
-      `SELECT id, order_number, inferred_esd, vendor_notes FROM esd_inferences
-       WHERE run_id = ? AND flag = 'ok' AND order_number IN (${placeholders})`,
+      `SELECT id, order_number, inferred_esd, vendor_notes, flag FROM esd_inferences
+       WHERE run_id = ? AND flag IN ('ok', 'no_esd_found') AND order_number IN (${placeholders})`,
     )
     .all(dbRunId, ...orderNumbers) as EsdInferenceRowForWrite[];
 
@@ -95,12 +106,36 @@ async function main(): Promise<void> {
         type: 'order-result',
         orderNumber,
         status: 'skipped',
-        errorMessage: `Not found as an actionable (flag='ok') row under run ${dbRunId} — refusing to write it.`,
+        errorMessage: `Not found as an actionable (flag='ok' or 'no_esd_found') row under run ${dbRunId} — refusing to write it.`,
       });
     }
   }
 
-  if (rows.length === 0) {
+  // CLAUDE_CODE_PROMPT (ESD writer changes, A4) — the SQL flag filter above
+  // is a coarse pre-filter; classifyRowAction() is the single source of
+  // truth for whether a row is actually writable (it also excludes
+  // placeholder/blank commentary and orphaned rows). Re-derived here from
+  // the same (flag, vendorNotes) inputs esdCompareRunner.ts used at
+  // compare-time, never trusted from the caller — a row this project's own
+  // UI never offered as actionable still can't be forced through by a
+  // stray/replayed order number.
+  const writableRows: Array<EsdInferenceRowForWrite & { actionType: 'esd_write' | 'note_only_reissue' }> = [];
+  for (const row of rows) {
+    const actionType = classifyRowAction({ flag: row.flag as EsdFlag, vendorNotes: row.vendor_notes });
+    if (actionType === 'skipped_no_commentary') {
+      log.info({ orderNumber: row.order_number, flag: row.flag }, 'esd write skipped: no real commentary');
+      emit({
+        type: 'order-result',
+        orderNumber: row.order_number,
+        status: 'skipped',
+        errorMessage: 'No usable ESD and no real vendor commentary — refusing to write it.',
+      });
+      continue;
+    }
+    writableRows.push({ ...row, actionType });
+  }
+
+  if (writableRows.length === 0) {
     db.close();
     emit({ type: 'done' });
     return;
@@ -112,7 +147,7 @@ async function main(): Promise<void> {
 
   const client = await createReadyMxiClient(env);
   try {
-    for (const row of rows) {
+    for (const row of writableRows) {
       if (cancelSignal.aborted) break;
       // Defense-in-depth for the retry-only-failed-orders requirement:
       // never re-attempt an order this esd_inference_id already has a real
@@ -136,16 +171,46 @@ async function main(): Promise<void> {
         continue;
       }
 
-      const result = await writeEsdAndNotes(client, row.order_number, {
-        esd: toMxiDateFormat(row.inferred_esd),
-        noteText: assembleNoteText(row.vendor_notes) ?? undefined,
-      });
+      // CLAUDE_CODE_PROMPT (ESD writer changes, A2/A4) — the actionType
+      // branch below is what STRUCTURALLY guarantees the ESD field is
+      // never touched on the note_only_reissue path: `esd` is only ever
+      // set on the esd_write branch, never merely omitted-but-computed. A
+      // future edit to this function can't accidentally push an ESD onto
+      // a note-only row without touching this exact branch.
+      let writeUpdate: { esd?: string; noteText?: string };
+      let mxiWriteAction: 'approved_write' | 'approved_note_only_write';
+      if (row.actionType === 'esd_write') {
+        if (!row.inferred_esd) {
+          // Invariant violated: classifyRowAction() only returns
+          // 'esd_write' for flag === 'ok', and applyInferenceRules.ts
+          // never leaves inferred_esd null while flag stays 'ok'. Fail
+          // loudly rather than silently write a blank/garbage ESD.
+          throw new Error(
+            `Row ${row.order_number} classified as esd_write but has no inferred_esd — this should be impossible.`,
+          );
+        }
+        writeUpdate = {
+          esd: toMxiDateFormat(row.inferred_esd),
+          noteText: assembleNoteText(row.vendor_notes, row.inferred_esd) ?? undefined,
+        };
+        mxiWriteAction = 'approved_write';
+      } else {
+        writeUpdate = { noteText: assembleNoteText(row.vendor_notes, null) ?? undefined };
+        mxiWriteAction = 'approved_note_only_write';
+      }
+
+      log.info(
+        { orderNumber: row.order_number, actionType: row.actionType, env },
+        'attempting esd write',
+      );
+
+      const result = await writeEsdAndNotes(client, row.order_number, writeUpdate);
 
       insertMxiWrite(db, {
         esdInferenceId: row.id,
         orderNumber: row.order_number,
         targetEnv: env,
-        action: 'approved_write',
+        action: mxiWriteAction,
         inferredEsd: row.inferred_esd,
         writeStatus: result.status,
         errorMessage: result.errorMessage,

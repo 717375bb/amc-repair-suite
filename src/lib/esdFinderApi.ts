@@ -17,6 +17,9 @@ export type EsdClassification =
   | 'quote_sent_reference'
   | 'none'
 export type EsdFlag = 'ok' | 'no_esd_found' | 'orphaned_vendor_row' | 'orphaned_cra_row'
+// CLAUDE_CODE_PROMPT (ESD writer changes, A4) — mirrors backend's
+// classifyRowAction.ts RowActionType.
+export type EsdRowActionType = 'esd_write' | 'note_only_reissue' | 'skipped_no_commentary'
 export type EsdJobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
 export type EsdJobKind = 'compare' | 'write'
 export type MxiEnv = 'stage' | 'production'
@@ -45,6 +48,7 @@ export interface EsdCompareResultRow {
   flag: EsdFlag
   deltaDaysVsMxi: number | null
   aiCallMade: boolean
+  actionType: EsdRowActionType
   actionable: boolean
   notesToReceiverPreview: string | null
   partNumber: string | null
