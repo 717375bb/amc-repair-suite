@@ -132,15 +132,24 @@ somewhere to render without anyone needing to see it:
   safe — unlike permanently forcing it locally, which the project's own
   history already flagged as leaving an inconvenient visible browser
   window open).
-- `.vscode/tasks.json`'s backend task gained a `"linux"` platform override
-  (`xvfb-run -a npm run server`) — VS Code tasks support per-OS command
-  overrides, so this only applies inside the Linux container; local
-  Windows/macOS runs are unaffected and keep using the plain command.
+- New `backend/package.json` script, `server:codespaces`
+  (`xvfb-run -a npm run server`) — kept separate from the plain `server`
+  script so local Windows/macOS runs are completely unaffected.
 
-**Still to be confirmed**: this is a direct, targeted fix for a
-specifically-identified, previously-encountered failure mode (not a guess
-at a new one), but hasn't yet been proven by an actual fresh launch with
-both changes in place.
+**First attempt at the `tasks.json` side of this regressed the whole auto-
+start mechanism**: adding a `"linux"`-only command override directly
+inside the backend task (rather than a new npm script) made both task
+terminals stop appearing at all — not an `xvfb-run` error, *nothing*,
+which pointed at the task failing whatever validation lets
+`runOn: "folderOpen"` fire in the first place, not at the command itself.
+Rather than debug VS Code's exact task-schema internals blind, reverted
+`tasks.json` to the exact shape already proven to work (the same
+structure Round 3 above fixed), moving the Linux-specific wrapping into
+the new `server:codespaces` npm script instead so `tasks.json` itself
+never has to change shape — just which script name it calls.
+
+**Still to be confirmed**: this fix hasn't yet been proven by an actual
+fresh launch with both changes in place.
 
 ### Other items, still open
 

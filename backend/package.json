@@ -7,6 +7,7 @@
   "scripts": {
     "cli": "tsx src/cli/cli.ts",
     "server": "tsx src/server.ts",
+    "server:codespaces": "xvfb-run -a npm run server",
     "mxi:read-esd": "tsx src/cli/mxiReadEsd.ts",
     "mxi:write-esd": "tsx src/cli/mxiWriteEsd.ts",
     "mxi:save-storage-state": "tsx src/mxiWriter/saveStorageState.ts",
