@@ -24,7 +24,12 @@ export interface ExceptionRow {
     | 'Multiple Candidate Tasks'
     | 'Ad-Hoc Task Created - Pending Manual Continuation'
     | 'Unrecognized Station'
-    | 'No Work Package (Bad From Stock)'
+    // 'No Work Package (Bad From Stock)' RETIRED — Addition 1 (Create Work
+    // Package) replaces it: a line with no work package now gets one
+    // created automatically rather than being reported as a terminal
+    // exception. See 'Work Package Created - Pending Manual Continuation'
+    // below for the one real remaining pause (the one-time proof gate).
+    | 'Work Package Created - Pending Manual Continuation'
     | 'No Longer Eligible (claimed by another process)'
     | 'Zero Usage - Records Error'
     | 'Unassigned Task Present'

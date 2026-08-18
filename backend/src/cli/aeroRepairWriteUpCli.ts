@@ -70,6 +70,7 @@ async function main(): Promise<void> {
       | 'no_tasks_assigned'
       | 'multiple_candidate_tasks'
       | 'ad_hoc_pending_manual_continuation'
+      | 'work_package_created_pending_manual_continuation'
       | 'unrecognized_station'
       | 'zero_usage'
       | 'unassigned_task_multiple_present'
@@ -89,6 +90,20 @@ async function main(): Promise<void> {
         partNumber,
         targetEnv: env,
         outcome: 'unassigned_task_assigned',
+        stationCode: null,
+        routedLocation: null,
+        filledFieldsJson: JSON.stringify({ serialNumber: preferredSerialNumber ?? null }, null, 2),
+        errorMessage: null,
+        orderNumber: null,
+      });
+    }
+
+    if (outcome.workPackageWasCreated) {
+      insertWriteUpAction(db, {
+        vendor: 'aeroRepair',
+        partNumber,
+        targetEnv: env,
+        outcome: 'work_package_created',
         stationCode: null,
         routedLocation: null,
         filledFieldsJson: JSON.stringify({ serialNumber: preferredSerialNumber ?? null }, null, 2),
@@ -162,6 +177,23 @@ async function main(): Promise<void> {
         log.info(
           { command: `npm run aero-repair:continue-ad-hoc -- ${partNumber} ${outcome.serialNumber}${envFlag}` },
           'Continue-ad-hoc command',
+        );
+        break;
+      }
+      case 'work_package_created_pending_manual_continuation': {
+        dbOutcome = 'work_package_created_pending_manual_continuation';
+        log.info('');
+        log.info('=== WORK PACKAGE CREATED — PAUSED, pending one-time manual proof. ===');
+        log.info({ partNumber, serialNumber: outcome.serialNumber }, 'Part / Serial');
+        log.info({ workPackageName: outcome.workPackageName }, 'Work package created');
+        log.info('The rest of the flow (task-paste, Schedule Work Package, Authorization,');
+        log.info('Issue Order, Move to Dock) has not been exercised end-to-end yet starting');
+        log.info('from a freshly-created work package.');
+        log.info('Run this to manually continue and prove it for real:');
+        const envFlag = env === 'production' ? ' --env production' : '';
+        log.info(
+          { command: `npm run aero-repair:continue-work-package -- ${partNumber} ${outcome.serialNumber}${envFlag}` },
+          'Continue-work-package command',
         );
         break;
       }

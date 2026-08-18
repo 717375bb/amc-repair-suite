@@ -57,6 +57,14 @@ export interface RepairLineInfo {
   removalTaskName: string | null;
   /** This line's real "Removal Information > Task > ID" — see shared/removalTaskInfo.ts's docstring. */
   removalTaskId: string | null;
+  /**
+   * Addition 1 (Create Work Package) — true only when this call itself had
+   * to create the work package (the line had none when this function was
+   * called). false for the ordinary case (a work package already existed).
+   */
+  workPackageCreated: boolean;
+  /** The exact composed name used, only when workPackageCreated is true. */
+  createdWorkPackageName: string | null;
 }
 
 /**
@@ -148,6 +156,128 @@ async function navigateToPartGridAndGetCandidates(
   return { candidates, candidateCount };
 }
 
+/**
+ * Addition 1 (Create Work Package) — locates the SPECIFIC no-work-package
+ * row (exact partNumber + serialNumber) on the currently-rendered filtered
+ * grid. Mirrors batchDiscovery.ts's findNoWorkPackageLinesForPart's own
+ * confirmed DOM-walk technique (every real per-line row, with or without a
+ * work package, has its own Part No and Serial No as two consecutive plain
+ * `<a>` links) but scoped to one exact serial, and additionally returns the
+ * row's own full accessible-name text — used to build a
+ * `page.getByRole('row', ...)` locator, the same real selector confirmed
+ * live in discovery-work-package-recording.ts — plus the composed
+ * part-description text (everything in the row's own text before the Part
+ * No token) needed for the Work Package name. Returns null if this exact
+ * line currently has a work package (a real "Repair ..." link exists for
+ * it) or isn't present on this grid at all — a definitive read either way,
+ * never guessed.
+ */
+async function findNoWorkPackageRowForSerial(
+  page: Page,
+  partNumber: string,
+  serialNumber: string,
+): Promise<{ rowText: string; partDescription: string } | null> {
+  return page.evaluate(
+    ({ pn, sn }: { pn: string; sn: string }) => {
+      const repairLinkRe = new RegExp(`^Repair .*\\(PN: ${pn.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&')}, SN: [^)]+\\)$`);
+      const trs = Array.from(document.querySelectorAll('tr'));
+      for (const tr of trs) {
+        const text = (tr.textContent ?? '').replace(/\s+/g, ' ').trim();
+        if (!text.includes('USSTG')) continue;
+        if (text.includes('Options...')) continue; // admin/wrapper row, not a real line
+
+        const linkTexts = Array.from(tr.querySelectorAll('a')).map((a) => (a.textContent ?? '').trim());
+        const pnIdx = linkTexts.indexOf(pn);
+        if (pnIdx === -1) continue; // not this part number's own row
+
+        const rowSerial = linkTexts[pnIdx + 1];
+        if (rowSerial !== sn) continue; // not this specific serial
+
+        const hasRepairLink = linkTexts.some((t) => repairLinkRe.test(t));
+        if (hasRepairLink) continue; // already has a work package — not this case
+
+        const pnPos = text.indexOf(pn);
+        const partDescription = pnPos > 0 ? text.slice(0, pnPos).trim() : '';
+        return { rowText: text, partDescription };
+      }
+      return null;
+    },
+    { pn: partNumber, sn: serialNumber },
+  );
+}
+
+/**
+ * Addition 1 (Create Work Package) — confirmed real mechanism from
+ * discovery-work-package-recording.ts, taken literally: BOTH the inventory
+ * checkbox and the vendor radio must be checked before "Create Work
+ * Package" is clicked (confirmed rule), then the newly-generated work
+ * package's own `aName` field is filled with a name composed from PARSED
+ * row data — never by replicating the recording's own dblclick/click
+ * text-selection noise (that was the human manually selecting/copying text
+ * during capture, not a real mechanism to reproduce). Each of the two
+ * checkbox/radio checks is independently read back and confirmed BEFORE
+ * proceeding — if either cannot be confirmed checked, this throws rather
+ * than clicking Create Work Package on an unconfirmed state (guardrail, per
+ * explicit instruction).
+ *
+ * Per explicit confirmation the recording is complete and nothing was
+ * skipped: there is no separate OK/Save link in this flow at all — the
+ * recording's own last action on `aName` is the `.fill()`, immediately
+ * followed by the browser landing on CheckDetails.jsp. The real mechanism
+ * is the field committing/navigating on blur, not a submit click; codegen
+ * only ever captures the resulting navigation, not the blur event itself.
+ * Replicated here with an explicit `Tab` press right after `.fill()` (the
+ * same "move focus away" a real user's next action would cause) rather than
+ * a fabricated OK click. The subsequent independent re-verification (a
+ * fresh grid re-navigation confirming the exact composed name — see the
+ * caller, findFirstRepairLineForPart) is what actually proves this worked,
+ * regardless of exactly which page the browser lands on in between.
+ */
+async function createWorkPackageForLine(
+  page: Page,
+  partNumber: string,
+  serialNumber: string,
+  rowText: string,
+  partDescription: string,
+): Promise<{ workPackageName: string }> {
+  const row = page.getByRole('row', { name: rowText, exact: true });
+
+  const inventoryCheckbox = row.locator('input[name="aInventory"]');
+  await inventoryCheckbox.check();
+  await pace(page);
+  if (!(await inventoryCheckbox.isChecked())) {
+    throw new Error(
+      `Create Work Package guardrail failed for ${partNumber}/${serialNumber}: input[name="aInventory"] did not ` +
+        `confirm checked — refusing to click Create Work Package without both required boxes confirmed.`,
+    );
+  }
+
+  const vendorRadio = row.getByRole('radio');
+  await vendorRadio.check();
+  await pace(page);
+  if (!(await vendorRadio.isChecked())) {
+    throw new Error(
+      `Create Work Package guardrail failed for ${partNumber}/${serialNumber}: the vendor radio did not confirm ` +
+        `checked — refusing to click Create Work Package without both required boxes confirmed.`,
+    );
+  }
+
+  const workPackageName = `Repair ${partDescription} (PN: ${partNumber}, SN: ${serialNumber})`;
+
+  await page.getByRole('link', { name: 'Create Work Package' }).click();
+  await pace(page);
+  const nameField = page.locator('input[name="aName"]');
+  await nameField.click();
+  await nameField.fill(workPackageName);
+  // Real mechanism per the recording (see docstring above): the field
+  // commits and navigates on blur, not a submit click. Tab moves focus away
+  // the same way a real user's next action would.
+  await nameField.press('Tab');
+  await pace(page);
+
+  return { workPackageName };
+}
+
 export async function findFirstRepairLineForPart(
   page: Page,
   partNumber: string,
@@ -167,6 +297,10 @@ export async function findFirstRepairLineForPart(
   // loop, or throws before this variable is ever read).
   let candidates!: Locator;
   let chosenLinkText: string | null = null;
+  // Addition 1 (Create Work Package) — set true only on the recovery path
+  // below, which creates a real work package for a line that had none.
+  let workPackageCreated = false;
+  let createdWorkPackageName: string | null = null;
 
   if (preferredSerialNumber) {
     // REAL CAUSE CONFIRMED via captured evidence from a real production
@@ -238,6 +372,56 @@ export async function findFirstRepairLineForPart(
     // use case) is unaffected — falling back to candidates.first() only
     // happens in that intentional, no-preference case now.
     if (!chosenLinkText) {
+      // Addition 1 (Create Work Package) — REPLACES the old "No Work
+      // Package (Bad From Stock)" terminal exception: before concluding
+      // this serial genuinely isn't findable, check whether it's present
+      // as a NO-work-package row instead (a real USSTG inventory row with
+      // no "Repair ..." link at all — see batchDiscovery.ts's
+      // findNoWorkPackageLinesForPart for the confirmed real shape). If so,
+      // create the work package for real, then re-search this same grid —
+      // the line should now have a genuine "Repair ..." link this function
+      // can proceed with normally.
+      const noWorkPackageRow = await findNoWorkPackageRowForSerial(page, partNumber, preferredSerialNumber);
+      if (noWorkPackageRow) {
+        const { workPackageName } = await createWorkPackageForLine(
+          page,
+          partNumber,
+          preferredSerialNumber,
+          noWorkPackageRow.rowText,
+          noWorkPackageRow.partDescription,
+        );
+
+        // Independent re-verification (standing discipline #3): a FRESH
+        // grid read, not trusting whatever page state Create Work
+        // Package's own click sequence left behind. The work package must
+        // now exist on this exact line, with a name matching the composed
+        // string EXACTLY, before proceeding into the task-paste step.
+        const reread = await navigateToPartGridAndGetCandidates(page, partNumber, todoListUrl);
+        let verifiedLinkText: string | null = null;
+        for (let i = 0; i < reread.candidateCount; i++) {
+          const text = (await reread.candidates.nth(i).innerText()).trim();
+          if (text.includes(`SN: ${preferredSerialNumber})`)) {
+            verifiedLinkText = text;
+            break;
+          }
+        }
+
+        if (verifiedLinkText !== workPackageName) {
+          throw new Error(
+            `work_package_creation_not_confirmed: after creating a work package for ${partNumber}/${preferredSerialNumber}, ` +
+              `independent re-verification did not find a repair line whose name exactly matches "${workPackageName}" ` +
+              `(found instead: ${verifiedLinkText ?? '(no matching line at all)'}).`,
+          );
+        }
+
+        candidates = reread.candidates;
+        chosenLinkText = verifiedLinkText;
+        workPackageCreated = true;
+        createdWorkPackageName = workPackageName;
+      }
+    }
+
+    if (!chosenLinkText) {
       // Evidence capture added after a real "consistent empty read"
       // symptom (reported for 5013640) couldn't be reproduced across 18
       // isolated diagnostic attempts — this is one of the paths that
@@ -251,7 +435,7 @@ export async function findFirstRepairLineForPart(
         candidateCount: lastCandidateCount,
       });
       throw new Error(
-        `Preferred serial number "${preferredSerialNumber}" was not found among ${lastCandidateCount} candidate line(s) for part ${partNumber} (after ${MAX_ATTEMPTS} attempts) — refusing to silently process a different line instead.`,
+        `Preferred serial number "${preferredSerialNumber}" was not found among ${lastCandidateCount} candidate line(s) for part ${partNumber} (after ${MAX_ATTEMPTS} attempts), and no no-work-package row matched it either — refusing to silently process a different line instead.`,
       );
     }
   } else {
@@ -290,6 +474,8 @@ export async function findFirstRepairLineForPart(
     linkText,
     removalTaskName: removalTask.name,
     removalTaskId: removalTask.id,
+    workPackageCreated,
+    createdWorkPackageName,
   };
 }
 

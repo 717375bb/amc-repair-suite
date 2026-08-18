@@ -133,12 +133,14 @@ export function discoveredLineToLogEvent(
         summary: "This line's station isn't in the routing table yet. Needs manual review.",
         exceptionType: 'unrecognized_station',
       };
-    case 'no-work-package-exception':
+    case 'no-work-package':
+      // Addition 1 (Create Work Package) — no longer a blocking exception:
+      // this line will get a work package created automatically, then
+      // continue the normal write-up, same as an ordinary eligible line.
       return {
         ...base,
-        status: 'exception',
-        summary: 'No work package (bad from stock). Needs manual review.',
-        exceptionType: 'no_work_package',
+        status: 'completed', // discovery-time "found, selectable" — not an exception
+        summary: 'No work package yet — one will be created automatically.',
         detail: line.note ?? undefined,
       };
   }
@@ -190,6 +192,15 @@ export function aeroRepairResultToLogEvent(
         summary: 'A task was created, but this line needs a one-time manual confirmation before continuing. Needs manual review.',
         exceptionType: 'ad_hoc_pending_manual_continuation',
         detail: `Ad-Hoc task created: "${result.taskName}"`,
+      };
+    case 'work_package_created_pending_manual_continuation':
+      return {
+        ...base,
+        serialNumber: result.serialNumber,
+        status: 'exception',
+        summary: 'A work package was created, but this line needs a one-time manual confirmation before continuing. Needs manual review.',
+        exceptionType: 'work_package_created_pending_manual_continuation',
+        detail: `Work package created: "${result.workPackageName}"`,
       };
     case 'unrecognized_station':
       return { ...base, status: 'exception', summary: "This line's station isn't in the routing table yet. Needs manual review.", exceptionType: 'unrecognized_station' };
@@ -303,6 +314,17 @@ export function vendorCodeOutcomeToLogEvent(
       };
     case 'no_candidate_lines':
       return { ...base, status: 'exception', summary: 'No lines currently found for this vendor. Needs manual review.', exceptionType: 'no_candidate_lines' };
+    case 'vendor_not_preferred':
+      // Addition 3 (preferred-vendor check) — a legitimate, expected
+      // business outcome, never surfaced as a failure/needs-review.
+      return {
+        ...base,
+        partNumber: outcome.partNumber,
+        serialNumber: outcome.serialNumber,
+        status: 'skipped',
+        summary: 'Another vendor is preferred for this part — skipped.',
+        exceptionType: 'vendor_not_preferred',
+      };
     case 'unassigned_task_present':
       return {
         ...base,

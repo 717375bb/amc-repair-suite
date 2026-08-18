@@ -44,7 +44,7 @@ import { completeCreateOrderOnly, composeAwaitingRmaNote, composeDoNotShipNote, 
 import { closePartDetailsReceivingNotes, openPartDetailsReceivingNotes, readPartDetailsReceivingNotes } from './partDetailsReceivingNotes.js';
 import { isRmaVendor } from './rmaVendors.js';
 import { captureVendorCodeGridDiagnostics } from './vendorCodeGridDiagnostics.js';
-import { extractRemovalTaskInfo } from './removalTaskInfo.js';
+import { extractRemovalTaskInfo, readPreferredVendorIndicator, type PreferredVendorIndicatorState } from './removalTaskInfo.js';
 import { createLogger } from '../../logging/logger.js';
 
 const log = createLogger('writeup');
@@ -206,6 +206,16 @@ export interface VendorCodeCandidateLine {
   removalTaskName: string | null;
   /** The Removal Information Task ID paired with removalTaskName — see its docstring. */
   removalTaskId: string | null;
+  /**
+   * Preferred-vendor check (Addition 3) — read from the SAME row, at the
+   * SAME time as removalTaskName/removalTaskId above, while still on the
+   * grid (the checkbox this reads does not exist once the line is opened).
+   * See readPreferredVendorIndicator's own docstring for the tri-state
+   * meaning. Read for every candidate regardless of config.checkPreferredVendor
+   * — cheap, and keeps the read itself unconditional; only the DECISION to
+   * act on it is config-gated, in runVendorCodeWriteUp below.
+   */
+  preferredVendorState: PreferredVendorIndicatorState;
 }
 
 const REPAIR_LINK_PATTERN = /^Repair .*\(PN: ([^,]+), (SN|BN): ([^)]+)\)$/;
@@ -230,6 +240,7 @@ async function findCandidateLinesForVendorCodeOnce(
     if (!match) continue;
 
     const removalTask = await extractRemovalTaskInfo(repairLinks.nth(i));
+    const preferredVendorState = await readPreferredVendorIndicator(repairLinks.nth(i));
 
     candidates.push({
       partNumber: match[1],
@@ -238,6 +249,7 @@ async function findCandidateLinesForVendorCodeOnce(
       isBnLine: match[2] === 'BN',
       removalTaskName: removalTask.name,
       removalTaskId: removalTask.id,
+      preferredVendorState,
     });
   }
   return candidates;
@@ -392,6 +404,13 @@ export type VendorCodeWriteUpOutcome =
    */
   | { status: 'order_created_awaiting_rma'; fields: VendorCodeWriteUpFields; externalReferenceNote: string }
   | { status: 'no_candidate_lines'; vendorCode: string }
+  /**
+   * CLAUDE_CODE_PROMPT (Addition 3, preferred-vendor check) — a legitimate,
+   * expected business outcome, not an error: another vendor is preferred
+   * for this part, so this vendor's bid is skipped before any write.
+   * Read-only, no order created, no fields filled.
+   */
+  | { status: 'vendor_not_preferred'; partNumber: string; serialNumber: string }
   | { status: 'unassigned_task_present'; partNumber: string; serialNumber: string; taskDetail: string }
   | { status: 'no_removal_task_info_found'; partNumber: string; serialNumber: string }
   /**
@@ -479,6 +498,38 @@ export async function runVendorCodeWriteUp(
     }
     knownPartNumber = candidate.partNumber;
     knownSerialNumber = candidate.serialNumber;
+
+    // CLAUDE_CODE_PROMPT (Addition 3, preferred-vendor check) — read-only,
+    // checked BEFORE any navigation/write for this candidate (the checkbox
+    // only exists on this grid row, already captured in
+    // findCandidateLinesForVendorCodeOnce at the same time as
+    // removalTaskName/removalTaskId). Broad scope per explicit instruction:
+    // applies to every vendor in this shared engine unless a future config
+    // narrows it (config.checkPreferredVendor === false) — Aero Repair is
+    // untouched since it never calls this module. A 'not_found' read is
+    // never silently treated as "not preferred" — refusing to guess, same
+    // discipline as every other definitive-read requirement in this project.
+    const checkPreferredVendor = config.checkPreferredVendor !== false;
+    if (checkPreferredVendor) {
+      if (candidate.preferredVendorState === 'not_found') {
+        throw new Error(
+          `Preferred-vendor indicator not found for ${candidate.partNumber}/${candidate.serialNumber} ` +
+            `(vendor ${config.id}) — the row has no "td.checkbox > input[type=CHECKBOX]" cell to read. ` +
+            `Refusing to guess whether this vendor is preferred.`,
+        );
+      }
+      if (candidate.preferredVendorState === 'not_preferred') {
+        log.info(
+          { vendorConfigId: config.id, partNumber: candidate.partNumber, serialNumber: candidate.serialNumber },
+          '[preferred-vendor] another vendor is preferred for this part — skipping this bid before any write',
+        );
+        return {
+          status: 'vendor_not_preferred',
+          partNumber: candidate.partNumber,
+          serialNumber: candidate.serialNumber,
+        };
+      }
+    }
 
     // CLAUDE_CODE_PROMPT (vendor 7A9Y2 "shipset" case) — read the shipset
     // trigger from the HOME-PAGE grid row BEFORE opening the line (per

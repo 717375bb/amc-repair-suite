@@ -441,6 +441,12 @@ export interface WriteUpActionInsert {
     // shared/rmaVendors.ts.
     | 'order_created_awaiting_rma'
     | 'no_candidate_lines'
+    // CLAUDE_CODE_PROMPT (Addition 3, preferred-vendor check) — a
+    // legitimate, expected business-outcome skip: another vendor is
+    // preferred for this part, so this vendor's bid was skipped before any
+    // write. Never conflated with a failure — logged the same success-path
+    // way as no_candidate_lines above.
+    | 'vendor_not_preferred'
     | 'usage_table_absent_unexpected'
     // CLAUDE_CODE_PROMPT (new vendor batch, 2026-08-14) — receiving notes
     // (shared/partDetailsReceivingNotes.ts) mention "account"; flagged for
@@ -460,6 +466,14 @@ export interface WriteUpActionInsert {
     | 'unassigned_task_assigned'
     | 'unassigned_task_multiple_present'
     | 'unassigned_task_detection_suspect'
+    // CLAUDE_CODE_PROMPT (Addition 1, Create Work Package) — REPLACES the
+    // old 'No Work Package (Bad From Stock)' terminal exception: a line
+    // with no work package now gets one created, then continues the normal
+    // write-up in the SAME pass. Distinct, append-only audit row (same
+    // pattern as 'unassigned_task_assigned' — additive to whatever the
+    // line's own eventual outcome is), so creation frequency is auditable.
+    | 'work_package_created'
+    | 'work_package_created_pending_manual_continuation'
     // CLAUDE_CODE_PROMPT_WRITEUP_FAILSAFE.md Layer 3 — a non-terminal,
     // audit-only row: a main-pass line hit a retryable failure (indeterminate
     // read, target not found in an incomplete grid, etc.) and was set aside

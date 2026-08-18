@@ -92,6 +92,14 @@ export function logVendorCodeOutcome(
       log.info({ vendorCode: outcome.vendorCode }, 'No candidate lines found for vendor code');
       break;
     }
+    case 'vendor_not_preferred': {
+      dbOutcome = 'vendor_not_preferred';
+      log.info(
+        { partNumber: outcome.partNumber, serialNumber: outcome.serialNumber },
+        'Another vendor is preferred for this part — skipped. Nothing filled, no order created.',
+      );
+      break;
+    }
     case 'unassigned_task_present': {
       dbOutcome = 'unassigned_task_present';
       filledFieldsJson = JSON.stringify({ serialNumber: outcome.serialNumber, taskDetail: outcome.taskDetail }, null, 2);

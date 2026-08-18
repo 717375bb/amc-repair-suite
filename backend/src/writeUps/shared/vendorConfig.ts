@@ -113,6 +113,15 @@ export interface VendorConfig {
    * notes mention "account" (case-insensitive) — not just logged anymore.
    */
   hasPartDetailsStep?: boolean;
+  /**
+   * Preferred-vendor check (all vendors except Aero Repair, which never
+   * consumes VendorConfig at all). Broad by explicit user instruction for
+   * now ("all non-Aero-Repair parts", not narrowed to multi-vendor-bid
+   * lines specifically) — this flag exists so narrowing later is a config
+   * change, not a rewrite. Undefined/true = checked (the default, broad
+   * behavior); explicit false = skipped for that vendor.
+   */
+  checkPreferredVendor?: boolean;
 }
 
 /**

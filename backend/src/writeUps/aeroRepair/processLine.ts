@@ -35,6 +35,13 @@ export type ProcessLineResult =
   | { status: 'no_tasks_assigned'; stationCode: string }
   | { status: 'multiple_candidate_tasks'; stationCode: string; candidateNames: string[] }
   | { status: 'ad_hoc_pending_manual_continuation'; serialNumber: string; taskName: string }
+  /**
+   * Addition 1 (Create Work Package) — mirrors ad_hoc_pending_manual_continuation
+   * above: a real work package was created and independently re-verified,
+   * but per workPackageCreationProof.ts's one-time gate, the rest of the
+   * flow pauses here until a human manually confirms it, once per env.
+   */
+  | { status: 'work_package_created_pending_manual_continuation'; serialNumber: string; workPackageName: string }
   | { status: 'unrecognized_station'; stationCode: string }
   /**
    * CLAUDE_CODE_PROMPT (email-maintenance-records button, 2026-08-14) —
@@ -197,6 +204,52 @@ async function processLineInner(
       errorMessage: null,
       orderNumber: null,
     });
+  }
+
+  // Addition 1 (Create Work Package) — REPLACES the old "No Work Package
+  // (Bad From Stock)" terminal exception. Distinct, append-only audit row
+  // (same pattern as unassigned_task_assigned above), additive to whatever
+  // this line's own eventual outcome is — so creation frequency is
+  // auditable without grepping filledFieldsJson across every outcome type.
+  if (writeUpOutcome.workPackageWasCreated) {
+    insertWriteUpAction(db, {
+      vendor: 'aeroRepair',
+      partNumber,
+      targetEnv: env,
+      outcome: 'work_package_created',
+      stationCode: null,
+      routedLocation: null,
+      filledFieldsJson: JSON.stringify({ serialNumber }, null, 2),
+      errorMessage: null,
+      orderNumber: null,
+    });
+  }
+
+  if (writeUpOutcome.status === 'work_package_created_pending_manual_continuation') {
+    // A real mutation happened (the work package was genuinely created and
+    // independently re-verified) — same treatment as
+    // ad_hoc_pending_manual_continuation below: a real write_up_actions
+    // row, not just an xlsx log entry.
+    insertWriteUpAction(db, {
+      vendor: 'aeroRepair',
+      partNumber,
+      targetEnv: env,
+      outcome: 'work_package_created_pending_manual_continuation',
+      stationCode: null,
+      routedLocation: null,
+      filledFieldsJson: JSON.stringify(
+        { serialNumber: writeUpOutcome.serialNumber, workPackageName: writeUpOutcome.workPackageName },
+        null,
+        2,
+      ),
+      errorMessage: null,
+      orderNumber: null,
+    });
+    return {
+      status: 'work_package_created_pending_manual_continuation',
+      serialNumber: writeUpOutcome.serialNumber,
+      workPackageName: writeUpOutcome.workPackageName,
+    };
   }
 
   if (writeUpOutcome.status === 'no_tasks_assigned') {
@@ -570,6 +623,22 @@ export async function logProcessLineResult(
       issueType: 'Ad-Hoc Task Created - Pending Manual Continuation',
       details: `Created Ad-Hoc task "${result.taskName}" but paused before Auth Flow/Issue Order/Move to Dock — this specific recovery path's continuation has not yet been proven end-to-end. A real task was created; nothing further was submitted.`,
       suggestedAction: `Run \`${continueCommand}\` to manually continue this one order and prove the path for real. Once that succeeds, subsequent single-candidate cases will run fully automatically.`,
+    });
+  } else if (result.status === 'work_package_created_pending_manual_continuation') {
+    const envFlag = env === 'production' ? ' --env production' : '';
+    const continueCommand = `npm run aero-repair:continue-work-package -- ${target.partNumber} ${result.serialNumber}${envFlag}`;
+    log.info(
+      { workPackageName: result.workPackageName, continueCommand },
+      'PAUSED: Work Package created, pending one-time manual proof',
+    );
+    exceptions.push({
+      partNumber: target.partNumber,
+      serialNumber: target.serialNumber,
+      station: '(unknown)',
+      dateFound,
+      issueType: 'Work Package Created - Pending Manual Continuation',
+      details: `Created work package "${result.workPackageName}" but paused before continuing (task-paste, Schedule Work Package, ...) — this new Create Work Package path's continuation has not yet been proven end-to-end. A real work package was created; nothing further was submitted.`,
+      suggestedAction: `Run \`${continueCommand}\` to manually continue this one order and prove the path for real. Once that succeeds, subsequent Create Work Package cases will run fully automatically.`,
     });
   } else if (result.status === 'unrecognized_station') {
     log.info({ stationCode: result.stationCode }, 'SKIPPED: unrecognized station');

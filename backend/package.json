@@ -15,6 +15,7 @@
     "aero-repair:batch-discovery": "tsx src/cli/aeroRepairBatchDiscoveryCli.ts",
     "aero-repair:batch-execute": "tsx src/cli/aeroRepairBatchExecuteCli.ts",
     "aero-repair:continue-ad-hoc": "tsx src/cli/aeroRepairContinueAdHocCli.ts",
+    "aero-repair:continue-work-package": "tsx src/cli/aeroRepairContinueWorkPackageCli.ts",
     "aero-repair:review-pending": "tsx src/cli/aeroRepairReviewPendingCli.ts",
     "aero-repair:move-to-dock": "tsx src/cli/aeroRepairMoveToDockCli.ts",
     "aero-repair:approve-issue": "tsx src/cli/aeroRepairApproveIssueCli.ts",

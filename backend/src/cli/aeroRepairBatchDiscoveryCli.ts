@@ -15,8 +15,6 @@ const NO_TASK_SUGGESTED_ACTION =
   'Manually assign a task to this work package before a write-up can be created, or confirm no repair is needed.';
 const UNRECOGNIZED_STATION_SUGGESTED_ACTION =
   "This part's current station isn't in the automated routing table — manually determine the correct Aero Repair location.";
-const NO_WORK_PACKAGE_SUGGESTED_ACTION =
-  'A CRA must handle this line manually — do NOT attempt an automated write-up.';
 
 const LOG_FILE_PATH = path.join('data', 'aero-repair-writeup-log.xlsx');
 
@@ -52,8 +50,13 @@ async function main(): Promise<void> {
     const lines = await discoverEligibleLines(client);
 
     const dateFound = new Date().toISOString();
+    // Addition 1 (Create Work Package) — 'no-work-package' RETIRED as a
+    // terminal exception: no longer mapped to an ExceptionRow here at all,
+    // same treatment as 'no-task-exception' below (both are now real,
+    // automated recovery paths, not "a human must handle this" cases).
+    // Only 'unrecognized-station-exception' remains a genuine exception row.
     const exceptionRows: ExceptionRow[] = lines
-      .filter((line) => line.classification !== 'eligible-for-write-up')
+      .filter((line) => line.classification !== 'eligible-for-write-up' && line.classification !== 'no-work-package')
       .map((line) => {
         if (line.classification === 'no-task-exception') {
           return {
@@ -65,19 +68,6 @@ async function main(): Promise<void> {
             details: `Line "${line.linkText}" has no assigned tasks on the default Assigned Tasks tab. Included in ` +
               `the eligible-lines file so batch-execute's existing 0/1/2+ candidate recovery can run on it.`,
             suggestedAction: NO_TASK_SUGGESTED_ACTION,
-          };
-        }
-        if (line.classification === 'no-work-package-exception') {
-          return {
-            partNumber: line.partNumber,
-            serialNumber: line.serialNumber,
-            station: line.stationCode,
-            dateFound,
-            issueType: 'No Work Package (Bad From Stock)',
-            details:
-              `Real USSTG inventory row with a BLANK Work Package column — no "Repair ..." link exists for this ` +
-              `line, so no automated write-up can be attempted. Raw row text: ${line.note ?? '(not captured)'}`,
-            suggestedAction: NO_WORK_PACKAGE_SUGGESTED_ACTION,
           };
         }
         return {
@@ -104,16 +94,29 @@ async function main(): Promise<void> {
     // included alongside eligible-for-write-up lines: runAeroRepairWriteUp
     // re-derives the no-task state itself from a FRESH read (never trusts
     // this discovery snapshot), so passing these through is safe and lets
-    // the existing recovery actually run. unrecognized-station-exception
-    // and no-work-package-exception are deliberately still excluded — both
-    // are genuine "a human must handle this" cases with no automated path.
+    // the existing recovery actually run. unrecognized-station-exception is
+    // deliberately still excluded — genuinely "a human must handle this,"
+    // no automated path.
+    //
+    // Addition 1 (Create Work Package) — 'no-work-package' lines are now
+    // ALSO included here (previously deliberately excluded, back when
+    // that classification was still a terminal exception). runAeroRepairWriteUp
+    // re-derives the no-work-package state itself from a fresh read (via
+    // findFirstRepairLineForPart's own recovery, never trusting this
+    // discovery snapshot) and creates the work package for real, gated by
+    // workPackageCreationProof.ts's one-time per-env proof requirement.
     const targetsForBatchExecute = lines
-      .filter((line) => line.classification === 'eligible-for-write-up' || line.classification === 'no-task-exception')
+      .filter(
+        (line) =>
+          line.classification === 'eligible-for-write-up' ||
+          line.classification === 'no-task-exception' ||
+          line.classification === 'no-work-package',
+      )
       .map((line) => ({ partNumber: line.partNumber, serialNumber: line.serialNumber }));
     await saveEligibleLines(env, targetsForBatchExecute);
     log.info(
       { lineCount: targetsForBatchExecute.length, eligibleLinesFilePath: ELIGIBLE_LINES_FILE_PATH, env },
-      "Saved line(s) to eligible-lines file (eligible-for-write-up + no-task-exception, so batch-execute's existing 0/1/2+ no-task recovery can actually run) — run `npm run aero-repair:batch-execute -- --env <env>` next to process all of them, no manual list needed.",
+      "Saved line(s) to eligible-lines file (eligible-for-write-up + no-task-exception + no-work-package, so batch-execute's existing 0/1/2+ no-task recovery and the new Create Work Package recovery can both actually run) — run `npm run aero-repair:batch-execute -- --env <env>` next to process all of them, no manual list needed.",
     );
 
     printSummary(lines);
@@ -142,8 +145,8 @@ function printSummary(lines: DiscoveredLine[]): void {
           ? `routes to ${line.routingLocation}`
           : line.classification === 'no-task-exception'
             ? 'NO TASK ASSIGNED'
-            : line.classification === 'no-work-package-exception'
-              ? 'NO WORK PACKAGE (BAD FROM STOCK)'
+            : line.classification === 'no-work-package'
+              ? 'NO WORK PACKAGE (will be created automatically)'
               : `UNRECOGNIZED STATION (${line.stationCode})`;
       log.info({ serialNumber: line.serialNumber, stationCode: line.stationCode, detail }, 'Eligible-candidate line');
     }
@@ -153,13 +156,13 @@ function printSummary(lines: DiscoveredLine[]): void {
   const eligible = lines.filter((l) => l.classification === 'eligible-for-write-up');
   const noTask = lines.filter((l) => l.classification === 'no-task-exception');
   const unrecognizedStation = lines.filter((l) => l.classification === 'unrecognized-station-exception');
-  const noWorkPackage = lines.filter((l) => l.classification === 'no-work-package-exception');
+  const noWorkPackage = lines.filter((l) => l.classification === 'no-work-package');
 
   log.info({ totalLines: lines.length }, 'Total lines found');
   log.info({ eligibleCount: eligible.length }, 'Eligible for write-up');
   log.info({ noTaskCount: noTask.length }, 'No Task Assigned exception');
   log.info({ unrecognizedStationCount: unrecognizedStation.length }, 'Unrecognized Station exception');
-  log.info({ noWorkPackageCount: noWorkPackage.length }, 'No Work Package (Bad From Stock) exception');
+  log.info({ noWorkPackageCount: noWorkPackage.length }, 'No Work Package (will be created automatically — Addition 1)');
 
   log.info('\nEligible lines by routing destination:');
   const byDestination = new Map<string, DiscoveredLine[]>();
@@ -206,14 +209,14 @@ function printSummary(lines: DiscoveredLine[]): void {
     }
   }
 
-  log.info('\nNo Work Package (Bad From Stock) exceptions:');
+  log.info('\nNo Work Package lines (will create a work package automatically, then continue the write-up):');
   if (noWorkPackage.length === 0) {
     log.info('  (none)');
   } else {
     for (const line of noWorkPackage) {
       log.info(
         { partNumber: line.partNumber, serialNumber: line.serialNumber, stationCode: line.stationCode },
-        'No Work Package (Bad From Stock) exception line',
+        'No Work Package line',
       );
     }
   }

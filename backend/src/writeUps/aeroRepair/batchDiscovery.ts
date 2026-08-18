@@ -25,7 +25,7 @@ export type LineClassification =
   | 'eligible-for-write-up'
   | 'no-task-exception'
   | 'unrecognized-station-exception'
-  | 'no-work-package-exception';
+  | 'no-work-package';
 
 export interface DiscoveredLine {
   partNumber: string;
@@ -34,8 +34,9 @@ export interface DiscoveredLine {
   stationCode: string;
   classification: LineClassification;
   routingLocation: string | null;
-  /** Only populated for 'no-work-package-exception' — the real row's raw
-   * text, for a human CRA to see the actual Reason For Repair themselves. */
+  /** Only populated for 'no-work-package' — the real row's raw text, used
+   * to compose the Work Package name (Addition 1) and for a human CRA to
+   * see the actual Reason For Repair. */
   note: string | null;
 }
 
@@ -460,7 +461,7 @@ export async function discoverEligibleLines(client: MxiClient, signal?: AbortSig
 
     const noWorkPackageLines = await findNoWorkPackageLinesForPart(page, client.todoListUrl, partNumber);
     for (const line of noWorkPackageLines) {
-      results.push({ ...line, classification: 'no-work-package-exception', routingLocation: null });
+      results.push({ ...line, classification: 'no-work-package', routingLocation: null });
     }
   }
 

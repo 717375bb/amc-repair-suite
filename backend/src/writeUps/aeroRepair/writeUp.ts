@@ -12,6 +12,7 @@ import { completeCreateOrderOnly, composeDoNotShipNote, verifyExternalReferenceC
 import { buildWheelsBrakesChargeToAccount } from './chargeToAccount.js';
 import { isNoTasksAssignedException } from './noTaskException.js';
 import { isAdHocContinuationProven } from './adHocContinuationProof.js';
+import { isWorkPackageCreationProven } from './workPackageCreationProof.js';
 import { captureEmptyReadEvidence, captureUnassignedTaskPositiveDetection } from './emptyReadCapture.js';
 import { waitForUnassignedTasksSectionResolved, waitForWorkPackageDetailsResolved } from './gridWait.js';
 import { detectUnassignedTaskState } from '../shared/unassignedTasks.js';
@@ -96,6 +97,23 @@ type AeroRepairWriteUpOutcomeVariant =
       serialNumber: string;
       taskName: string;
     }
+  /**
+   * Addition 1 (Create Work Package) — mirrors ad_hoc_pending_manual_continuation
+   * above exactly: a real work package WAS created and independently
+   * re-verified (name matches exactly), but per workPackageCreationProof.ts's
+   * one-time gate, this specific new write path pauses here — once per env —
+   * until a human manually confirms the rest of the flow (task-paste,
+   * Schedule Work Package, ...) completes correctly from a freshly-created
+   * work package. Never a guess at whether the creation itself is safe to
+   * build on — a real mutation already happened and was verified; only
+   * CONTINUING past it automatically is gated.
+   */
+  | {
+      status: 'work_package_created_pending_manual_continuation';
+      partNumber: string;
+      serialNumber: string;
+      workPackageName: string;
+    }
   | { status: 'unrecognized_station'; partNumber: string; stationCode: string }
   /**
    * CLAUDE_CODE_PROMPT (email-maintenance-records button, 2026-08-14) —
@@ -146,7 +164,20 @@ type AeroRepairWriteUpOutcomeVariant =
  * write_up_actions row whenever this is true, in addition to whatever the
  * eventual outcome-specific row is.
  */
-export type AeroRepairWriteUpOutcome = AeroRepairWriteUpOutcomeVariant & { unassignedTaskWasAssigned?: boolean };
+/**
+ * `workPackageWasCreated` mirrors `unassignedTaskWasAssigned` exactly:
+ * a shared, optional field across every variant (not just 'filled') — set
+ * true only once workPackageCreationProof.ts's gate has already been
+ * confirmed proven and the flow continues past a freshly-created work
+ * package in the SAME pass. processLine.ts inserts a distinct
+ * 'work_package_created' write_up_actions row whenever this is true, in
+ * addition to whatever the eventual outcome-specific row is — same pattern
+ * as unassigned_task_assigned.
+ */
+export type AeroRepairWriteUpOutcome = AeroRepairWriteUpOutcomeVariant & {
+  unassignedTaskWasAssigned?: boolean;
+  workPackageWasCreated?: boolean;
+};
 
 /**
  * Walks the Aero Repair write-up flow for ONE part number: fills and
@@ -191,14 +222,29 @@ export async function runAeroRepairWriteUp(
   try {
     const page: Page = await client.getAuthenticatedPage();
 
-    const { serialNumber, linkText, removalTaskName, removalTaskId } = await findFirstRepairLineForPart(
-      page,
-      partNumber,
-      client.todoListUrl,
-      preferredSerialNumber,
-      maxAttempts,
-    );
+    const { serialNumber, linkText, removalTaskName, removalTaskId, workPackageCreated, createdWorkPackageName } =
+      await findFirstRepairLineForPart(page, partNumber, client.todoListUrl, preferredSerialNumber, maxAttempts);
     knownSerialNumber = serialNumber;
+
+    // Addition 1 (Create Work Package) — a real work package was just
+    // created and independently re-verified (findFirstRepairLineForPart's
+    // own guarantee). Per workPackageCreationProof.ts's one-time gate, do
+    // not continue automatically into the rest of the flow (task-paste,
+    // Schedule Work Package, ...) until a human has manually confirmed it
+    // for real, once, in this env — same discipline already trusted here
+    // for the Ad-Hoc-continuation gap (isAdHocContinuationProven).
+    if (workPackageCreated) {
+      const workPackageCreationProven = await isWorkPackageCreationProven(client.config.env);
+      if (!workPackageCreationProven) {
+        return {
+          status: 'work_package_created_pending_manual_continuation',
+          partNumber,
+          serialNumber,
+          workPackageName: createdWorkPackageName!,
+        };
+      }
+    }
+    const workPackageWasCreated = workPackageCreated;
 
     // Real bug found and fixed this session: this check previously ran
     // AFTER navigateToUnassignedTasksView, reading the "Unassigned Tasks"
@@ -251,7 +297,7 @@ export async function runAeroRepairWriteUp(
 
       if (candidates.length === 0) {
         await cancelCreateNewTask(page);
-        return { status: 'no_tasks_assigned', partNumber };
+        return { status: 'no_tasks_assigned', partNumber, workPackageWasCreated };
       }
 
       if (candidates.length > 1) {
@@ -266,6 +312,7 @@ export async function runAeroRepairWriteUp(
           status: 'multiple_candidate_tasks',
           partNumber,
           candidateNames: candidates.map((c) => c.name),
+          workPackageWasCreated,
         };
       }
 
@@ -304,7 +351,7 @@ export async function runAeroRepairWriteUp(
       // case, not a reason to fabricate a name from the wrong source.
       if (!removalTaskName || !removalTaskId) {
         await cancelCreateNewTask(page);
-        return { status: 'no_removal_task_info_found', partNumber, serialNumber };
+        return { status: 'no_removal_task_info_found', partNumber, serialNumber, workPackageWasCreated };
       }
       const taskName = `${removalTaskName} ${removalTaskId}`;
       await createAdHocTaskForCandidate(page, { name: removalTaskName, taskClass: '' }, removalTaskId);
@@ -348,6 +395,7 @@ export async function runAeroRepairWriteUp(
           partNumber,
           serialNumber,
           taskName,
+          workPackageWasCreated,
         };
       }
     }
@@ -407,7 +455,7 @@ export async function runAeroRepairWriteUp(
         // nothing needed assigning either — flag for human review instead
         // (change 3, "Context on observed frequency" self-correcting path).
         await closeUnassignedTasksView(page);
-        return { status: 'unassigned_task_detection_suspect', partNumber, serialNumber };
+        return { status: 'unassigned_task_detection_suspect', partNumber, serialNumber, workPackageWasCreated };
       }
 
       if (filtered.length > 1) {
@@ -421,6 +469,7 @@ export async function runAeroRepairWriteUp(
           partNumber,
           serialNumber,
           candidateCount: filtered.length,
+          workPackageWasCreated,
         };
       }
 
@@ -461,7 +510,13 @@ export async function runAeroRepairWriteUp(
     const stationCode = currentLocation.split('/')[0];
     const routing = routeStationToAeroRepairLocation(stationCode);
     if (routing.status === 'exception') {
-      return { status: 'unrecognized_station', partNumber, stationCode: routing.stationCode, unassignedTaskWasAssigned };
+      return {
+        status: 'unrecognized_station',
+        partNumber,
+        stationCode: routing.stationCode,
+        unassignedTaskWasAssigned,
+        workPackageWasCreated,
+      };
     }
 
     await openPartOwnDetails(page, linkText, serialNumber);
@@ -489,7 +544,14 @@ export async function runAeroRepairWriteUp(
         );
       } else {
         await closePartOwnDetails(page);
-        return { status: 'zero_usage', partNumber, serialNumber, usageRows: partOwnDetails.usageRows, unassignedTaskWasAssigned };
+        return {
+          status: 'zero_usage',
+          partNumber,
+          serialNumber,
+          usageRows: partOwnDetails.usageRows,
+          unassignedTaskWasAssigned,
+          workPackageWasCreated,
+        };
       }
     }
 
@@ -581,6 +643,7 @@ export async function runAeroRepairWriteUp(
         reason: doNotShipReason,
         externalReferenceNote: note,
         unassignedTaskWasAssigned,
+        workPackageWasCreated,
       };
     }
 
@@ -652,6 +715,7 @@ export async function runAeroRepairWriteUp(
         authorizationRequested,
       },
       unassignedTaskWasAssigned,
+      workPackageWasCreated,
     };
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);

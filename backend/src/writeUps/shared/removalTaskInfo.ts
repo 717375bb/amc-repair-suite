@@ -44,3 +44,34 @@ export async function extractRemovalTaskInfo(repairLinkLocator: Locator): Promis
     return { name: name || null, id: id || null };
   });
 }
+
+export type PreferredVendorIndicatorState = 'preferred' | 'not_preferred' | 'not_found';
+
+/**
+ * Preferred-vendor check (all vendors except Aero Repair) — real, confirmed
+ * HTML: `<td class="checkbox"><input disabled checked type="CHECKBOX"
+ * name=""></td>`. The per-line hashed `td` id is NOT stable and must not be
+ * used; the stable anchor is the parent cell's own `class="checkbox"`.
+ * Read-only: the input is `disabled`, this never clicks it. Scoped to the
+ * SAME row as the given repair-link locator, mirroring
+ * extractRemovalTaskInfo's own row-scoping technique — the checkbox exists
+ * exactly once per line, so this row scope already isolates it with no
+ * disambiguation needed.
+ *
+ * Tri-state, never a boolean default: 'preferred' (checked attribute
+ * present), 'not_preferred' (checkbox found but unchecked — another vendor
+ * is preferred for this part, a legitimate business outcome), or
+ * 'not_found' (the row has no such cell at all — a genuinely
+ * indeterminate read that callers must raise as an explicit exception
+ * rather than silently treating as "not preferred"). Never inferred from
+ * absence/timeout — this is a single definitive DOM read.
+ */
+export async function readPreferredVendorIndicator(repairLinkLocator: Locator): Promise<PreferredVendorIndicatorState> {
+  return repairLinkLocator.evaluate((linkEl) => {
+    const tr = linkEl.closest('tr');
+    if (!tr) return 'not_found';
+    const checkbox = tr.querySelector('td.checkbox > input[type="CHECKBOX"]') as HTMLInputElement | null;
+    if (!checkbox) return 'not_found';
+    return checkbox.checked ? 'preferred' : 'not_preferred';
+  });
+}
