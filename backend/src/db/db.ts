@@ -399,6 +399,57 @@ export function insertInvoicePriceWrite(db: Database.Database, params: InvoicePr
   return Number(result.lastInsertRowid);
 }
 
+export interface InvoicePriceRetryRow {
+  orderNumber: string;
+  serialNumberSheet: string;
+  newPrice: string;
+}
+
+/**
+ * CLAUDE_CODE_PROMPT (Invoice Price Writer, retry) — reconstructs the
+ * original per-row request (serial number, new price) for a retry from
+ * this run's own append-only write history, since the uploaded sheet
+ * itself is gone by the time a retry happens (its staged copy is deleted
+ * once the original job finishes — see invoicePriceJobManager.ts's
+ * cleanup()). Uses SQLite's documented "bare column takes the value from
+ * the row with the MAX()" behavior to get each order's most recent
+ * attempt without a separate subquery. Excludes any order number that has
+ * ALREADY succeeded under this run, regardless of what the caller asked
+ * for — same defense-in-depth as esdWriteRunner.ts's "never re-attempt a
+ * real success."
+ */
+export function getInvoicePriceRetryRows(
+  db: Database.Database,
+  runId: number,
+  orderNumbers: string[],
+): InvoicePriceRetryRow[] {
+  if (orderNumbers.length === 0) return [];
+  const placeholders = orderNumbers.map(() => '?').join(',');
+
+  const alreadySucceeded = new Set(
+    (
+      db
+        .prepare(
+          `SELECT DISTINCT order_number FROM invoice_price_writes
+           WHERE run_id = ? AND write_status = 'success' AND order_number IN (${placeholders})`,
+        )
+        .all(runId, ...orderNumbers) as Array<{ order_number: string }>
+    ).map((r) => r.order_number),
+  );
+
+  const rows = db
+    .prepare(
+      `SELECT order_number, serial_number_sheet, new_price, MAX(id) FROM invoice_price_writes
+       WHERE run_id = ? AND order_number IN (${placeholders})
+       GROUP BY order_number`,
+    )
+    .all(runId, ...orderNumbers) as Array<{ order_number: string; serial_number_sheet: string; new_price: string }>;
+
+  return rows
+    .filter((r) => !alreadySucceeded.has(r.order_number))
+    .map((r) => ({ orderNumber: r.order_number, serialNumberSheet: r.serial_number_sheet, newPrice: r.new_price }));
+}
+
 export interface WriteUpActionInsert {
   vendor: string;
   partNumber: string;

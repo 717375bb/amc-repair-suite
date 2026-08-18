@@ -76,6 +76,14 @@ function jsonRequest<T>(path: string, init?: RequestInit): Promise<T> {
   }).then(handleResponse<T>)
 }
 
+function jsonPostRequest<T>(path: string, body: unknown): Promise<T> {
+  return jsonRequest<T>(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
 /** No manual Content-Type header — the browser sets the correct multipart boundary itself. */
 function uploadRequest<T>(path: string, formData: FormData): Promise<T> {
   return fetch(`${BASE_URL}${path}`, {
@@ -108,4 +116,9 @@ export function getInvoicePriceRunStatus(runId: string): Promise<InvoicePriceRun
 
 export function cancelInvoicePriceRun(runId: string): Promise<{ ok: true }> {
   return jsonRequest(`/api/invoice-price/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
+}
+
+/** CLAUDE_CODE_PROMPT (retry failed lines) — re-runs specific order numbers from a finished run, appending to that same runId. */
+export function retryInvoicePriceRun(runId: string, orderNumbers: string[]): Promise<{ runId: string }> {
+  return jsonPostRequest(`/api/invoice-price/runs/${encodeURIComponent(runId)}/retry`, { orderNumbers })
 }

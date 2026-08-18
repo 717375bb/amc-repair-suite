@@ -36,6 +36,14 @@ export interface InvoicePriceJob {
   completedAt: string | null;
   fatalError: string | null;
   writeEnv: MxiEnv;
+  /**
+   * CLAUDE_CODE_PROMPT (retry failed lines) — the SQL invoice_price_runs.id
+   * this job's rows are recorded under. Set from the runner's own
+   * 'summary' envelope (both fresh runs and retries emit it) — needed so a
+   * later retry can reconstruct row data from invoice_price_writes once
+   * the originally-uploaded file is gone.
+   */
+  dbRunId: number | null;
   rowCount: number | null;
   duplicateCount: number | null;
   results: InvoicePriceOrderResult[];
@@ -78,6 +86,55 @@ function stageUploadedFile(runDir: string, filePath: string, fileName: string): 
   return staged;
 }
 
+interface RunnerEnvelope {
+  type: string;
+  dbRunId?: number;
+  rowCount?: number;
+  duplicateCount?: number;
+  orderNumber?: string;
+  serialNumberSheet?: string;
+  serialNumberMxi?: string | null;
+  originalPrice?: string | null;
+  newPrice?: string;
+  status?: InvoicePriceOrderResult['status'];
+  outcome?: string;
+  errorMessage?: string | null;
+  message?: string;
+}
+
+/**
+ * CLAUDE_CODE_PROMPT (retry failed lines) — shared by both a fresh run and
+ * a retry. 'order-result' UPSERTS into job.results (replaces an existing
+ * entry for the same order number, or appends if new) rather than always
+ * pushing — this is what makes a retry's outcomes update the SAME visible
+ * row in the results table instead of duplicating it, and is a no-op
+ * difference for a fresh run (every order number there is new anyway).
+ */
+function handleEnvelope(job: InvoicePriceJob, envelope: unknown): void {
+  const e = envelope as RunnerEnvelope;
+  if (e.type === 'summary') {
+    if (e.dbRunId !== undefined) job.dbRunId = e.dbRunId;
+    job.rowCount = e.rowCount ?? null;
+    job.duplicateCount = e.duplicateCount ?? null;
+  } else if (e.type === 'order-result' && e.orderNumber && e.status && e.outcome) {
+    const result: InvoicePriceOrderResult = {
+      orderNumber: e.orderNumber,
+      serialNumberSheet: e.serialNumberSheet ?? '',
+      serialNumberMxi: e.serialNumberMxi ?? null,
+      originalPrice: e.originalPrice ?? null,
+      newPrice: e.newPrice ?? '',
+      status: e.status,
+      outcome: e.outcome,
+      errorMessage: e.errorMessage ?? null,
+    };
+    const existingIndex = job.results.findIndex((r) => r.orderNumber === result.orderNumber);
+    if (existingIndex >= 0) job.results[existingIndex] = result;
+    else job.results.push(result);
+  } else if (e.type === 'fatal') {
+    job.fatalError = e.message ?? 'Unknown fatal error';
+  }
+}
+
 export function startInvoicePriceWriteJob(
   env: MxiEnv,
   filePath: string,
@@ -97,6 +154,7 @@ export function startInvoicePriceWriteJob(
     completedAt: null,
     fatalError: null,
     writeEnv: env,
+    dbRunId: null,
     rowCount: null,
     duplicateCount: null,
     results: [],
@@ -113,39 +171,7 @@ export function startInvoicePriceWriteJob(
   job.process = spawnRunner(
     'src/api/jobRunners/invoicePriceWriteRunner.ts',
     ['--env', env, '--file-path', stagedFilePath, '--file-name', fileName],
-    (envelope) => {
-      const e = envelope as {
-        type: string;
-        rowCount?: number;
-        duplicateCount?: number;
-        orderNumber?: string;
-        serialNumberSheet?: string;
-        serialNumberMxi?: string | null;
-        originalPrice?: string | null;
-        newPrice?: string;
-        status?: InvoicePriceOrderResult['status'];
-        outcome?: string;
-        errorMessage?: string | null;
-        message?: string;
-      };
-      if (e.type === 'summary') {
-        job.rowCount = e.rowCount ?? null;
-        job.duplicateCount = e.duplicateCount ?? null;
-      } else if (e.type === 'order-result' && e.orderNumber && e.status && e.outcome) {
-        job.results.push({
-          orderNumber: e.orderNumber,
-          serialNumberSheet: e.serialNumberSheet ?? '',
-          serialNumberMxi: e.serialNumberMxi ?? null,
-          originalPrice: e.originalPrice ?? null,
-          newPrice: e.newPrice ?? '',
-          status: e.status,
-          outcome: e.outcome,
-          errorMessage: e.errorMessage ?? null,
-        });
-      } else if (e.type === 'fatal') {
-        job.fatalError = e.message ?? 'Unknown fatal error';
-      }
-    },
+    (envelope) => handleEnvelope(job, envelope),
     (code) => {
       job.completedAt = new Date().toISOString();
       job.status = job.cancelRequested ? 'cancelled' : job.fatalError || code !== 0 ? 'failed' : 'completed';
@@ -156,6 +182,62 @@ export function startInvoicePriceWriteJob(
   );
 
   return { ok: true, runId };
+}
+
+export interface RetryInvoicePriceJobResult {
+  ok: boolean;
+  error?: string;
+}
+
+/**
+ * CLAUDE_CODE_PROMPT (retry failed lines) — re-runs specific order numbers
+ * from an already-finished job, appending to the SAME run (same string
+ * runId the frontend is already polling, same underlying dbRunId) rather
+ * than starting a fresh one, so the results table naturally shows the
+ * merged picture: untouched rows keep their prior outcome, retried rows
+ * get their latest one. The runner itself re-derives each row's
+ * (serialNumberSheet, newPrice) from invoice_price_writes and structurally
+ * refuses to re-attempt anything that already succeeded — this function
+ * just re-validates the job is actually retry-eligible before spawning.
+ */
+export function retryInvoicePriceWriteJob(
+  runId: string,
+  orderNumbers: string[],
+  mxiCredential: MxiCredential,
+): RetryInvoicePriceJobResult {
+  if (activeRunId) return { ok: false, error: `An Invoice Price Writer job is already running (${activeRunId}).` };
+
+  const job = jobs.get(runId);
+  if (!job) return { ok: false, error: `No Invoice Price Writer run found for runId "${runId}".` };
+  if (job.status === 'running' || job.status === 'pending') {
+    return { ok: false, error: `Run ${runId} is still in progress — nothing to retry yet.` };
+  }
+  if (job.dbRunId === null) {
+    return { ok: false, error: `Run ${runId} has no recorded database run id — cannot reconstruct rows to retry.` };
+  }
+  if (orderNumbers.length === 0) {
+    return { ok: false, error: 'orderNumbers must be a non-empty array.' };
+  }
+
+  job.status = 'running';
+  job.completedAt = null;
+  job.fatalError = null;
+  job.cancelRequested = false;
+  activeRunId = runId;
+
+  job.process = spawnRunner(
+    'src/api/jobRunners/invoicePriceWriteRunner.ts',
+    ['--env', job.writeEnv, '--retry-run-id', String(job.dbRunId), '--order-numbers', JSON.stringify(orderNumbers)],
+    (envelope) => handleEnvelope(job, envelope),
+    (code) => {
+      job.completedAt = new Date().toISOString();
+      job.status = job.cancelRequested ? 'cancelled' : job.fatalError || code !== 0 ? 'failed' : 'completed';
+      if (activeRunId === runId) activeRunId = null;
+    },
+    mxiCredentialEnvOverrides(mxiCredential),
+  );
+
+  return { ok: true };
 }
 
 export interface CancelInvoicePriceJobResult {

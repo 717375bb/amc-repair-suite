@@ -20,6 +20,7 @@ import {
   cancelInvoicePriceJob,
   getActiveInvoicePriceJob,
   getInvoicePriceJob,
+  retryInvoicePriceWriteJob,
   startInvoicePriceWriteJob,
 } from './api/invoicePriceWriter/invoicePriceJobManager.js';
 import {
@@ -552,6 +553,45 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
       return;
     }
     res.json({ ok: true });
+  });
+
+  // CLAUDE_CODE_PROMPT (retry failed lines) — re-runs specific order
+  // numbers from a finished run, appending to that same run rather than
+  // starting a fresh one. Requested order numbers are validated against
+  // the run's own stored results (must currently show 'failed') — never
+  // trusted blindly from the client, same discipline as /api/esd/write's
+  // own order-number validation against its source compare run.
+  app.post('/api/invoice-price/runs/:runId/retry', requireSession, (req, res) => {
+    const { runId } = req.params;
+    const { orderNumbers } = req.body ?? {};
+    if (!Array.isArray(orderNumbers) || orderNumbers.length === 0 || !orderNumbers.every((o) => typeof o === 'string')) {
+      res.status(400).json({ error: 'orderNumbers must be a non-empty array of order number strings.' });
+      return;
+    }
+
+    const job = getInvoicePriceJob(runId);
+    if (!job) {
+      res.status(404).json({ error: `No Invoice Price Writer run found for runId "${runId}".` });
+      return;
+    }
+
+    const failedOrderNumbers = new Set(job.results.filter((r) => r.status === 'failed').map((r) => r.orderNumber));
+    const invalid = orderNumbers.filter((o) => !failedOrderNumbers.has(o));
+    if (invalid.length > 0) {
+      res.status(400).json({
+        error: `The following order number(s) are not currently-failed rows from run "${runId}": ${invalid.join(', ')}. Refusing to retry any of the requested orders.`,
+      });
+      return;
+    }
+
+    const session = (req as AuthedRequest).session!;
+    const mxiCredential = getMxiCredentialForUser(authDb, session.userId);
+    const result = retryInvoicePriceWriteJob(runId, orderNumbers, mxiCredential);
+    if (!result.ok) {
+      res.status(409).json({ error: result.error });
+      return;
+    }
+    res.status(202).json({ runId });
   });
 
   app.get('/pending-esd-updates', requireAutomationKey, (_req, res) => {

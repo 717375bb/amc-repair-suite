@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react'
-import { AlertTriangle, CheckCircle2, FileSpreadsheet, Loader2, PlayCircle, StopCircle, UploadCloud, X } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, FileSpreadsheet, Loader2, PlayCircle, RotateCcw, StopCircle, UploadCloud, X } from 'lucide-react'
 import { Badge, Card, CardHeader, PrimaryButton, SecondaryButton } from '../components/ui'
 import { EnvironmentBar } from '../components/EnvironmentBar'
 import {
@@ -8,6 +8,7 @@ import {
   getActiveInvoicePriceJob,
   getInvoicePriceRunStatus,
   peekInvoicePriceFile,
+  retryInvoicePriceRun,
   startInvoicePriceRun,
   type InvoicePriceOrderResult,
   type InvoicePriceRunStatusResponse,
@@ -91,6 +92,13 @@ export default function InvoicePriceWriter() {
 
   const [runId, setRunId] = useState<string | null>(null)
   const [runStatus, setRunStatus] = useState<InvoicePriceRunStatusResponse | null>(null)
+  const [retrying, setRetrying] = useState(false)
+  // CLAUDE_CODE_PROMPT (retry failed lines) — a retry re-runs the SAME
+  // runId (so results merge into the same table instead of starting a
+  // fresh one), but that means the polling effect below (keyed on runId)
+  // won't naturally restart when a retry begins, since runId itself never
+  // changes. Bumping this on every retry forces it to.
+  const [pollGeneration, setPollGeneration] = useState(0)
 
   const isRunning = !!runId && !isTerminal(runStatus?.status)
 
@@ -130,7 +138,7 @@ export default function InvoicePriceWriter() {
       cancelled = true
       if (pollRef.current) clearTimeout(pollRef.current)
     }
-  }, [runId])
+  }, [runId, pollGeneration])
 
   const handleFile = useCallback(async (selected: File) => {
     setFile(selected)
@@ -185,6 +193,38 @@ export default function InvoicePriceWriter() {
       setLoadError(err instanceof Error ? err.message : String(err))
     } finally {
       setCancelling(false)
+    }
+  }
+
+  // CLAUDE_CODE_PROMPT (retry failed lines) — real, normal MXI/Playwright
+  // timeouts mean some lines fail even when the write logic itself is
+  // fine; retrying just the failed ones (not the whole sheet again) avoids
+  // re-attempting rows that already succeeded, which writePriceLineUpdate
+  // structurally refuses to do anyway (see getInvoicePriceRetryRows'
+  // already-succeeded exclusion) but is still wasted time/risk to request.
+  const handleRetry = async () => {
+    if (!runId || !runStatus) return
+    const failedOrderNumbers = runStatus.results.filter((r) => r.status === 'failed').map((r) => r.orderNumber)
+    if (failedOrderNumbers.length === 0) return
+    setLoadError(null)
+    setRetrying(true)
+    try {
+      await retryInvoicePriceRun(runId, failedOrderNumbers)
+      // The backend flips the job's status to 'running' synchronously
+      // before this call returns — fetch it now so the UI reflects "in
+      // progress" immediately rather than waiting for the next poll tick.
+      // Prior results (including the ones just about to be retried) stay
+      // visible throughout — this fetch doesn't clear them.
+      setRunStatus(await getInvoicePriceRunStatus(runId))
+      setPollGeneration((g) => g + 1)
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        setLoadError(err.message)
+      } else {
+        setLoadError(err instanceof Error ? err.message : String(err))
+      }
+    } finally {
+      setRetrying(false)
     }
   }
 
@@ -311,7 +351,15 @@ export default function InvoicePriceWriter() {
                   Cancel
                 </SecondaryButton>
               ) : (
-                <SecondaryButton onClick={resetToStart}>Start another run</SecondaryButton>
+                <div className="flex gap-2">
+                  {(runStatus?.results.filter((r) => r.status === 'failed').length ?? 0) > 0 && (
+                    <SecondaryButton onClick={handleRetry} disabled={retrying}>
+                      {retrying ? <Loader2 size={16} className="animate-spin" /> : <RotateCcw size={16} />}
+                      Retry {runStatus?.results.filter((r) => r.status === 'failed').length} failed
+                    </SecondaryButton>
+                  )}
+                  <SecondaryButton onClick={resetToStart}>Start another run</SecondaryButton>
+                </div>
               )
             }
           />
