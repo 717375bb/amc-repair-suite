@@ -5,6 +5,14 @@
       "label": "AMC: Start Backend",
       "type": "shell",
       "command": "npm run server",
+      // MXI's Akamai edge blocks headless Chromium (confirmed — see
+      // docs/CODESPACES.md). Codespaces containers have no real display,
+      // so xvfb-run provides a virtual one for headed rendering. This
+      // "linux" override only applies inside the container; local
+      // Windows/macOS runs fall through to the plain command above.
+      "linux": {
+        "command": "xvfb-run -a npm run server"
+      },
       "options": { "cwd": "${workspaceFolder}/backend" },
       "isBackground": true,
       "problemMatcher": [],

@@ -48,6 +48,23 @@ echo "==> Filling CREDENTIAL_ENCRYPTION_KEY / AUTOMATION_API_KEY if blank..."
 fill_if_blank "CREDENTIAL_ENCRYPTION_KEY"
 fill_if_blank "AUTOMATION_API_KEY"
 
+# Codespaces-only, unconditional (not fill-if-blank): MXI's Akamai edge has
+# already been confirmed, via real testing in this project, to block
+# headless Chromium traffic specifically (see backend/CHANGELOG.md's
+# HEADLESS=false finding). backend/.env here only ever exists inside this
+# container — never the user's local machine — so overriding it every
+# setup run is safe and correct, unlike a local .env where a permanently
+# headed run would pop an inconvenient visible browser window. Headed mode
+# needs a real display, which this container doesn't have, so
+# .vscode/tasks.json runs the backend under `xvfb-run` (a virtual display)
+# to make headed rendering possible without one.
+echo "==> Forcing HEADLESS=false for this Codespace (MXI blocks headless traffic; see docs/CODESPACES.md)..."
+if grep -qE "^HEADLESS=" "$ENV_FILE"; then
+  sed -i "s#^HEADLESS=.*#HEADLESS=false#" "$ENV_FILE"
+else
+  echo "HEADLESS=false" >> "$ENV_FILE"
+fi
+
 echo ""
 echo "==> Secret status (Codespaces secrets, if configured, arrive as real"
 echo "    env vars and take effect automatically — no .env edit needed):"

@@ -106,11 +106,41 @@ permission prompt VS Code normally shows doesn't block this on first open.
 `.devcontainer/start.sh` is kept only as a manual fallback/restart
 convenience now, not the primary launch path.
 
-**Still to be confirmed**: this is the standard, documented pattern for
-auto-starting dev servers in a devcontainer, and is architecturally
-different from the previous two (failed) attempts rather than a third
-variation on the same idea — but it hasn't yet been proven by an actual
-fresh launch.
+This one worked: the two task terminals came up and both servers started
+successfully — confirmed by the user against a real launch.
+
+### Real bug found and fixed: Akamai blocks headless Chromium, same as this project has hit before
+
+Once both servers were actually running, real MXI login failed:
+`locator.click: Timeout 30000ms exceeded ... waiting for
+getByRole('textbox', { name: 'Username' })`. The user identified this
+immediately from direct prior experience — `backend/CHANGELOG.md` already
+documents PSA's Akamai edge specifically fingerprinting and blocking
+headless Chromium traffic (not IP/traffic-based), fixed at the time by
+setting `HEADLESS=false`.
+
+The Codespaces-specific complication: `HEADLESS=false` only ever worked
+before on a local machine with a real screen. A Codespace container has no
+display at all — headed Chromium can't just be pointed at nothing. Fixed
+with `xvfb-run` (a virtual framebuffer X server), which `playwright install
+--with-deps` already installs as a dependency, so headed Chromium has
+somewhere to render without anyone needing to see it:
+
+- `.devcontainer/setup.sh` now unconditionally forces `HEADLESS=false` in
+  the Codespace's `backend/.env` on every setup run (this file only ever
+  exists inside the container, never the user's local machine, so this is
+  safe — unlike permanently forcing it locally, which the project's own
+  history already flagged as leaving an inconvenient visible browser
+  window open).
+- `.vscode/tasks.json`'s backend task gained a `"linux"` platform override
+  (`xvfb-run -a npm run server`) — VS Code tasks support per-OS command
+  overrides, so this only applies inside the Linux container; local
+  Windows/macOS runs are unaffected and keep using the plain command.
+
+**Still to be confirmed**: this is a direct, targeted fix for a
+specifically-identified, previously-encountered failure mode (not a guess
+at a new one), but hasn't yet been proven by an actual fresh launch with
+both changes in place.
 
 ### Other items, still open
 
