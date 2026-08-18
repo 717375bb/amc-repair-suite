@@ -61,14 +61,37 @@ login URLs for every analyst) and already ship filled in via
 
 Following this project's own "verified via real testing, not assumed"
 discipline (see `CLAUDE.md`, `PHASE2_MXI_WRITER_SPEC.md`): this setup was
-built and reasoned through carefully, but **I have not been able to launch
-a real Codespace to prove it end-to-end** — that has to happen on the
-first real click. Specifically still open:
+built and reasoned through carefully, then actually proven/corrected
+against a real Codespace, not just assumed to work.
+
+### Real bug found and fixed: `postStartCommand`'s background processes didn't survive
+
+First real launch: `postCreateCommand` ran correctly (both `npm install`s
+completed, `backend/.env` was created), but neither server was running —
+no `node`/`vite`/`tsx` processes, and `/tmp/amc-*.log` didn't even exist,
+meaning `start.sh` itself never got a chance to run to completion.
+Manually running `bash .devcontainer/start.sh` in an interactive terminal
+worked immediately and stayed running — which initially looked like a
+contradiction, but is actually the tell: an interactive terminal's session
+isn't torn down the way a lifecycle command's process group is once the
+command itself returns. Plain `nohup ... &` only blocks `SIGHUP`; it does
+nothing to protect against Codespaces cleaning up the whole process group
+`postStartCommand` ran in. Fixed by adding `setsid` (`.devcontainer/start.sh`),
+which puts each server in a brand new session — a different process group
+entirely, immune to that teardown. This is the standard fix for this exact
+class of devcontainer/Codespaces issue.
+
+**Still to be confirmed**: this fix is based on live-tested diagnosis of
+the actual root cause, but hasn't yet been proven by an actual Codespace
+restart/rebuild with the fixed script in place (the bug could only be
+observed after the fact, from inside the already-broken session).
+
+### Other items, still open
 
 - Whether `npx playwright install --with-deps chromium` installs cleanly
   against the `mcr.microsoft.com/devcontainers/typescript-node:22` base
   image (this is Playwright's own documented pattern for devcontainers,
-  but hasn't been run here).
+  but hasn't been directly confirmed here).
 - Whether Vite's HMR websocket works correctly over Codespaces' HTTPS
   port-forwarding tunnel. If live-reload doesn't work but the app itself
   loads fine, the likely fix is adding `server.hmr.clientPort = 443` to
