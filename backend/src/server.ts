@@ -16,9 +16,22 @@ import { cancelJob, getActiveJob, getJob, getVendorList, startDiscoveryJob, star
 import { isKnownVendorId } from './api/vendors.js';
 import { cancelEsdJob, getActiveEsdJob, getEsdJob, startEsdCompareJob, startEsdWriteJob } from './api/esdFinder/esdFinderJobManager.js';
 import { MissingHeadersError, peekEsdFinderFile, validateHeadersOnly } from './api/esdFinder/ingestion.js';
+import {
+  cancelInvoicePriceJob,
+  getActiveInvoicePriceJob,
+  getInvoicePriceJob,
+  startInvoicePriceWriteJob,
+} from './api/invoicePriceWriter/invoicePriceJobManager.js';
+import {
+  MissingHeadersError as InvoicePriceMissingHeadersError,
+  peekInvoicePriceFile,
+} from './api/invoicePriceWriter/ingestion.js';
 import { registerAuthRoutes, requireSession, type AuthedRequest } from './api/authRoutes.js';
 import { getMxiCredentialForUser } from './auth/authService.js';
 import { getOptionalSecret, getSecretProvider } from './security/secretProvider.js';
+import { createLogger } from './logging/logger.js';
+
+const log = createLogger('api');
 
 /**
  * Shared-secret gate for the three endpoints Power Automate calls. GET
@@ -440,6 +453,107 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
     res.status(202).json({ runId: result.runId, env });
   });
 
+  // --- Invoice Price Writer API — a third independent workstream (own job
+  // slot in invoicePriceJobManager.ts), same requireSession gate as the
+  // rest of the browser UI. Single-phase: unlike the ESD Finder, there's no
+  // separate compare/approve gate — the uploaded sheet already fully
+  // specifies what to do per row, so "peek" is purely a local, non-MXI
+  // preview (row count + header validation) and "start" goes straight to
+  // the real per-row MXI job. ---
+
+  const invoicePriceUpload = multer({ dest: path.join('data', 'invoice-price-uploads-tmp') });
+
+  app.post('/api/invoice-price/peek', requireSession, invoicePriceUpload.single('file'), async (req, res) => {
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ error: 'file is required.' });
+      return;
+    }
+    try {
+      const peeked = await peekInvoicePriceFile(file.path, file.originalname);
+      res.json(peeked);
+    } catch (err) {
+      if (err instanceof InvoicePriceMissingHeadersError) {
+        res.status(400).json({ error: err.message });
+      } else {
+        res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+    } finally {
+      fs.rm(file.path, { force: true }, () => {});
+    }
+  });
+
+  app.post('/api/invoice-price/start', requireSession, invoicePriceUpload.single('file'), async (req, res) => {
+    const env = parseRequiredEnv(req, res);
+    if (!env) {
+      if (req.file) fs.rm(req.file.path, { force: true }, () => {});
+      return;
+    }
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ error: 'file is required.' });
+      return;
+    }
+
+    // Fast rejection before a background job is even started — same
+    // convenience-only pre-check pattern as /api/esd/compare; the runner
+    // re-validates headers itself regardless.
+    try {
+      await peekInvoicePriceFile(file.path, file.originalname);
+    } catch (err) {
+      fs.rm(file.path, { force: true }, () => {});
+      if (err instanceof InvoicePriceMissingHeadersError) {
+        res.status(400).json({ error: err.message });
+      } else {
+        res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+      return;
+    }
+
+    const session = (req as AuthedRequest).session!;
+    const mxiCredential = getMxiCredentialForUser(authDb, session.userId);
+    const result = startInvoicePriceWriteJob(env, file.path, file.originalname, mxiCredential);
+    fs.rm(file.path, { force: true }, () => {}); // already copied into the job's own staging dir by now
+    if (!result.ok) {
+      res.status(409).json({ error: 'An Invoice Price Writer job is already running.', activeRunId: result.conflictRunId });
+      return;
+    }
+    res.status(202).json({ runId: result.runId, env });
+  });
+
+  app.get('/api/invoice-price/active-job', requireSession, (_req, res) => {
+    const job = getActiveInvoicePriceJob();
+    res.json({ activeRunId: job?.runId ?? null });
+  });
+
+  app.get('/api/invoice-price/runs/:runId', requireSession, (req, res) => {
+    const job = getInvoicePriceJob(req.params.runId);
+    if (!job) {
+      res.status(404).json({ error: `No Invoice Price Writer run found for runId "${req.params.runId}".` });
+      return;
+    }
+    res.json({
+      runId: job.runId,
+      status: job.status,
+      startedAt: job.startedAt,
+      completedAt: job.completedAt,
+      fatalError: job.fatalError,
+      writeEnv: job.writeEnv,
+      rowCount: job.rowCount,
+      duplicateCount: job.duplicateCount,
+      results: job.results,
+    });
+  });
+
+  app.post('/api/invoice-price/runs/:runId/cancel', requireSession, (req, res) => {
+    const result = cancelInvoicePriceJob(req.params.runId);
+    if (!result.ok) {
+      res.status(400).json({ error: result.error });
+      return;
+    }
+    res.json({ ok: true });
+  });
+
   app.get('/pending-esd-updates', requireAutomationKey, (_req, res) => {
     const rows = getPendingEsdUpdates(db);
     res.json(
@@ -476,12 +590,16 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
 
     const crossEnvWarning = checkCrossEnvironmentHistory(db, orderNumber, mxiClient.config.env);
     if (crossEnvWarning) {
-      console.warn(`[cross-environment] ${crossEnvWarning}`);
+      log.warn({ orderNumber, crossEnvWarning }, '[cross-environment] warning');
     }
 
     const result = await writeEsdAndNotes(mxiClient, orderNumber, {
       esd: toMxiDateFormat(pending.inferredEsd),
-      noteText: assembleNoteText(pending.vendorNotes) ?? undefined,
+      // CLAUDE_CODE_PROMPT (ESD writer changes, A1) — pending here is
+      // always flag='ok' (getActionableEsdInference's own query), so
+      // pending.inferredEsd is always the real pushed ESD; consistent with
+      // the ESD Finder's esd_write branch (esdWriteRunner.ts).
+      noteText: assembleNoteText(pending.vendorNotes, pending.inferredEsd) ?? undefined,
     });
 
     const mxiWriteId = insertMxiWrite(db, {
@@ -514,7 +632,7 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
 
     const crossEnvWarning = checkCrossEnvironmentHistory(db, orderNumber, mxiClient.config.env);
     if (crossEnvWarning) {
-      console.warn(`[cross-environment] ${crossEnvWarning}`);
+      log.warn({ orderNumber, crossEnvWarning }, '[cross-environment] warning');
     }
 
     // Never calls the writer.
@@ -560,11 +678,11 @@ async function main(): Promise<void> {
   // Write-Ups job-spawning endpoints, which is not something to expose on
   // the network even accidentally.
   const httpServer = app.listen(port, '127.0.0.1', () => {
-    console.log(`ESD approval API listening on http://127.0.0.1:${port} (MXI_ENV=${config.env})`);
+    log.info({ port, mxiEnv: config.env }, 'ESD approval API listening');
   });
 
   const shutdown = async (): Promise<void> => {
-    console.log('\nShutting down...');
+    log.info('Shutting down...');
     httpServer.close();
     await mxiClient.shutdown();
     db.close();
@@ -578,7 +696,7 @@ async function main(): Promise<void> {
 const isMain = process.argv[1] ? fileURLToPath(import.meta.url) === path.resolve(process.argv[1]) : false;
 if (isMain) {
   main().catch((err) => {
-    console.error('Server failed to start:', err);
+    log.error({ err }, 'Server failed to start');
     process.exit(1);
   });
 }

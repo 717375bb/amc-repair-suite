@@ -12,6 +12,7 @@ import BackshopRepairs from './pages/BackshopRepairs'
 import ScrappedParts from './pages/ScrappedParts'
 import OrderWriteUps from './pages/OrderWriteUps'
 import EsdFinder from './pages/EsdFinder'
+import InvoicePriceWriter from './pages/InvoicePriceWriter'
 import QuotesReports from './pages/QuotesReports'
 import WarrantyAssessment from './pages/WarrantyAssessment'
 import VendorKpiReports from './pages/VendorKpiReports'
@@ -34,6 +35,7 @@ function App() {
           <Route path="/scrapped-parts" element={<ScrappedParts />} />
           <Route path="/order-write-ups" element={<OrderWriteUps />} />
           <Route path="/esd-finder" element={<EsdFinder />} />
+          <Route path="/invoice-price-writer" element={<InvoicePriceWriter />} />
           <Route path="/email-quotes" element={<EmailQuoteAnalysis />} />
           <Route path="/quotes-reports" element={<QuotesReports />} />
           <Route path="/discrepancies" element={<Discrepancies />} />

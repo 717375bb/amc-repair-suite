@@ -85,6 +85,31 @@ CREATE TABLE IF NOT EXISTS write_up_dock_moves (
   error_message TEXT,
   created_at TEXT NOT NULL
 );
+
+-- CLAUDE_CODE_PROMPT (Invoice Price Writer) — same runs+writes two-table
+-- pattern as runs/esd_inferences: one row per uploaded sheet, one row per
+-- order line processed from it (append-only, never updated/deleted).
+CREATE TABLE IF NOT EXISTS invoice_price_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  started_at TEXT NOT NULL,
+  source_file TEXT NOT NULL,
+  row_count INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS invoice_price_writes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL REFERENCES invoice_price_runs(id),
+  order_number TEXT NOT NULL,
+  serial_number_sheet TEXT NOT NULL,
+  serial_number_mxi TEXT,
+  original_price TEXT,
+  new_price TEXT NOT NULL,
+  target_env TEXT NOT NULL,
+  outcome TEXT NOT NULL,
+  write_status TEXT NOT NULL,
+  error_message TEXT,
+  created_at TEXT NOT NULL
+);
 `;
 
 /**
@@ -285,7 +310,14 @@ export interface MxiWriteInsert {
   esdInferenceId: number;
   orderNumber: string;
   targetEnv: string;
-  action: 'approved_write' | 'rejected';
+  // CLAUDE_CODE_PROMPT (ESD writer changes, A4) — 'approved_note_only_write'
+  // added alongside the existing two: a real MXI write (note + reissue)
+  // that deliberately never touches the ESD field, distinct from
+  // 'approved_write' so the audit trail can tell the two apart. `action`
+  // is a free-text column at the SQL level (see schema below) — no
+  // migration needed, same pattern this project already uses for
+  // write_up_actions.outcome.
+  action: 'approved_write' | 'approved_note_only_write' | 'rejected';
   inferredEsd: string | null;
   writeStatus: 'success' | 'failed' | 'skipped';
   errorMessage: string | null;
@@ -320,6 +352,47 @@ export function insertMxiWrite(db: Database.Database, params: MxiWriteInsert): n
     ) VALUES (
       @esdInferenceId, @orderNumber, @targetEnv, @action, @inferredEsd,
       @writeStatus, @errorMessage, @approvedBy, @createdAt
+    )
+  `);
+  const result = stmt.run({ ...params, createdAt: new Date().toISOString() });
+  return Number(result.lastInsertRowid);
+}
+
+// CLAUDE_CODE_PROMPT (Invoice Price Writer) — same runs+writes two-table
+// append-only pattern as runs/insertMxiWrite above.
+export function insertInvoicePriceRun(
+  db: Database.Database,
+  params: { startedAt: string; sourceFile: string; rowCount: number },
+): number {
+  const stmt = db.prepare(
+    'INSERT INTO invoice_price_runs (started_at, source_file, row_count) VALUES (?, ?, ?)',
+  );
+  const result = stmt.run(params.startedAt, params.sourceFile, params.rowCount);
+  return Number(result.lastInsertRowid);
+}
+
+export interface InvoicePriceWriteInsert {
+  runId: number;
+  orderNumber: string;
+  serialNumberSheet: string;
+  serialNumberMxi: string | null;
+  originalPrice: string | null;
+  newPrice: string;
+  targetEnv: string;
+  outcome: string;
+  writeStatus: 'success' | 'failed' | 'skipped';
+  errorMessage: string | null;
+}
+
+/** Always an INSERT. invoice_price_writes is append-only — never update or delete rows here. */
+export function insertInvoicePriceWrite(db: Database.Database, params: InvoicePriceWriteInsert): number {
+  const stmt = db.prepare(`
+    INSERT INTO invoice_price_writes (
+      run_id, order_number, serial_number_sheet, serial_number_mxi, original_price,
+      new_price, target_env, outcome, write_status, error_message, created_at
+    ) VALUES (
+      @runId, @orderNumber, @serialNumberSheet, @serialNumberMxi, @originalPrice,
+      @newPrice, @targetEnv, @outcome, @writeStatus, @errorMessage, @createdAt
     )
   `);
   const result = stmt.run({ ...params, createdAt: new Date().toISOString() });

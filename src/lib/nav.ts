@@ -11,6 +11,7 @@ import {
   LineChart,
   PlayCircle,
   Search,
+  DollarSign,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -76,6 +77,13 @@ export const navGroups: NavGroup[] = [
         label: 'Open Order ESD Finder',
         description: 'Drag in vendor/CRA OOR files and review inferred ESDs',
         icon: Search,
+      },
+      {
+        key: 'invoice-price-writer',
+        path: '/invoice-price-writer',
+        label: 'Invoice Price Writer',
+        description: 'Update MXI price lines from a weekly billing/invoice sheet',
+        icon: DollarSign,
       },
     ],
   },
