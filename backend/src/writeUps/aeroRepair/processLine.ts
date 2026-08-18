@@ -7,6 +7,9 @@ import { issueGeneratedOrder, moveOutboundShipmentToDock, readOrderRealState } f
 import { isSessionLossError } from './retryBackoff.js';
 import { runAeroRepairWriteUp } from './writeUp.js';
 import type { UsageParmRow } from './partDetails.js';
+import { createLogger } from '../../logging/logger.js';
+
+const log = createLogger('writeup');
 
 export const LOG_FILE_PATH = path.join('data', 'aero-repair-writeup-log.xlsx');
 const REVIEWED_BY = 'batch-execute-automated';
@@ -503,7 +506,10 @@ export async function logProcessLineResult(
   const exceptions: ExceptionRow[] = [];
 
   if (result.status === 'completed') {
-    console.log(`COMPLETED: order ${result.orderNumber}, routed to ${result.routingLocation}, docked (shipment ${result.shipmentId ?? '(n/a)'}).`);
+    log.info(
+      { orderNumber: result.orderNumber, routingLocation: result.routingLocation, shipmentId: result.shipmentId ?? null },
+      'Line completed',
+    );
     completed.push({
       orderNumber: result.orderNumber,
       partNumber: target.partNumber,
@@ -513,7 +519,7 @@ export async function logProcessLineResult(
       date: dateFound,
     });
   } else if (result.status === 'no_longer_eligible') {
-    console.log('SKIPPED: no longer eligible (claimed by another process since discovery).');
+    log.info('SKIPPED: no longer eligible (claimed by another process since discovery).');
     exceptions.push({
       partNumber: target.partNumber,
       serialNumber: target.serialNumber,
@@ -524,7 +530,7 @@ export async function logProcessLineResult(
       suggestedAction: 'No action needed — this is expected on a shared production system. Another process or user has already claimed this line.',
     });
   } else if (result.status === 'no_tasks_assigned') {
-    console.log('SKIPPED: no tasks assigned (re-discovered live, not just from the earlier scan).');
+    log.info('SKIPPED: no tasks assigned (re-discovered live, not just from the earlier scan).');
     exceptions.push({
       partNumber: target.partNumber,
       serialNumber: target.serialNumber,
@@ -536,7 +542,10 @@ export async function logProcessLineResult(
         'Manually assign a task to this work package before a write-up can be created, or confirm no repair is needed.',
     });
   } else if (result.status === 'multiple_candidate_tasks') {
-    console.log(`SKIPPED: ${result.candidateNames.length} candidate tasks found, flagging for human review (not guessing among them).`);
+    log.info(
+      { candidateCount: result.candidateNames.length, candidateNames: result.candidateNames },
+      'SKIPPED: candidate tasks found, flagging for human review (not guessing among them)',
+    );
     exceptions.push({
       partNumber: target.partNumber,
       serialNumber: target.serialNumber,
@@ -549,8 +558,10 @@ export async function logProcessLineResult(
   } else if (result.status === 'ad_hoc_pending_manual_continuation') {
     const envFlag = env === 'production' ? ' --env production' : '';
     const continueCommand = `npm run aero-repair:continue-ad-hoc -- ${target.partNumber} ${result.serialNumber}${envFlag}`;
-    console.log(`PAUSED: Ad-Hoc task created ("${result.taskName}") — pending one-time manual proof.`);
-    console.log(`Run to continue: ${continueCommand}`);
+    log.info(
+      { taskName: result.taskName, continueCommand },
+      'PAUSED: Ad-Hoc task created, pending one-time manual proof',
+    );
     exceptions.push({
       partNumber: target.partNumber,
       serialNumber: target.serialNumber,
@@ -561,7 +572,7 @@ export async function logProcessLineResult(
       suggestedAction: `Run \`${continueCommand}\` to manually continue this one order and prove the path for real. Once that succeeds, subsequent single-candidate cases will run fully automatically.`,
     });
   } else if (result.status === 'unrecognized_station') {
-    console.log(`SKIPPED: unrecognized station "${result.stationCode}".`);
+    log.info({ stationCode: result.stationCode }, 'SKIPPED: unrecognized station');
     exceptions.push({
       partNumber: target.partNumber,
       serialNumber: target.serialNumber,
@@ -572,7 +583,7 @@ export async function logProcessLineResult(
       suggestedAction: "This part's current station isn't in the automated routing table — manually determine the correct Aero Repair location.",
     });
   } else if (result.status === 'zero_usage') {
-    console.log('SKIPPED: Current Usage shows all-zero CYCLES/HOURS (TSN/TSO/TSI) — likely a maintenance-records data problem.');
+    log.info('SKIPPED: Current Usage shows all-zero CYCLES/HOURS (TSN/TSO/TSI) — likely a maintenance-records data problem.');
     exceptions.push({
       partNumber: target.partNumber,
       serialNumber: target.serialNumber,
@@ -583,7 +594,10 @@ export async function logProcessLineResult(
       suggestedAction: 'Notify the maintenance records team to correct this part\'s usage data before a write-up can be created for it.',
     });
   } else if (result.status === 'unassigned_task_multiple_present') {
-    console.log(`SKIPPED: ${result.candidateCount} genuinely-assignable unassigned tasks found, flagging for human review (not guessing among them).`);
+    log.info(
+      { candidateCount: result.candidateCount },
+      'SKIPPED: genuinely-assignable unassigned tasks found, flagging for human review (not guessing among them)',
+    );
     exceptions.push({
       partNumber: target.partNumber,
       serialNumber: target.serialNumber,
@@ -594,7 +608,7 @@ export async function logProcessLineResult(
       suggestedAction: 'Manually determine which unassigned task(s) apply and assign them — automation refuses to guess among multiple candidates.',
     });
   } else if (result.status === 'unassigned_task_detection_suspect') {
-    console.log('SKIPPED: a task checkbox was detected on the Unassigned Tasks sub-tab, but every candidate filtered out as PC (administrative) — detection is suspect.');
+    log.info('SKIPPED: a task checkbox was detected on the Unassigned Tasks sub-tab, but every candidate filtered out as PC (administrative) — detection is suspect.');
     exceptions.push({
       partNumber: target.partNumber,
       serialNumber: target.serialNumber,
@@ -605,7 +619,7 @@ export async function logProcessLineResult(
       suggestedAction: 'Manually inspect this line\'s Unassigned Tasks sub-tab to confirm whether anything genuinely needs assignment.',
     });
   } else if (result.status === 'no_removal_task_info_found') {
-    console.log('SKIPPED: no task assigned, and this line\'s Removal Information has no Task Name/ID either.');
+    log.info("SKIPPED: no task assigned, and this line's Removal Information has no Task Name/ID either.");
     exceptions.push({
       partNumber: target.partNumber,
       serialNumber: target.serialNumber,
@@ -616,7 +630,10 @@ export async function logProcessLineResult(
       suggestedAction: 'Manually determine the real removal reason/task and assign or create it before a write-up can be created for this line.',
     });
   } else if (result.status === 'order_created_do_not_ship') {
-    console.log(`CREATE ORDER ONLY: order ${result.orderNumber} created, marked DO NOT SHIP (${result.reason}). No authorization, issue, or dock.`);
+    log.info(
+      { orderNumber: result.orderNumber, reason: result.reason },
+      'CREATE ORDER ONLY: order created, marked DO NOT SHIP. No authorization, issue, or dock',
+    );
     exceptions.push({
       partNumber: target.partNumber,
       serialNumber: target.serialNumber,
@@ -632,9 +649,12 @@ export async function logProcessLineResult(
     // for real, final review-worthy outcomes). The automatic second pass
     // will call logProcessLineResult again with this line's real terminal
     // result once it resolves.
-    console.log(`QUARANTINED (will retry automatically after the main pass): ${result.reason} — ${result.detail}`);
+    log.info(
+      { reason: result.reason, detail: result.detail },
+      'QUARANTINED (will retry automatically after the main pass)',
+    );
   } else {
-    console.error(`AUTOMATION ERROR at step "${result.step}": ${result.errorMessage}`);
+    log.error({ step: result.step, errorMessage: result.errorMessage }, 'AUTOMATION ERROR');
     exceptions.push({
       partNumber: target.partNumber,
       serialNumber: target.serialNumber,

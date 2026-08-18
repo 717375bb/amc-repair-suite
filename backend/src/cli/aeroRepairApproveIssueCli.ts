@@ -5,6 +5,9 @@ import type { MxiClient } from '../mxiWriter/mxiClient.js';
 import { createReadyMxiClient } from '../mxiWriter/cliMxiClient.js';
 import { parseEnvFlag } from '../mxiWriter/parseEnvFlag.js';
 import { issueGeneratedOrder, readOrderRealState } from '../writeUps/aeroRepair/issueOrder.js';
+import { createLogger } from '../logging/logger.js';
+
+const log = createLogger('cli');
 
 /**
  * Second phase of the two-phase review gate: explicitly approves and
@@ -28,7 +31,7 @@ async function main(): Promise<void> {
   const reviewedBy = rest[1] ?? null;
 
   if (!orderNumber) {
-    console.error('Usage: npm run aero-repair:approve-issue -- <orderNumber> [reviewedBy] [--env production]');
+    log.error('Usage: npm run aero-repair:approve-issue -- <orderNumber> [reviewedBy] [--env production]');
     process.exitCode = 1;
     return;
   }
@@ -39,8 +42,9 @@ async function main(): Promise<void> {
   try {
     const actionable = getActionableWriteUpAction(db, orderNumber);
     if (!actionable) {
-      console.error(
-        `Order ${orderNumber} has no actionable 'pending_issue' write_up_actions row — refusing to issue an order this project didn't itself put in that state. Run npm run aero-repair:review-pending to see what's actually pending.`,
+      log.error(
+        { orderNumber },
+        "Order has no actionable 'pending_issue' write_up_actions row — refusing to issue an order this project didn't itself put in that state. Run npm run aero-repair:review-pending to see what's actually pending.",
       );
       process.exitCode = 1;
       return;
@@ -53,25 +57,23 @@ async function main(): Promise<void> {
     // on whatever that other environment's order happens to be. Refuse
     // rather than guess which environment was meant.
     if (actionable.targetEnv !== env) {
-      console.error(
-        `Order ${orderNumber} was recorded under target_env "${actionable.targetEnv}", but --env "${env}" was requested. ` +
-          `Order numbers are not unique across environments — refusing to act against the wrong one. ` +
-          `Re-run with --env ${actionable.targetEnv} if that's what you meant.`,
+      log.error(
+        { orderNumber, recordedTargetEnv: actionable.targetEnv, requestedEnv: env },
+        'Order was recorded under a different target_env than requested — Order numbers are not unique across environments — refusing to act against the wrong one.',
       );
       process.exitCode = 1;
       return;
     }
 
-    console.log(`Target MXI environment: ${env.toUpperCase()}`);
-    console.log(`Approving and issuing order ${orderNumber}...`);
+    log.info({ env: env.toUpperCase(), orderNumber }, 'Target MXI environment — approving and issuing order.');
 
     client = await createReadyMxiClient(env);
     const issueResult = await issueGeneratedOrder(client, orderNumber);
 
     if (issueResult.status !== 'success') {
-      console.error(`issueGeneratedOrder reported failure: ${issueResult.errorMessage}`);
+      log.error({ errorMessage: issueResult.errorMessage }, 'issueGeneratedOrder reported failure');
     } else {
-      console.log('issueGeneratedOrder reported success — independently re-verifying real order state...');
+      log.info('issueGeneratedOrder reported success — independently re-verifying real order state...');
     }
 
     // Independent re-verification, regardless of what issueGeneratedOrder
@@ -84,17 +86,17 @@ async function main(): Promise<void> {
       client.todoListUrl,
     );
 
-    console.log(`Real Order Status: ${realStatus ?? '(not found)'}`);
-    console.log(`Real Issued count: ${realIssuedCount ?? '(not found)'}`);
+    log.info({ realStatus: realStatus ?? null, realIssuedCount: realIssuedCount ?? null }, 'Real Order Status');
 
     const genuinelyIssued = realStatus === 'ISSUED';
     const issueStatus: 'success' | 'failed' = genuinelyIssued ? 'success' : 'failed';
 
     if (genuinelyIssued) {
-      console.log(`Order ${orderNumber} independently confirmed ISSUED.`);
+      log.info({ orderNumber }, 'Order independently confirmed ISSUED.');
     } else {
-      console.error(
-        `Order ${orderNumber} does NOT show real status ISSUED after issueGeneratedOrder — treating as failed regardless of what the function itself reported.`,
+      log.error(
+        { orderNumber },
+        'Order does NOT show real status ISSUED after issueGeneratedOrder — treating as failed regardless of what the function itself reported.',
       );
       process.exitCode = 1;
     }
@@ -110,7 +112,7 @@ async function main(): Promise<void> {
     });
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
-    console.error('Approve-issue failed:', errorMessage);
+    log.error({ errorMessage }, 'Approve-issue failed');
     const actionable = getActionableWriteUpAction(db, orderNumber);
     if (actionable) {
       insertWriteUpIssueDecision(db, {

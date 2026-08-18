@@ -11,6 +11,9 @@ import {
   VENDOR_CODE_ELIGIBLE_LINES_FILE_PATH,
   type VendorCodeEligibleLineTarget,
 } from '../writeUps/shared/vendorCodeEligibleLinesFile.js';
+import { createLogger } from '../logging/logger.js';
+
+const log = createLogger('cli');
 
 /**
  * Read-only batch discovery across EVERY vendor registered in
@@ -53,8 +56,8 @@ import {
  */
 async function main(): Promise<void> {
   const { env } = parseEnvFlag(process.argv.slice(2));
-  console.log(`Target MXI environment: ${env.toUpperCase()}`);
-  console.log('Read-only batch discovery across every registered vendor — no writes, no order creation.');
+  log.info({ env: env.toUpperCase() }, 'Target MXI environment');
+  log.info('Read-only batch discovery across every registered vendor — no writes, no order creation.');
 
   const db = openDb(path.join('data', 'audit.db'));
   let client: MxiClient | undefined;
@@ -74,7 +77,7 @@ async function main(): Promise<void> {
         // docstring above for why (session-loss self-heal + detection).
         const page = await client.getAuthenticatedPage();
         const candidates = await findCandidateLinesForVendorCode(page, client.todoListUrl, vendorCode);
-        console.log(`  ${vendorCode}: ${candidates.length} real candidate line(s) found.`);
+        log.info({ vendorCode, candidateCount: candidates.length }, 'Real candidate line(s) found');
         if (candidates.length > 0) withCandidatesCount++;
         else zeroCount++;
         for (const c of candidates) {
@@ -93,7 +96,7 @@ async function main(): Promise<void> {
         }
 
         indeterminateCount++;
-        console.error(`  ${vendorCode}: FAILED (grid state indeterminate) — ${message}`);
+        log.error({ vendorCode, errorMessage: message }, 'FAILED (grid state indeterminate)');
         insertWriteUpAction(db, {
           vendor: vendorCode.toLowerCase(),
           partNumber: '(unknown)',
@@ -112,29 +115,44 @@ async function main(): Promise<void> {
 
     await saveVendorCodeEligibleLines(env, allLines);
 
-    console.log(`\n=== SUMMARY ===`);
-    console.log(
+    const summaryLines = ['=== SUMMARY ==='];
+    summaryLines.push(
       `${vendorCodes.length} vendor(s) processed: ${withCandidatesCount} with real candidates, ${zeroCount} genuine ` +
-        `zero, ${indeterminateCount} indeterminate (grid state could not be confirmed — see console output above ` +
+        `zero, ${indeterminateCount} indeterminate (grid state could not be confirmed — see log output above ` +
         `and data/diagnostics/ for captured evidence on each).`,
     );
-    console.log(`Total real candidate lines across all vendors: ${allLines.length}`);
+    summaryLines.push(`Total real candidate lines across all vendors: ${allLines.length}`);
     for (const line of allLines) {
-      console.log(`  [${line.vendorCode}] ${line.partNumber} / SN "${line.serialNumber}"`);
+      summaryLines.push(`  [${line.vendorCode}] ${line.partNumber} / SN "${line.serialNumber}"`);
     }
-    console.log(
-      `\nSaved to ${VENDOR_CODE_ELIGIBLE_LINES_FILE_PATH}. Run this next to process everything found:\n` +
-        `  npm run vendor:batch-execute -- --env ${env}`,
+    summaryLines.push(
+      `Saved to ${VENDOR_CODE_ELIGIBLE_LINES_FILE_PATH}. Run this next to process everything found: ` +
+        `npm run vendor:batch-execute -- --env ${env}`,
     );
     if (indeterminateCount > 0) {
-      console.log(
-        `\n${indeterminateCount} vendor(s) had an indeterminate grid state and were skipped this run — review the ` +
+      summaryLines.push(
+        `${indeterminateCount} vendor(s) had an indeterminate grid state and were skipped this run — review the ` +
           `captured evidence in data/diagnostics/ and re-run discovery for those vendor codes specifically once ` +
           `the cause is understood.`,
       );
     }
+
+    log.info(
+      {
+        vendorCount: vendorCodes.length,
+        withCandidatesCount,
+        zeroCount,
+        indeterminateCount,
+        totalCandidateLines: allLines.length,
+        candidateLines: allLines,
+        savedTo: VENDOR_CODE_ELIGIBLE_LINES_FILE_PATH,
+        nextCommand: `npm run vendor:batch-execute -- --env ${env}`,
+      },
+      summaryLines.join('\n'),
+    );
   } catch (err) {
-    console.error('Vendor batch discovery halted (likely session/login loss):', err instanceof Error ? err.message : String(err));
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    log.error({ errorMessage }, 'Vendor batch discovery halted (likely session/login loss)');
     process.exitCode = 1;
   } finally {
     await client?.shutdown();

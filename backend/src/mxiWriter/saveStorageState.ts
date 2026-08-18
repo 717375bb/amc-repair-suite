@@ -2,6 +2,9 @@ import 'dotenv/config';
 import type { MxiClient } from './mxiClient.js';
 import { createReadyMxiClient } from './cliMxiClient.js';
 import { parseEnvFlag } from './parseEnvFlag.js';
+import { createLogger } from '../logging/logger.js';
+
+const log = createLogger('mxi');
 
 /**
  * One-off diagnostic: logs in via the same login() mxiClient.ts uses, saves
@@ -30,12 +33,10 @@ async function main(): Promise<void> {
   try {
     client = await createReadyMxiClient(env);
     await client.saveStorageState(outputPath);
-    console.log(`Saved authenticated ${env} session to ${outputPath}`);
-    console.log(
-      `Load it in codegen with: npx playwright codegen --load-storage=${outputPath} <url>`,
-    );
+    log.info({ env, outputPath }, 'Saved authenticated session');
+    log.info({ codegenCommand: `npx playwright codegen --load-storage=${outputPath} <url>` }, 'Load it in codegen with');
   } catch (err) {
-    console.error('Failed to save storage state:', err instanceof Error ? err.message : String(err));
+    log.error({ errorMessage: err instanceof Error ? err.message : String(err) }, 'Failed to save storage state');
     process.exitCode = 1;
   } finally {
     await client?.shutdown();

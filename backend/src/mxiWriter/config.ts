@@ -1,4 +1,7 @@
 import { getOptionalSecret } from '../security/secretProvider.js';
+import { createLogger } from '../logging/logger.js';
+
+const log = createLogger('mxi');
 
 export type MxiEnv = 'stage' | 'production';
 
@@ -84,10 +87,14 @@ export function deriveTodoListUrl(loginUrl: string): string {
 export function printProductionWarningIfNeeded(config: MxiConfig): void {
   if (config.env !== 'production') return;
   const banner = '!'.repeat(78);
-  console.warn('');
-  console.warn(banner);
-  console.warn('!!  MXI_ENV=production — writes from this server will hit REAL Maintenix data.  !!');
-  console.warn('!!  This is not the default. Confirm this is intentional before approving.        !!');
-  console.warn(banner);
-  console.warn('');
+  log.warn(
+    [
+      '',
+      banner,
+      '!!  MXI_ENV=production — writes from this server will hit REAL Maintenix data.  !!',
+      '!!  This is not the default. Confirm this is intentional before approving.        !!',
+      banner,
+      '',
+    ].join('\n'),
+  );
 }

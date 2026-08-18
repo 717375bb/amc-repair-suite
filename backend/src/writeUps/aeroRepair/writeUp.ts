@@ -1,5 +1,6 @@
 import type { Page } from 'playwright';
 import type { MxiClient } from '../../mxiWriter/mxiClient.js';
+import { createLogger } from '../../logging/logger.js';
 import {
   AUTH_FLOW,
   CONDITIONS_LABEL,
@@ -55,6 +56,8 @@ import {
   selectExternalVendorWorkPackage,
   selectTransportation,
 } from './selectors.js';
+
+const log = createLogger('writeup');
 
 /**
  * CLAUDE_CODE_PROMPT ("Create Order Only" terminal state) — literal
@@ -480,9 +483,9 @@ export async function runAeroRepairWriteUp(
       const isUsstgLine = currentLocation.split('/')[1] === 'USSTG';
       if (isUsstgLine) {
         doNotShipReason = ZERO_USAGE_DO_NOT_SHIP_REASON;
-        console.log(
-          `[create-order-only] aeroRepair ${partNumber}/${serialNumber}: zero usage detected on a USSTG line — ` +
-            `routing to CREATE_ORDER_ONLY instead of the Zero Usage exception (reason: "${doNotShipReason}").`,
+        log.info(
+          { partNumber, serialNumber, doNotShipReason },
+          '[create-order-only] aeroRepair: zero usage detected on a USSTG line — routing to CREATE_ORDER_ONLY instead of the Zero Usage exception',
         );
       } else {
         await closePartOwnDetails(page);

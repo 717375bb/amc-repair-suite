@@ -2,6 +2,9 @@ import type { Page } from 'playwright';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { UsageParmRowLike } from './usageTable.js';
+import { createLogger } from '../../logging/logger.js';
+
+const log = createLogger('writeup');
 
 const DIAGNOSTICS_DIR = path.join('data', 'diagnostics');
 
@@ -14,6 +17,13 @@ const DIAGNOSTICS_DIR = path.join('data', 'diagnostics');
  * capture failure must never crash or alter the real flow it instruments.
  * Read-only: only ever calls page.screenshot()/locator reads, nothing that
  * fills/submits/clicks.
+ *
+ * B2 (logging migration) — this was previously unconditional (fired on
+ * every single read, happy path included), which is real screenshot +
+ * disk-write overhead on a hot path just to have evidence "just in case."
+ * Now gated behind DIAGNOSTICS_CAPTURE=='true' (same exact-literal-string
+ * convention as config.ts's readHeadlessFlag) — off by default, opt-in for
+ * a session where usage-table evidence is actually being investigated.
  */
 export async function captureUsageTableDiagnostics(
   page: Page,
@@ -28,6 +38,9 @@ export async function captureUsageTableDiagnostics(
     parsedRows: UsageParmRowLike[];
   },
 ): Promise<void> {
+  if (process.env.DIAGNOSTICS_CAPTURE !== 'true') {
+    return;
+  }
   try {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const basename = `usage-table-${context.partNumber}-${timestamp}`;
@@ -58,11 +71,14 @@ export async function captureUsageTableDiagnostics(
     ].join('\n');
 
     await fs.writeFile(textPath, report, 'utf-8');
-    console.warn(`[usage-table-diagnostics] "${context.partNumber}/${context.serialNumber}" — evidence saved: ${screenshotPath}, ${textPath}`);
+    log.warn(
+      { partNumber: context.partNumber, serialNumber: context.serialNumber, screenshotPath, textPath },
+      '[usage-table-diagnostics] evidence saved',
+    );
   } catch (err) {
-    console.warn(
-      `[usage-table-diagnostics] Failed to capture evidence (non-fatal, continuing): ` +
-        (err instanceof Error ? err.message : String(err)),
+    log.warn(
+      { errorMessage: err instanceof Error ? err.message : String(err) },
+      '[usage-table-diagnostics] Failed to capture evidence (non-fatal, continuing)',
     );
   }
 }

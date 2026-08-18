@@ -6,6 +6,9 @@ import { createReadyMxiClient } from '../mxiWriter/cliMxiClient.js';
 import { parseEnvFlag } from '../mxiWriter/parseEnvFlag.js';
 import { AERO_REPAIR_PART_NUMBERS } from '../writeUps/aeroRepair/constants.js';
 import { runAeroRepairWriteUp } from '../writeUps/aeroRepair/writeUp.js';
+import { createLogger } from '../logging/logger.js';
+
+const log = createLogger('cli');
 
 /**
  * CLI smoke test for the Aero Repair write-up flow, ONE part number (and
@@ -40,16 +43,17 @@ async function main(): Promise<void> {
   const preferredSerialNumber = rest[1];
 
   if (!partNumber) {
-    console.error('Usage: npm run aero-repair:write-up -- <partNumber> [serialNumber] [--env production]');
-    console.error(`Known Aero Repair part numbers: ${AERO_REPAIR_PART_NUMBERS.join(', ')}`);
+    log.error('Usage: npm run aero-repair:write-up -- <partNumber> [serialNumber] [--env production]');
+    log.error({ knownPartNumbers: AERO_REPAIR_PART_NUMBERS }, 'Known Aero Repair part numbers');
     process.exitCode = 1;
     return;
   }
 
-  console.log(`Target MXI environment: ${env.toUpperCase()}`);
+  log.info({ env: env.toUpperCase() }, 'Target MXI environment');
   if (!AERO_REPAIR_PART_NUMBERS.includes(partNumber)) {
-    console.warn(
-      `Warning: "${partNumber}" is not one of the 6 known Aero Repair part numbers (${AERO_REPAIR_PART_NUMBERS.join(', ')}). Proceeding anyway — this is a smoke test, not a hard gate.`,
+    log.warn(
+      { partNumber, knownPartNumbers: AERO_REPAIR_PART_NUMBERS },
+      'Part number is not one of the 6 known Aero Repair part numbers. Proceeding anyway — this is a smoke test, not a hard gate.',
     );
   }
 
@@ -107,60 +111,75 @@ async function main(): Promise<void> {
           ? 'pending_issue'
           : 'filled';
 
-        console.log('');
-        console.log('=== STOPPED BEFORE ISSUE — nothing was submitted past Auth Flow confirmation. ===');
-        console.log('The following was filled and is ready for manual review:');
-        console.log(filledFieldsJson);
-        console.log('=== END OF FIELDS FOR MANUAL REVIEW ===');
+        log.info('');
+        log.info('=== STOPPED BEFORE ISSUE — nothing was submitted past Auth Flow confirmation. ===');
+        log.info('The following was filled and is ready for manual review:');
+        log.info({ filledFieldsJson }, 'Filled fields for manual review');
+        log.info('=== END OF FIELDS FOR MANUAL REVIEW ===');
         if (dbOutcome === 'pending_issue') {
-          console.log('');
-          console.log(`Order ${orderNumber} is now PENDING ISSUE REVIEW.`);
-          console.log('Run `npm run aero-repair:review-pending` to see it listed, then either:');
+          log.info('');
+          log.info({ orderNumber }, 'Order is now PENDING ISSUE REVIEW');
+          log.info('Run `npm run aero-repair:review-pending` to see it listed, then either:');
           const envFlag = env === 'production' ? ' --env production' : '';
-          console.log(`  npm run aero-repair:approve-issue -- ${orderNumber}${envFlag}`);
-          console.log(`  npm run aero-repair:reject-issue -- ${orderNumber} "<reason>"${envFlag}`);
+          log.info(
+            { command: `npm run aero-repair:approve-issue -- ${orderNumber}${envFlag}` },
+            'Approve-issue command',
+          );
+          log.info(
+            { command: `npm run aero-repair:reject-issue -- ${orderNumber} "<reason>"${envFlag}` },
+            'Reject-issue command',
+          );
         }
         break;
       }
       case 'no_tasks_assigned': {
         dbOutcome = 'no_tasks_assigned';
-        console.log(`Part ${partNumber}: no-tasks-assigned exception detected (0 real candidate tasks found). Nothing was filled.`);
+        log.info(
+          { partNumber },
+          'No-tasks-assigned exception detected (0 real candidate tasks found). Nothing was filled.',
+        );
         break;
       }
       case 'multiple_candidate_tasks': {
         dbOutcome = 'multiple_candidate_tasks';
-        console.log(
-          `Part ${partNumber}: ${outcome.candidateNames.length} real candidate tasks found — flagging for human review, not guessing among them:`,
+        log.info(
+          { partNumber, candidateCount: outcome.candidateNames.length },
+          'Real candidate tasks found — flagging for human review, not guessing among them',
         );
-        outcome.candidateNames.forEach((name) => console.log(`  - ${name}`));
+        outcome.candidateNames.forEach((name) => log.info({ candidateName: name }, 'Candidate task'));
         break;
       }
       case 'ad_hoc_pending_manual_continuation': {
         dbOutcome = 'ad_hoc_pending_manual_continuation';
-        console.log('');
-        console.log('=== AD-HOC TASK CREATED — PAUSED, pending one-time manual proof. ===');
-        console.log(`Part: ${partNumber}  Serial: ${outcome.serialNumber}`);
-        console.log(`Ad-Hoc task created: "${outcome.taskName}"`);
-        console.log('The rest of the flow (Auth Flow, Issue Order, Move to Dock) has not been');
-        console.log('exercised end-to-end yet starting from a freshly-created Ad-Hoc task.');
-        console.log('Run this to manually continue and prove it for real:');
+        log.info('');
+        log.info('=== AD-HOC TASK CREATED — PAUSED, pending one-time manual proof. ===');
+        log.info({ partNumber, serialNumber: outcome.serialNumber }, 'Part / Serial');
+        log.info({ taskName: outcome.taskName }, 'Ad-Hoc task created');
+        log.info('The rest of the flow (Auth Flow, Issue Order, Move to Dock) has not been');
+        log.info('exercised end-to-end yet starting from a freshly-created Ad-Hoc task.');
+        log.info('Run this to manually continue and prove it for real:');
         const envFlag = env === 'production' ? ' --env production' : '';
-        console.log(`  npm run aero-repair:continue-ad-hoc -- ${partNumber} ${outcome.serialNumber}${envFlag}`);
+        log.info(
+          { command: `npm run aero-repair:continue-ad-hoc -- ${partNumber} ${outcome.serialNumber}${envFlag}` },
+          'Continue-ad-hoc command',
+        );
         break;
       }
       case 'unrecognized_station': {
         dbOutcome = 'unrecognized_station';
         stationCode = outcome.stationCode;
-        console.error(
-          `Part ${partNumber}: station "${outcome.stationCode}" is not one of the 12 known Aero Repair stations. Flagging, not guessing a routing.`,
+        log.error(
+          { partNumber, stationCode: outcome.stationCode },
+          'Station is not one of the 12 known Aero Repair stations. Flagging, not guessing a routing.',
         );
         process.exitCode = 1;
         break;
       }
       case 'zero_usage': {
         dbOutcome = 'zero_usage';
-        console.error(
-          `Part ${partNumber} / SN ${outcome.serialNumber}: Current Usage shows CYCLES and HOURS both at exactly 0 (TSN/TSO/TSI) — a maintenance-records data problem, not a real repair-eligible line. Nothing was filled.`,
+        log.error(
+          { partNumber, serialNumber: outcome.serialNumber },
+          'Current Usage shows CYCLES and HOURS both at exactly 0 (TSN/TSO/TSI) — a maintenance-records data problem, not a real repair-eligible line. Nothing was filled.',
         );
         process.exitCode = 1;
         break;
@@ -168,8 +187,9 @@ async function main(): Promise<void> {
       case 'unassigned_task_multiple_present': {
         dbOutcome = 'unassigned_task_multiple_present';
         filledFieldsJson = JSON.stringify({ serialNumber: outcome.serialNumber, candidateCount: outcome.candidateCount }, null, 2);
-        console.error(
-          `Part ${partNumber} / SN ${outcome.serialNumber}: ${outcome.candidateCount} genuinely-assignable unassigned tasks found — flagging for human review, not guessing among them. Nothing was filled.`,
+        log.error(
+          { partNumber, serialNumber: outcome.serialNumber, candidateCount: outcome.candidateCount },
+          'Genuinely-assignable unassigned tasks found — flagging for human review, not guessing among them. Nothing was filled.',
         );
         process.exitCode = 1;
         break;
@@ -177,17 +197,18 @@ async function main(): Promise<void> {
       case 'unassigned_task_detection_suspect': {
         dbOutcome = 'unassigned_task_detection_suspect';
         filledFieldsJson = JSON.stringify({ serialNumber: outcome.serialNumber }, null, 2);
-        console.error(
-          `Part ${partNumber} / SN ${outcome.serialNumber}: a task checkbox was detected on the Unassigned Tasks sub-tab, but it filtered out as PC (administrative) — detection is suspect. Nothing was filled or assigned.`,
+        log.error(
+          { partNumber, serialNumber: outcome.serialNumber },
+          'A task checkbox was detected on the Unassigned Tasks sub-tab, but it filtered out as PC (administrative) — detection is suspect. Nothing was filled or assigned.',
         );
         process.exitCode = 1;
         break;
       }
       case 'no_removal_task_info_found': {
         dbOutcome = 'no_removal_task_info_found';
-        console.error(
-          `Part ${partNumber} / SN ${outcome.serialNumber}: no task assigned, and this line's own Removal ` +
-            `Information has no Task Name/ID either — the real removal reason can't be determined. Nothing was filled.`,
+        log.error(
+          { partNumber, serialNumber: outcome.serialNumber },
+          "No task assigned, and this line's own Removal Information has no Task Name/ID either — the real removal reason can't be determined. Nothing was filled.",
         );
         process.exitCode = 1;
         break;
@@ -200,16 +221,19 @@ async function main(): Promise<void> {
           null,
           2,
         );
-        console.log('');
-        console.log(`=== CREATE ORDER ONLY — order ${outcome.generatedOrderNumber} created, marked DO NOT SHIP (${outcome.reason}). ===`);
-        console.log('No authorization, issue, or dock was performed for this line.');
+        log.info('');
+        log.info(
+          { orderNumber: outcome.generatedOrderNumber, reason: outcome.reason },
+          '=== CREATE ORDER ONLY — order created, marked DO NOT SHIP. ===',
+        );
+        log.info('No authorization, issue, or dock was performed for this line.');
         break;
       }
       case 'error': {
         dbOutcome = 'error';
         errorMessage = outcome.errorMessage;
         filledFieldsJson = JSON.stringify({ serialNumber: outcome.serialNumber }, null, 2);
-        console.error(`Part ${partNumber}: write-up attempt failed: ${outcome.errorMessage}`);
+        log.error({ partNumber, errorMessage: outcome.errorMessage }, 'Write-up attempt failed');
         process.exitCode = 1;
         break;
       }
@@ -228,7 +252,7 @@ async function main(): Promise<void> {
     });
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
-    console.error('Aero Repair write-up smoke test failed:', errorMessage);
+    log.error({ errorMessage }, 'Aero Repair write-up smoke test failed');
     insertWriteUpAction(db, {
       vendor: 'aeroRepair',
       partNumber,

@@ -1,3 +1,7 @@
+import { createLogger } from '../../logging/logger.js';
+
+const log = createLogger('writeup');
+
 /**
  * Shared vendor-config types, per VENDOR_MODULE_REFACTOR_SPEC.md section 3.1.
  * No Playwright/page logic here — pure types + the one resolution function
@@ -125,11 +129,15 @@ export function resolveShipsetCase(usstgTaskName: string | null, config: VendorC
   if (!config.shipsetCase) return null;
 
   const matched = usstgTaskName !== null && usstgTaskName.trim() === config.shipsetCase.expectedUsstgTaskName.trim();
-  console.log(
-    `[vendor-config] ${config.id}: USSTG line task name read as ` +
-      `${usstgTaskName === null ? '(none found)' : `"${usstgTaskName}"`} — expected ` +
-      `"${config.shipsetCase.expectedUsstgTaskName}" — ${matched ? 'MATCHED' : 'did not match'}. ` +
-      `${matched ? `Applying shipset case "${config.shipsetCase.id}".` : 'Falling through to standard handling.'}`,
+  log.info(
+    {
+      vendorConfigId: config.id,
+      usstgTaskName,
+      expectedUsstgTaskName: config.shipsetCase.expectedUsstgTaskName,
+      matched,
+      shipsetCaseId: matched ? config.shipsetCase.id : null,
+    },
+    '[vendor-config] USSTG line task name read',
   );
   return matched ? config.shipsetCase : null;
 }
@@ -265,10 +273,17 @@ export function resolveAuthFlowPolicy(serialNumber: string, config: VendorConfig
   for (const override of config.authFlowPolicy.overrides) {
     const prefix = override.when.serialNumberPrefix.trim().toUpperCase();
     if (normalized.startsWith(prefix)) {
-      console.log(
-        `[vendor-config] ${config.id}: serial "${serialNumber}" matched override "${override.id}" ` +
-          `(prefix "${prefix}") -> authFlow="${override.authFlow}", terminalState="${override.terminalState}", ` +
-          `usageTable="${override.usageTable}".`,
+      log.info(
+        {
+          vendorConfigId: config.id,
+          serialNumber,
+          overrideId: override.id,
+          prefix,
+          authFlow: override.authFlow,
+          terminalState: override.terminalState,
+          usageTable: override.usageTable,
+        },
+        '[vendor-config] serial matched override',
       );
       return {
         authFlow: override.authFlow,
@@ -279,9 +294,14 @@ export function resolveAuthFlowPolicy(serialNumber: string, config: VendorConfig
     }
   }
 
-  console.log(
-    `[vendor-config] ${config.id}: serial "${serialNumber}" matched no override -> default authFlow=` +
-      `"${config.authFlowPolicy.default}", terminalState="${config.defaultTerminalState}".`,
+  log.info(
+    {
+      vendorConfigId: config.id,
+      serialNumber,
+      defaultAuthFlow: config.authFlowPolicy.default,
+      terminalState: config.defaultTerminalState,
+    },
+    '[vendor-config] serial matched no override — using default',
   );
   return {
     authFlow: config.authFlowPolicy.default,

@@ -4,6 +4,9 @@ import type { MxiClient } from '../mxiWriter/mxiClient.js';
 import { parseEnvFlag } from '../mxiWriter/parseEnvFlag.js';
 import { findOrderByNumber, navigateToOrder, readEsdField, readNoteToReceiver } from '../mxiWriter/selectors.js';
 import { writeEsdAndNotes } from '../mxiWriter/writeEsdAndNotes.js';
+import { createLogger } from '../logging/logger.js';
+
+const log = createLogger('cli');
 
 /**
  * Read-write smoke test: logs in, reads the current RO ESD (and, if a note
@@ -43,14 +46,14 @@ async function main(): Promise<void> {
   const noteText = rest[2];
 
   if (!orderNumber || !newDate) {
-    console.error('Usage: npm run mxi:write-esd -- <orderNumber> <newDate> [noteText] [--env production]');
-    console.error('  newDate format: DD-MMM-YYYY (e.g. 08-JUL-2026)');
-    console.error('  noteText is optional — omit to exercise the ESD-only path');
+    log.error('Usage: npm run mxi:write-esd -- <orderNumber> <newDate> [noteText] [--env production]');
+    log.error('  newDate format: DD-MMM-YYYY (e.g. 08-JUL-2026)');
+    log.error('  noteText is optional — omit to exercise the ESD-only path');
     process.exitCode = 1;
     return;
   }
 
-  console.log(`Target MXI environment: ${env.toUpperCase()}`);
+  log.info({ env: env.toUpperCase() }, 'Target MXI environment');
 
   let client: MxiClient | undefined;
   try {
@@ -59,18 +62,18 @@ async function main(): Promise<void> {
     const page = await client.getAuthenticatedPage();
     await findOrderByNumber(page, orderNumber, client.todoListUrl);
     const originalEsd = await readEsdField(page);
-    console.log(`Order ${orderNumber}: current RO ESD = ${originalEsd ?? '(blank)'}`);
-    console.log(`>>> ORIGINAL ESD — save this to revert: ${originalEsd ?? '(blank)'} <<<`);
+    log.info({ orderNumber, originalEsd: originalEsd ?? null }, 'Current RO ESD');
+    log.info({ orderNumber, originalEsd: originalEsd ?? null }, 'ORIGINAL ESD — save this to revert');
 
     let originalNote: string | null = null;
     if (noteText) {
       await navigateToOrder(page, orderNumber, client.todoListUrl);
       originalNote = await readNoteToReceiver(page);
-      console.log(`Order ${orderNumber}: current Notes to Receiver = ${originalNote ?? '(blank)'}`);
-      console.log(`>>> ORIGINAL NOTE — save this to revert: ${originalNote ?? '(blank)'} <<<`);
+      log.info({ orderNumber, originalNote: originalNote ?? null }, 'Current Notes to Receiver');
+      log.info({ orderNumber, originalNote: originalNote ?? null }, 'ORIGINAL NOTE — save this to revert');
     }
 
-    console.log(`Writing new RO ESD: ${newDate}${noteText ? ' and new Notes to Receiver' : ''}...`);
+    log.info({ orderNumber, newDate, includesNote: !!noteText }, 'Writing new RO ESD');
 
     const result = await writeEsdAndNotes(client, orderNumber, {
       esd: newDate,
@@ -78,28 +81,36 @@ async function main(): Promise<void> {
     });
 
     if (result.status === 'success') {
-      console.log(`Write succeeded and was confirmed by re-reading: RO ESD is now ${newDate}.`);
+      log.info({ orderNumber, newDate }, 'Write succeeded and was confirmed by re-reading RO ESD');
       if (noteText) {
-        console.log('Notes to Receiver confirmed appended — prior history verified intact.');
+        log.info('Notes to Receiver confirmed appended — prior history verified intact.');
       }
       const envFlagSuffix = env === 'production' ? ' --env production' : '';
-      console.log(`To revert the ESD: npm run mxi:write-esd -- ${orderNumber} "${originalEsd}"${envFlagSuffix}`);
+      log.info(
+        {
+          orderNumber,
+          originalEsd,
+          env,
+          revertCommand: `npm run mxi:write-esd -- ${orderNumber} "${originalEsd}"${envFlagSuffix}`,
+        },
+        'Revert command for the ESD',
+      );
       if (noteText) {
-        console.log(
-          `Notes to Receiver is an accumulating log — there is no revert command for the appended entry. ` +
-            `Original note (for reference only, not a revert value): ${originalNote ?? '(blank)'}`,
+        log.info(
+          { orderNumber, originalNote: originalNote ?? null },
+          'Notes to Receiver is an accumulating log — there is no revert command for the appended entry. Original note is for reference only, not a revert value.',
         );
       }
     } else {
-      console.error(`Write FAILED: ${result.errorMessage}`);
-      console.error(`Order ${orderNumber}'s original ESD was: ${originalEsd ?? '(blank)'}`);
+      log.error({ orderNumber, errorMessage: result.errorMessage }, 'Write FAILED');
+      log.error({ orderNumber, originalEsd: originalEsd ?? null }, "Order's original ESD");
       if (noteText) {
-        console.error(`Order ${orderNumber}'s original Note was: ${originalNote ?? '(blank)'}`);
+        log.error({ orderNumber, originalNote: originalNote ?? null }, "Order's original Note");
       }
       process.exitCode = 1;
     }
   } catch (err) {
-    console.error('Smoke test failed:', err instanceof Error ? err.message : String(err));
+    log.error({ errorMessage: err instanceof Error ? err.message : String(err) }, 'Smoke test failed');
     process.exitCode = 1;
   } finally {
     await client?.shutdown();

@@ -6,6 +6,9 @@ import { createReadyMxiClient } from '../mxiWriter/cliMxiClient.js';
 import { parseEnvFlag } from '../mxiWriter/parseEnvFlag.js';
 import { loadEligibleLines } from '../writeUps/aeroRepair/eligibleLinesFile.js';
 import { LOG_FILE_PATH, logProcessLineResult, processLine } from '../writeUps/aeroRepair/processLine.js';
+import { createLogger } from '../logging/logger.js';
+
+const log = createLogger('cli');
 
 /**
  * The full automatic per-line flow, no pause, no human review step — per
@@ -55,52 +58,47 @@ async function main(): Promise<void> {
   let targets: { partNumber: string; serialNumber: string }[];
   if (explicitTargets.length > 0) {
     targets = explicitTargets;
-    console.log(`Using ${targets.length} explicitly-specified target(s) (ignoring any saved discovery file).`);
+    log.info({ targetCount: targets.length }, 'Using explicitly-specified target(s) (ignoring any saved discovery file).');
   } else {
     const file = await loadEligibleLines();
     if (!file) {
-      console.error(
-        'No explicit targets given and no data/aero-repair-eligible-lines.json found.\n' +
-          'Run `npm run aero-repair:batch-discovery -- --env ' +
-          env +
-          '` first, or pass targets explicitly:\n' +
-          '  npm run aero-repair:batch-execute -- <partNumber>:<serialNumber> [more...] --env ' +
-          env,
+      log.error(
+        { env },
+        'No explicit targets given and no data/aero-repair-eligible-lines.json found. Run `npm run aero-repair:batch-discovery -- --env <env>` first, or pass targets explicitly: `npm run aero-repair:batch-execute -- <partNumber>:<serialNumber> [more...] --env <env>`.',
       );
       process.exitCode = 1;
       return;
     }
     if (file.env !== env) {
-      console.error(
-        `Refusing to proceed: data/aero-repair-eligible-lines.json was generated for env "${file.env}" but this run ` +
-          `targets "${env}". Re-run batch-discovery with --env ${env} first, or pass targets explicitly.`,
+      log.error(
+        { fileEnv: file.env, requestedEnv: env },
+        'Refusing to proceed: data/aero-repair-eligible-lines.json was generated for a different env than this run targets. Re-run batch-discovery with the requested --env first, or pass targets explicitly.',
       );
       process.exitCode = 1;
       return;
     }
     targets = file.lines;
     const ageMinutes = Math.round((Date.now() - new Date(file.generatedAt).getTime()) / 60000);
-    console.log(
-      `Loaded ${targets.length} eligible line(s) from data/aero-repair-eligible-lines.json ` +
-        `(generated ${ageMinutes} minute(s) ago, at ${file.generatedAt}).`,
+    log.info(
+      { targetCount: targets.length, ageMinutes, generatedAt: file.generatedAt },
+      'Loaded eligible line(s) from data/aero-repair-eligible-lines.json',
     );
     if (ageMinutes > 24 * 60) {
-      console.log(
-        'WARNING: this discovery snapshot is over 24 hours old. Each line below is still independently ' +
-          're-verified live immediately before processing, so a stale entry will just be safely skipped as ' +
-          '"no longer eligible" rather than acted on incorrectly — but a fresh scan will also pick up any new ' +
-          'lines that have shown up since. Consider re-running batch-discovery first.',
+      log.info(
+        'WARNING: this discovery snapshot is over 24 hours old. Each line below is still independently re-verified live immediately before processing, so a stale entry will just be safely skipped as "no longer eligible" rather than acted on incorrectly — but a fresh scan will also pick up any new lines that have shown up since. Consider re-running batch-discovery first.',
       );
     }
   }
 
   if (targets.length === 0) {
-    console.log('0 target(s) to process. Nothing to do.');
+    log.info('0 target(s) to process. Nothing to do.');
     return;
   }
 
-  console.log(`Target MXI environment: ${env.toUpperCase()}`);
-  console.log(`Processing ${targets.length} line(s): ${targets.map((t) => `${t.partNumber}:${t.serialNumber}`).join(', ')}`);
+  log.info(
+    { env: env.toUpperCase(), targetCount: targets.length, targets: targets.map((t) => `${t.partNumber}:${t.serialNumber}`) },
+    'Target MXI environment — processing line(s).',
+  );
 
   const db = openDb(path.join('data', 'audit.db'));
   let client: MxiClient | undefined;
@@ -109,7 +107,7 @@ async function main(): Promise<void> {
     client = await createReadyMxiClient(env);
 
     for (const target of targets) {
-      console.log(`\n--- ${target.partNumber} / SN ${target.serialNumber} ---`);
+      log.info({ partNumber: target.partNumber, serialNumber: target.serialNumber }, 'Processing line');
       const result = await processLine(db, client, env, target.partNumber, target.serialNumber, 'second');
       // Logged to the xlsx immediately after EACH line, not accumulated
       // and written once at the very end — a long run across many lines
@@ -118,10 +116,11 @@ async function main(): Promise<void> {
       await logProcessLineResult(target, result, env);
     }
 
-    console.log(`\nFinished processing all ${targets.length} line(s) — each logged to ${LOG_FILE_PATH} as it completed.`);
+    log.info({ targetCount: targets.length, logFilePath: LOG_FILE_PATH }, 'Finished processing all line(s) — each logged as it completed.');
   } catch (err) {
-    console.error('Batch execute halted (likely session/login loss):', err instanceof Error ? err.message : String(err));
-    console.log('Every line processed before the halt was already logged individually — nothing lost.');
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    log.error({ errorMessage }, 'Batch execute halted (likely session/login loss)');
+    log.info('Every line processed before the halt was already logged individually — nothing lost.');
     process.exitCode = 1;
   } finally {
     await client?.shutdown();

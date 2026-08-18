@@ -1,4 +1,7 @@
 import type { Page } from 'playwright';
+import { createLogger } from '../../logging/logger.js';
+
+const log = createLogger('writeup');
 
 const CLICK_DELAY_MS = 750;
 const GRID_WAIT_TIMEOUT_MS = 30_000;
@@ -69,7 +72,7 @@ export async function selectAuthFlow(page: Page, label: string): Promise<void> {
         `${err instanceof Error ? err.message : String(err)}`,
     );
   }
-  console.log(`[grid-wait] auth-flow dropdown resolved in ${Date.now() - start}ms`);
+  log.debug({ durationMs: Date.now() - start }, '[grid-wait] auth-flow dropdown resolved');
 
   await page.locator('#idDropdownAuthFlows').selectOption({ label });
   await pace(page);
@@ -97,7 +100,7 @@ export async function selectAuthFlow(page: Page, label: string): Promise<void> {
 async function handleMinimumPurchaseAmountConfirmation(page: Page): Promise<void> {
   const bodyText = await page.locator('body').innerText();
   if (bodyText.includes('vendor minimum purchase amount')) {
-    console.log('[auth-flow] Minimum purchase amount confirmation dialog detected — clicking YES (confirmed irrelevant, per explicit user direction).');
+    log.info('[auth-flow] Minimum purchase amount confirmation dialog detected — clicking YES (confirmed irrelevant, per explicit user direction).');
     await page.getByRole('link', { name: 'YES' }).click();
     await pace(page);
   }

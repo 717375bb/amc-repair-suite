@@ -45,6 +45,9 @@ import { closePartDetailsReceivingNotes, openPartDetailsReceivingNotes, readPart
 import { isRmaVendor } from './rmaVendors.js';
 import { captureVendorCodeGridDiagnostics } from './vendorCodeGridDiagnostics.js';
 import { extractRemovalTaskInfo } from './removalTaskInfo.js';
+import { createLogger } from '../../logging/logger.js';
+
+const log = createLogger('writeup');
 
 const CLICK_DELAY_MS = 750;
 const GRID_WAIT_TIMEOUT_MS = 30_000;
@@ -172,7 +175,10 @@ export async function waitForVendorCodeGridResolved(page: Page, vendorCode: stri
         `as a genuine empty result. Underlying error: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
-  console.log(`[grid-wait] vendor-code grid for vendor "${vendorCode}" resolved in ${Date.now() - start}ms (reason: ${resolutionReason})`);
+  log.debug(
+    { vendorCode, durationMs: Date.now() - start, resolutionReason },
+    '[grid-wait] vendor-code grid resolved',
+  );
 }
 
 export interface VendorCodeCandidateLine {
@@ -537,9 +543,9 @@ export async function runVendorCodeWriteUp(
       // attached) — that check is untouched by this delta and only runs
       // for lines that DO have an assigned task.
       if (shipset && shipset.allowMissingAssignedTask) {
-        console.log(
-          `[vendor-config] ${config.id}: no assigned task exists for ${candidate.partNumber}/${candidate.serialNumber} — ` +
-            `shipset case "${shipset.id}" tolerates this (Delta 6), continuing without Ad-Hoc creation.`,
+        log.info(
+          { vendorConfigId: config.id, partNumber: candidate.partNumber, serialNumber: candidate.serialNumber, shipsetId: shipset.id },
+          '[vendor-config] no assigned task exists — shipset case tolerates this (Delta 6), continuing without Ad-Hoc creation',
         );
         // REAL BUG FOUND AND FIXED via the first live watched run against
         // production (real line 41034002-111/68676): unlike the Ad-Hoc
@@ -624,9 +630,9 @@ export async function runVendorCodeWriteUp(
       // shipset line, satisfying Delta 4 without a separate suppression
       // flag. Every other vendor's and every non-shipset 7A9Y2 line's own
       // usage read/validation below is completely untouched.
-      console.log(
-        `[vendor-config] ${config.id}: shipset case "${shipset.id}" — skipping the times/cycles read entirely ` +
-          `(Delta 3/4); Notes to Vendor fixed to "${shipset.notesText}".`,
+      log.info(
+        { vendorConfigId: config.id, shipsetId: shipset.id, notesText: shipset.notesText },
+        '[vendor-config] shipset case — skipping the times/cycles read entirely (Delta 3/4); Notes to Vendor fixed',
       );
       notesText = shipset.notesText;
     } else {
@@ -643,10 +649,9 @@ export async function runVendorCodeWriteUp(
         if (isUsstgLine) {
           doNotShipReason = ZERO_USAGE_DO_NOT_SHIP_REASON;
           effectiveTerminalState = 'CREATE_ORDER_ONLY';
-          console.log(
-            `[create-order-only] ${config.id} ${candidate.partNumber}/${candidate.serialNumber}: zero usage ` +
-              `detected on a USSTG line — routing to CREATE_ORDER_ONLY instead of the Zero Usage exception ` +
-              `(reason: "${doNotShipReason}").`,
+          log.info(
+            { vendorConfigId: config.id, partNumber: candidate.partNumber, serialNumber: candidate.serialNumber, doNotShipReason },
+            '[create-order-only] zero usage detected on a USSTG line — routing to CREATE_ORDER_ONLY instead of the Zero Usage exception',
           );
         } else {
           await closePartOwnDetails(page);
@@ -690,17 +695,16 @@ export async function runVendorCodeWriteUp(
       if (config.hasPartDetailsStep) {
         await openPartDetailsReceivingNotes(page, candidate.linkText, candidate.partNumber);
         const receivingNotes = await readPartDetailsReceivingNotes(page);
-        console.log(
-          `[vendor-config] ${config.id}: part-level receiving notes for ${candidate.partNumber}/${candidate.serialNumber}: ` +
-            `${receivingNotes ? JSON.stringify(receivingNotes) : '(none found)'}.`,
+        log.info(
+          { vendorConfigId: config.id, partNumber: candidate.partNumber, serialNumber: candidate.serialNumber, receivingNotes: receivingNotes ?? null },
+          '[vendor-config] part-level receiving notes',
         );
         await closePartDetailsReceivingNotes(page);
 
         if (receivingNotes && /account/i.test(receivingNotes)) {
-          console.error(
-            `[vendor-config] ${config.id} ${candidate.partNumber}/${candidate.serialNumber}: receiving notes ` +
-              `mention "account" — flagging for manual review per explicit instruction rather than risk writing ` +
-              `to the wrong Charge To Account. Nothing filled, no order created.`,
+          log.error(
+            { vendorConfigId: config.id, partNumber: candidate.partNumber, serialNumber: candidate.serialNumber, receivingNotes },
+            '[vendor-config] receiving notes mention "account" — flagging for manual review per explicit instruction rather than risk writing to the wrong Charge To Account. Nothing filled, no order created',
           );
           return {
             status: 'receiving_notes_flagged_account',
@@ -748,9 +752,9 @@ export async function runVendorCodeWriteUp(
       // were explicitly told to skip this fallback too.
       if (config.id === '7a9y2') {
         chargeToAccountAfter = chargeToAccountBefore;
-        console.log(
-          `[create-order-only] ${config.id} ${candidate.partNumber}/${candidate.serialNumber}: Charge To Account ` +
-            `left untouched at "${chargeToAccountBefore}" — Skypaxxx is explicitly excluded from the CREATE_ORDER_ONLY fallback.`,
+        log.info(
+          { vendorConfigId: config.id, partNumber: candidate.partNumber, serialNumber: candidate.serialNumber, chargeToAccountBefore },
+          '[create-order-only] Charge To Account left untouched — Skypaxxx is explicitly excluded from the CREATE_ORDER_ONLY fallback',
         );
       } else {
         chargeToAccountAfter = CREATE_ORDER_ONLY_CHARGE_TO_ACCOUNT_FALLBACK;
@@ -791,7 +795,7 @@ export async function runVendorCodeWriteUp(
       // empty option, never clear it — simply never call selectTransportation
       // at all, so a future regression (silently falling back to FEDEX-2)
       // is visible in the run log as a MISSING line, not a wrong value.
-      console.log(`[vendor-config] ${config.id}: Transportation Type step intentionally SKIPPED (Delta 1 — shipset leaves it blank).`);
+      log.info({ vendorConfigId: config.id }, '[vendor-config] Transportation Type step intentionally SKIPPED (Delta 1 — shipset leaves it blank)');
     } else {
       await selectTransportation(page, shipset ? shipset.transportationType! : config.form.transportation);
     }
@@ -975,9 +979,9 @@ export async function runVendorCodeWriteUp(
         // so the capability stays reachable by flipping the flag later —
         // no code change needed to re-enable.
         if (shipset && !shipset.moveToDockOnInitialRun) {
-          console.log(
-            `[vendor-config] ${config.id}: order ${generatedOrderNumber} issued successfully — Move to Dock ` +
-              `intentionally SKIPPED on this run (Delta 5, shipset case "${shipset.id}").`,
+          log.info(
+            { vendorConfigId: config.id, generatedOrderNumber, shipsetId: shipset.id },
+            '[vendor-config] order issued successfully — Move to Dock intentionally SKIPPED on this run (Delta 5)',
           );
           return { status: 'issued_not_docked', fields };
         }

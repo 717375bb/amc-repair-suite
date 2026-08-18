@@ -7,6 +7,9 @@ import { parseEnvFlag } from '../mxiWriter/parseEnvFlag.js';
 import { runVendorCodeWriteUp } from '../writeUps/shared/vendorCodeWriteUp.js';
 import { getVendorConfig } from '../writeUps/shared/vendorRegistry.js';
 import { logVendorCodeOutcome } from '../writeUps/shared/vendorCodeOutcomeLogging.js';
+import { createLogger } from '../logging/logger.js';
+
+const log = createLogger('cli');
 
 /**
  * Generic, single-line, manually-invoked CLI for any vendor in
@@ -33,15 +36,14 @@ async function main(): Promise<void> {
   const preferredSerialNumber = rest[1];
 
   if (!vendorCode) {
-    console.error('Usage: npm run vendor:write-up -- <vendorCode> [serialNumber] [--env production]');
+    log.error('Usage: npm run vendor:write-up -- <vendorCode> [serialNumber] [--env production]');
     process.exitCode = 1;
     return;
   }
 
   const config = getVendorConfig(vendorCode);
 
-  console.log(`Target MXI environment: ${env.toUpperCase()}`);
-  console.log(`Vendor ${config.displayName} (${config.id}) — single-line, manually-invoked write-up.`);
+  log.info({ env: env.toUpperCase(), vendorDisplayName: config.displayName, vendorId: config.id }, 'Target MXI environment / single-line, manually-invoked write-up');
 
   const db = openDb(path.join('data', 'audit.db'));
   let client: MxiClient | undefined;
@@ -53,7 +55,7 @@ async function main(): Promise<void> {
     if (!success) process.exitCode = 1;
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
-    console.error(`Vendor ${config.id} write-up CLI failed:`, errorMessage);
+    log.error({ vendorConfigId: config.id, errorMessage }, 'Vendor write-up CLI failed');
     logVendorCodeOutcome(db, config, env, { status: 'error', partNumber: null, serialNumber: null, errorMessage });
     process.exitCode = 1;
   } finally {

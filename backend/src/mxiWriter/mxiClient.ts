@@ -1,6 +1,9 @@
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { deriveTodoListUrl, loadMxiConfig, printProductionWarningIfNeeded, type MxiConfig } from './config.js';
 import { login } from './selectors.js';
+import { createLogger } from '../logging/logger.js';
+
+const log = createLogger('mxi');
 
 export type MxiSessionState =
   | { status: 'not_initialized' }
@@ -51,7 +54,7 @@ export class MxiClient {
         reason:
           'MXI not fully configured (need MXI_STAGE_BASE_URL/MXI_PROD_BASE_URL, MXI_USERNAME, MXI_PASSWORD)',
       };
-      console.error(`[mxiClient] ${this.state.reason}. /approve requests will fail until this is set.`);
+      log.error({ reason: this.state.reason }, '[mxiClient] MXI not fully configured. /approve requests will fail until this is set.');
       return;
     }
 
@@ -61,11 +64,11 @@ export class MxiClient {
       this.page = await this.context.newPage();
       await login(this.page, this.config.username, this.config.password, this.config.baseUrl);
       this.state = { status: 'ready' };
-      console.log(`[mxiClient] Logged in to MXI (${this.config.env}).`);
+      log.info({ env: this.config.env }, '[mxiClient] Logged in to MXI');
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       this.state = { status: 'failed', reason };
-      console.error(`[mxiClient] Login failed: ${reason}. /approve requests will fail until this is resolved.`);
+      log.error({ reason }, '[mxiClient] Login failed. /approve requests will fail until this is resolved.');
     }
   }
 
@@ -88,13 +91,13 @@ export class MxiClient {
       return this.page;
     }
 
-    console.warn('[mxiClient] MXI session appears to have expired. Re-authenticating once...');
+    log.warn('[mxiClient] MXI session appears to have expired. Re-authenticating once...');
     try {
       await login(this.page, this.config.username, this.config.password, this.config.baseUrl);
       if (!(await this.isSessionAlive(this.page))) {
         throw new Error('Session still not valid after re-authentication attempt.');
       }
-      console.log('[mxiClient] Re-authentication succeeded.');
+      log.info('[mxiClient] Re-authentication succeeded.');
       return this.page;
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);

@@ -1,5 +1,8 @@
 import type { Page } from 'playwright';
 import { captureVendorBidDiagnostics, type VendorBidRowEvidence } from './emptyReadCapture.js';
+import { createLogger } from '../../logging/logger.js';
+
+const log = createLogger('writeup');
 
 /**
  * waitForBodyTextIncludes, waitForWorkPackageDetailsResolved,
@@ -105,7 +108,7 @@ export async function waitForGridResolved(page: Page, partNumber: string): Promi
 
   let previous = await readGridState(page, partNumber);
   if (previous.noInventory) {
-    console.log(`[grid-wait] part ${partNumber} resolved in ${Date.now() - start}ms (reason: no_inventory)`);
+    log.debug({ partNumber, durationMs: Date.now() - start, reason: 'no_inventory' }, '[grid-wait] resolved');
     return;
   }
 
@@ -113,11 +116,14 @@ export async function waitForGridResolved(page: Page, partNumber: string): Promi
     await page.waitForTimeout(GRID_STABILITY_POLL_MS);
     const current = await readGridState(page, partNumber);
     if (current.noInventory) {
-      console.log(`[grid-wait] part ${partNumber} resolved in ${Date.now() - start}ms (reason: no_inventory)`);
+      log.debug({ partNumber, durationMs: Date.now() - start, reason: 'no_inventory' }, '[grid-wait] resolved');
       return;
     }
     if (current.rowCount > 0 && current.rowCount === previous.rowCount) {
-      console.log(`[grid-wait] part ${partNumber} resolved in ${Date.now() - start}ms (reason: stable_row_count=${current.rowCount})`);
+      log.debug(
+        { partNumber, durationMs: Date.now() - start, reason: 'stable_row_count', rowCount: current.rowCount },
+        '[grid-wait] resolved',
+      );
       return;
     }
     previous = current;
@@ -253,9 +259,9 @@ export async function waitForVendorBidsResolved(page: Page, linkText: string): P
     targetLinkFound = result.targetLinkFound;
     rows = result.rows;
     if (rows.some((r) => r.hasRadio)) {
-      console.log(
-        `[grid-wait] vendor bids for "${linkText}" resolved in ${Date.now() - start}ms ` +
-          `(${rows.filter((r) => r.hasRadio).length} bid row(s))`,
+      log.debug(
+        { linkText, durationMs: Date.now() - start, bidRowCount: rows.filter((r) => r.hasRadio).length },
+        '[grid-wait] vendor bids resolved',
       );
       return rows;
     }

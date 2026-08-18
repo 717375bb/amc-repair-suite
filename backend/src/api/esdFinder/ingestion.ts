@@ -2,6 +2,9 @@ import ExcelJS from 'exceljs';
 import { CRA_OOR_HEADER_ALIASES, parseCraOor } from '../../parsers/craOorParser.js';
 import { parseVendorOor } from '../../parsers/vendorOorParser.js';
 import type { CraOorRow, VendorOorRow } from '../../types.js';
+import { createLogger } from '../../logging/logger.js';
+
+const log = createLogger('esd');
 
 /**
  * File ingestion for the Open Order ESD Finder tab — new work per the spec's
@@ -141,15 +144,14 @@ async function resolveAndValidateSheet(
   // which returned early on a sheet-name miss) it never silently skips
   // printing just because nothing resolved.
   if (process.env.ESD_FINDER_DEBUG_HEADERS === '1') {
-    console.log(`[diag-4a] resolveAndValidateSheet: file="${filePath}" fileName="${fileName}" role="${schema.role}"`);
-    console.log('[diag-4a]   required column list:', JSON.stringify(schema.requiredHeaders));
+    log.debug({ filePath, fileName, role: schema.role, requiredHeaders: schema.requiredHeaders }, '[diag-4a] resolveAndValidateSheet');
     for (const sheet of workbook.worksheets) {
       const rawHeaders = readRawHeaderRow(sheet);
-      console.log(`[diag-4a]   sheet "${sheet.name}" row 1 raw headers:`, JSON.stringify(rawHeaders));
+      log.debug({ sheetName: sheet.name, rawHeaders }, '[diag-4a] sheet row 1 raw headers');
       for (let r = 2; r <= 3; r++) {
         const rowValues: unknown[] = [];
         sheet.getRow(r).eachCell({ includeEmpty: true }, (cell) => rowValues.push(cell.value));
-        console.log(`[diag-4a]     row ${r} raw values:`, JSON.stringify(rowValues));
+        log.debug({ sheetName: sheet.name, row: r, rowValues }, '[diag-4a] row raw values');
       }
     }
   }
@@ -165,14 +167,14 @@ async function resolveAndValidateSheet(
 
   if (process.env.ESD_FINDER_DEBUG_HEADERS === '1') {
     if (contentMatches.length === 0) {
-      console.log(`[diag-4a]   no sheet matched role "${schema.role}" by content.`);
+      log.debug({ role: schema.role }, '[diag-4a] no sheet matched role by content');
     } else {
-      console.log(
-        `[diag-4a]   sheet(s) matching role "${schema.role}" by content:`,
-        JSON.stringify(contentMatches.map((s) => s.name)),
+      log.debug(
+        { role: schema.role, matchingSheetNames: contentMatches.map((s) => s.name) },
+        '[diag-4a] sheet(s) matching role by content',
       );
       if (contentMatches.length > 1) {
-        console.log('[diag-4a]   NOTE: more than one sheet matches — taking the first. Worth a closer look if this is unexpected.');
+        log.debug('[diag-4a] NOTE: more than one sheet matches — taking the first. Worth a closer look if this is unexpected.');
       }
     }
   }
@@ -200,9 +202,10 @@ async function resolveAndValidateSheet(
   const missing = schema.requiredHeaders.filter((h) => !aliased.has(h));
 
   if (process.env.ESD_FINDER_DEBUG_HEADERS === '1') {
-    console.log(`[diag-4a]   falling back to first sheet "${fallback.name}" (no content match, no other-schema match)`);
-    console.log('[diag-4a]   headers found on fallback sheet (aliased):', JSON.stringify([...aliased]));
-    console.log('[diag-4a]   required columns NOT found:', JSON.stringify(missing));
+    log.debug(
+      { fallbackSheetName: fallback.name, aliasedHeaders: [...aliased], missingHeaders: missing },
+      '[diag-4a] falling back to first sheet (no content match, no other-schema match)',
+    );
   }
 
   if (missing.length > 0) {

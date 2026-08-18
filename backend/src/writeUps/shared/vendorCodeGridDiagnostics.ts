@@ -1,6 +1,9 @@
 import type { Page } from 'playwright';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { createLogger } from '../../logging/logger.js';
+
+const log = createLogger('writeup');
 
 const DIAGNOSTICS_DIR = path.join('data', 'diagnostics');
 const MAX_GRID_TEXT_LENGTH = 5000;
@@ -73,13 +76,12 @@ export async function captureVendorCodeGridDiagnostics(page: Page, vendorCode: s
     const textPath = path.join(DIAGNOSTICS_DIR, `${basename}.txt`);
     await fs.writeFile(textPath, report, 'utf-8');
 
-    console.warn(`[grid-wait-diagnostics] vendor "${vendorCode}" — evidence saved: ${screenshotPath}, ${htmlPath}, ${textPath}`);
-    console.warn(report);
+    log.warn({ vendorCode, screenshotPath, htmlPath, textPath, report }, '[grid-wait-diagnostics] evidence saved');
     return { screenshotPath, htmlPath };
   } catch (err) {
-    console.warn(
-      `[grid-wait-diagnostics] Failed to capture evidence for vendor "${vendorCode}" (non-fatal, continuing): ` +
-        (err instanceof Error ? err.message : String(err)),
+    log.warn(
+      { vendorCode, errorMessage: err instanceof Error ? err.message : String(err) },
+      '[grid-wait-diagnostics] Failed to capture evidence (non-fatal, continuing)',
     );
     return null;
   }

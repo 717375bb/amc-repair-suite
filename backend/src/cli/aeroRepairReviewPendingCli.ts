@@ -11,6 +11,9 @@ import type { MxiClient } from '../mxiWriter/mxiClient.js';
 import { createReadyMxiClient } from '../mxiWriter/cliMxiClient.js';
 import { readOutboundShipmentDockState } from '../writeUps/aeroRepair/issueOrder.js';
 import type { AeroRepairWriteUpFields } from '../writeUps/aeroRepair/writeUp.js';
+import { createLogger } from '../logging/logger.js';
+
+const log = createLogger('cli');
 
 /**
  * Lists every real order awaiting the second phase of the two-phase review
@@ -55,9 +58,9 @@ async function main(): Promise<void> {
     const pending = getPendingIssueOrders(db);
 
     if (pending.length === 0) {
-      console.log('No orders pending issue review.');
+      log.info('No orders pending issue review.');
     } else {
-      console.log(`${pending.length} order(s) pending issue review:\n`);
+      log.info({ count: pending.length }, 'Order(s) pending issue review');
 
       for (const row of pending) {
         let fields: AeroRepairWriteUpFields | null = null;
@@ -67,42 +70,50 @@ async function main(): Promise<void> {
           fields = null;
         }
 
-        console.log(`Order Number:        ${row.orderNumber}`);
-        console.log(`Part Number:         ${row.partNumber}`);
-        console.log(`Target Environment:  ${row.targetEnv}`);
-        console.log(`Routing Destination: ${row.routedLocation ?? '(unknown)'}`);
-        console.log(`Selected Vendor:     ${fields?.routing.status === 'routed' ? fields.routing.location : '(unknown)'}`);
-        console.log(`Charge To Account:   ${fields?.chargeToAccountBefore ?? '?'} -> ${fields?.chargeToAccountAfter ?? '?'}`);
-        console.log(`Return To Location:  ${fields?.returnToLocation ?? '(unknown)'}`);
-        console.log(`Notes Text:`);
-        console.log((fields?.notesText ?? '(unknown)').split('\n').map((l) => `    ${l}`).join('\n'));
-        console.log(`Filled at:           ${row.createdAt}`);
-        console.log('---');
         const envFlag = row.targetEnv === 'production' ? ' --env production' : '';
-        console.log(`  npm run aero-repair:approve-issue -- ${row.orderNumber}${envFlag}`);
-        console.log(`  npm run aero-repair:reject-issue -- ${row.orderNumber} "<reason>"${envFlag}`);
-        console.log('');
+        log.info(
+          {
+            orderNumber: row.orderNumber,
+            partNumber: row.partNumber,
+            targetEnv: row.targetEnv,
+            routedLocation: row.routedLocation ?? '(unknown)',
+            selectedVendor: fields?.routing.status === 'routed' ? fields.routing.location : '(unknown)',
+            chargeToAccountBefore: fields?.chargeToAccountBefore ?? '?',
+            chargeToAccountAfter: fields?.chargeToAccountAfter ?? '?',
+            returnToLocation: fields?.returnToLocation ?? '(unknown)',
+            notesText: fields?.notesText ?? '(unknown)',
+            filledAt: row.createdAt,
+            approveCommand: `npm run aero-repair:approve-issue -- ${row.orderNumber}${envFlag}`,
+            rejectCommand: `npm run aero-repair:reject-issue -- ${row.orderNumber} "<reason>"${envFlag}`,
+          },
+          'Pending issue review item',
+        );
       }
     }
 
     const dbAwaitingDock = getOrdersAwaitingDockMove(db);
     const genuinelyAwaiting = await liveCheckAwaitingDock(db, dbAwaitingDock);
 
-    console.log('');
     if (genuinelyAwaiting.length === 0) {
-      console.log('No issued orders awaiting Move to Dock (live-confirmed).');
+      log.info('No issued orders awaiting Move to Dock (live-confirmed).');
     } else {
-      console.log(`${genuinelyAwaiting.length} issued order(s) NOT YET moved to dock — not actually complete:\n`);
+      log.info(
+        { count: genuinelyAwaiting.length },
+        'Issued order(s) NOT YET moved to dock — not actually complete',
+      );
       for (const { row, liveCheckFailed } of genuinelyAwaiting) {
-        console.log(`Order Number:        ${row.orderNumber}`);
-        console.log(`Target Environment:  ${row.targetEnv}`);
-        console.log(`Issued at:           ${row.createdAt}`);
-        if (liveCheckFailed) {
-          console.log(`WARNING:             live re-check failed — this is the last-known DB state only, not freshly confirmed.`);
-        }
-        console.log('---');
-        console.log(`  npm run aero-repair:move-to-dock -- ${row.orderNumber}${row.targetEnv === 'production' ? ' --env production' : ''}`);
-        console.log('');
+        log.info(
+          {
+            orderNumber: row.orderNumber,
+            targetEnv: row.targetEnv,
+            issuedAt: row.createdAt,
+            liveCheckFailed,
+            moveToDockCommand: `npm run aero-repair:move-to-dock -- ${row.orderNumber}${row.targetEnv === 'production' ? ' --env production' : ''}`,
+          },
+          liveCheckFailed
+            ? 'Issued order awaiting Move to Dock — live re-check failed, this is the last-known DB state only, not freshly confirmed'
+            : 'Issued order awaiting Move to Dock',
+        );
       }
     }
   } finally {

@@ -1,4 +1,7 @@
 import type { Page } from 'playwright';
+import { createLogger } from '../../logging/logger.js';
+
+const log = createLogger('writeup');
 
 const CLICK_DELAY_MS = 750;
 const GRID_WAIT_TIMEOUT_MS = 30_000;
@@ -74,7 +77,7 @@ export async function waitForUnassignedTasksSectionResolved(page: Page): Promise
         `"task present" or "task absent" result. Underlying error: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
-  console.log(`[grid-wait] unassigned-tasks section resolved in ${Date.now() - start}ms`);
+  log.debug({ durationMs: Date.now() - start }, '[grid-wait] unassigned-tasks section resolved');
 }
 
 function normalizeWhitespace(value: string): string {

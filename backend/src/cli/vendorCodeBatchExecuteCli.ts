@@ -8,6 +8,9 @@ import { runVendorCodeWriteUp } from '../writeUps/shared/vendorCodeWriteUp.js';
 import { getVendorConfig } from '../writeUps/shared/vendorRegistry.js';
 import { logVendorCodeOutcome } from '../writeUps/shared/vendorCodeOutcomeLogging.js';
 import { loadVendorCodeEligibleLines, type VendorCodeEligibleLineTarget } from '../writeUps/shared/vendorCodeEligibleLinesFile.js';
+import { createLogger } from '../logging/logger.js';
+
+const log = createLogger('cli');
 
 /**
  * Processes every line saved by vendor:batch-discovery (or explicit
@@ -45,41 +48,45 @@ async function main(): Promise<void> {
   let targets: VendorCodeEligibleLineTarget[];
   if (explicitTargets.length > 0) {
     targets = explicitTargets;
-    console.log(`Using ${targets.length} explicitly-specified target(s) (ignoring any saved discovery file).`);
+    log.info({ count: targets.length }, 'Using explicitly-specified target(s) (ignoring any saved discovery file)');
   } else {
     const file = await loadVendorCodeEligibleLines();
     if (!file) {
-      console.error(
-        'No explicit targets given and no data/vendor-code-eligible-lines.json found.\n' +
-          `Run \`npm run vendor:batch-discovery -- --env ${env}\` first, or pass targets explicitly:\n` +
-          `  npm run vendor:batch-execute -- <vendorCode>:<serialNumber> [more...] --env ${env}`,
+      log.error(
+        { env },
+        'No explicit targets given and no data/vendor-code-eligible-lines.json found. ' +
+          'Run `npm run vendor:batch-discovery -- --env <env>` first, or pass targets explicitly: ' +
+          '`npm run vendor:batch-execute -- <vendorCode>:<serialNumber> [more...] --env <env>`.',
       );
       process.exitCode = 1;
       return;
     }
     if (file.env !== env) {
-      console.error(
-        `Refusing to proceed: data/vendor-code-eligible-lines.json was generated for env "${file.env}" but this run ` +
-          `targets "${env}". Re-run vendor:batch-discovery with --env ${env} first, or pass targets explicitly.`,
+      log.error(
+        { fileEnv: file.env, requestedEnv: env },
+        'Refusing to proceed: data/vendor-code-eligible-lines.json was generated for a different env than this run targets. Re-run vendor:batch-discovery with the requested env first, or pass targets explicitly.',
       );
       process.exitCode = 1;
       return;
     }
     targets = file.lines;
     const ageMinutes = Math.round((Date.now() - new Date(file.generatedAt).getTime()) / 60000);
-    console.log(
-      `Loaded ${targets.length} eligible line(s) from data/vendor-code-eligible-lines.json ` +
-        `(generated ${ageMinutes} minute(s) ago, at ${file.generatedAt}).`,
+    log.info(
+      { count: targets.length, ageMinutes, generatedAt: file.generatedAt },
+      'Loaded eligible line(s) from data/vendor-code-eligible-lines.json',
     );
   }
 
   if (targets.length === 0) {
-    console.log('0 target(s) to process. Nothing to do.');
+    log.info('0 target(s) to process. Nothing to do.');
     return;
   }
 
-  console.log(`Target MXI environment: ${env.toUpperCase()}`);
-  console.log(`Processing ${targets.length} line(s): ${targets.map((t) => `[${t.vendorCode}] ${t.serialNumber}`).join(', ')}`);
+  log.info({ env: env.toUpperCase() }, 'Target MXI environment');
+  log.info(
+    { count: targets.length, lines: targets.map((t) => `[${t.vendorCode}] ${t.serialNumber}`) },
+    'Processing line(s)',
+  );
 
   const db = openDb(path.join('data', 'audit.db'));
   let client: MxiClient | undefined;
@@ -90,7 +97,7 @@ async function main(): Promise<void> {
     client = await createReadyMxiClient(env);
 
     for (const target of targets) {
-      console.log(`\n--- [${target.vendorCode}] SN ${target.serialNumber} ---`);
+      log.info({ vendorCode: target.vendorCode, serialNumber: target.serialNumber }, 'Processing line');
       const config = getVendorConfig(target.vendorCode);
       const outcome = await runVendorCodeWriteUp(client, config, target.serialNumber);
       const { success } = logVendorCodeOutcome(db, config, env, outcome);
@@ -98,10 +105,16 @@ async function main(): Promise<void> {
       else exceptionCount++;
     }
 
-    console.log(`\nFinished processing all ${targets.length} line(s): ${successCount} succeeded, ${exceptionCount} exception(s)/error(s) — see data/audit.db (write_up_actions, vendor != 'aeroRepair') for full detail on each.`);
+    log.info(
+      { total: targets.length, successCount, exceptionCount },
+      "Finished processing all line(s) — see data/audit.db (write_up_actions, vendor != 'aeroRepair') for full detail on each",
+    );
   } catch (err) {
-    console.error('Batch execute halted (likely session/login loss):', err instanceof Error ? err.message : String(err));
-    console.log('Every line processed before the halt was already logged individually — nothing lost.');
+    log.error(
+      { errorMessage: err instanceof Error ? err.message : String(err) },
+      'Batch execute halted (likely session/login loss)',
+    );
+    log.info('Every line processed before the halt was already logged individually — nothing lost.');
     process.exitCode = 1;
   } finally {
     await client?.shutdown();

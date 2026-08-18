@@ -5,6 +5,9 @@ import type { MxiClient } from '../mxiWriter/mxiClient.js';
 import { createReadyMxiClient } from '../mxiWriter/cliMxiClient.js';
 import { parseEnvFlag } from '../mxiWriter/parseEnvFlag.js';
 import { readOrderRealState } from '../writeUps/aeroRepair/issueOrder.js';
+import { createLogger } from '../logging/logger.js';
+
+const log = createLogger('cli');
 
 /**
  * Reject/skip path for the two-phase review gate — same shape as the ESD
@@ -31,7 +34,7 @@ async function main(): Promise<void> {
   const reviewedBy = rest[1] ?? null;
 
   if (!orderNumber) {
-    console.error('Usage: npm run aero-repair:reject-issue -- <orderNumber> [reviewedBy] [--env production]');
+    log.error('Usage: npm run aero-repair:reject-issue -- <orderNumber> [reviewedBy] [--env production]');
     process.exitCode = 1;
     return;
   }
@@ -42,8 +45,9 @@ async function main(): Promise<void> {
   try {
     const actionable = getActionableWriteUpAction(db, orderNumber);
     if (!actionable) {
-      console.error(
-        `Order ${orderNumber} has no actionable 'pending_issue' write_up_actions row — nothing to reject. Run npm run aero-repair:review-pending to see what's actually pending.`,
+      log.error(
+        { orderNumber },
+        "Order has no actionable 'pending_issue' write_up_actions row — nothing to reject. Run npm run aero-repair:review-pending to see what's actually pending.",
       );
       process.exitCode = 1;
       return;
@@ -58,17 +62,15 @@ async function main(): Promise<void> {
     // business touching. Refuse rather than guess which environment was
     // meant.
     if (actionable.targetEnv !== env) {
-      console.error(
-        `Order ${orderNumber} was recorded under target_env "${actionable.targetEnv}", but --env "${env}" was requested. ` +
-          `Order numbers are not unique across environments — refusing to act against the wrong one. ` +
-          `Re-run with --env ${actionable.targetEnv} if that's what you meant.`,
+      log.error(
+        { orderNumber, recordedTargetEnv: actionable.targetEnv, requestedEnv: env },
+        'Order was recorded under a different target_env than requested — Order numbers are not unique across environments — refusing to act against the wrong one.',
       );
       process.exitCode = 1;
       return;
     }
 
-    console.log(`Target MXI environment: ${env.toUpperCase()}`);
-    console.log(`Checking order ${orderNumber}'s real current state before rejecting...`);
+    log.info({ env: env.toUpperCase(), orderNumber }, "Target MXI environment — checking order's real current state before rejecting...");
 
     client = await createReadyMxiClient(env);
     const page = await client.getAuthenticatedPage();
@@ -77,7 +79,7 @@ async function main(): Promise<void> {
       orderNumber,
       client.todoListUrl,
     );
-    console.log(`Real Order Status: ${realStatus ?? '(not found)'}, Issued: ${realIssuedCount ?? '(not found)'}`);
+    log.info({ realStatus: realStatus ?? null, realIssuedCount: realIssuedCount ?? null }, 'Real Order Status');
 
     const alreadyIssued = realStatus === 'ISSUED';
 
@@ -92,11 +94,12 @@ async function main(): Promise<void> {
     });
 
     if (alreadyIssued) {
-      console.warn(
-        `Order ${orderNumber} is ALREADY ISSUED — this reject decision had no effect on that. Recorded as 'rejected_but_already_issued', not plain 'rejected'.`,
+      log.warn(
+        { orderNumber },
+        "Order is ALREADY ISSUED — this reject decision had no effect on that. Recorded as 'rejected_but_already_issued', not plain 'rejected'.",
       );
     } else {
-      console.log(`Order ${orderNumber} rejected — genuinely still pending, never touched by an issue action.`);
+      log.info({ orderNumber }, 'Order rejected — genuinely still pending, never touched by an issue action.');
     }
   } finally {
     await client?.shutdown();

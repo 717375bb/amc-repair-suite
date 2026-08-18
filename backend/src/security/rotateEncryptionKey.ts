@@ -5,6 +5,9 @@ import Database from 'better-sqlite3';
 import { openAuthDb } from '../db/authDb.js';
 import { decryptSecret, encryptSecret, getCiphertextVersion, parseEncryptionKeyHex } from '../auth/crypto.js';
 import { getSecretProvider } from './secretProvider.js';
+import { createLogger } from '../logging/logger.js';
+
+const log = createLogger('security');
 
 /**
  * CLAUDE_CODE_PROMPT (#6-hardening, key-rotation, Part B) — offline,
@@ -170,16 +173,17 @@ function printSummary(reports: RowReport[], dryRun: boolean): void {
   const alreadyOnNew = reports.filter((r) => r.outcome === 'already_on_new_key');
   const failed = reports.filter((r) => r.outcome === 'failed_both_keys');
 
-  console.log(`\n=== ${dryRun ? 'DRY RUN' : 'ROTATION'} SUMMARY ===`);
-  console.log(`Rows processed: ${reports.length}`);
-  console.log(`${dryRun ? 'Would rewrap' : 'Rewrapped'}: ${rewrapped.length}`);
-  console.log(`Already on new key (skipped): ${alreadyOnNew.length}`);
-  console.log(`Failed both keys: ${failed.length}`);
-  if (failed.length > 0) {
-    console.log('\nFailed rows (id, username only — nothing about their stored credential was exposed):');
-    for (const f of failed) console.log(`  id=${f.id} username="${f.username}"`);
-  }
-  console.log(dryRun ? '\nNo changes made — this was a dry run.' : '\nDone.');
+  log.info(
+    {
+      dryRun,
+      rowsProcessed: reports.length,
+      rewrappedCount: rewrapped.length,
+      alreadyOnNewKeyCount: alreadyOnNew.length,
+      failedCount: failed.length,
+      failedRows: failed.map((f) => ({ id: f.id, username: f.username })),
+    },
+    `${dryRun ? 'DRY RUN' : 'ROTATION'} SUMMARY`,
+  );
 }
 
 async function main(): Promise<void> {
@@ -203,12 +207,14 @@ async function main(): Promise<void> {
     throw new Error(`No auth database found at "${dbPath}".`);
   }
 
-  console.log(`Target auth database: ${dbPath}`);
-  console.log(dryRun ? 'Mode: DRY RUN — read-only, no backup, no writes.' : 'Mode: REAL RUN — will back up, then write.');
+  log.info(
+    { dbPath, mode: dryRun ? 'DRY RUN — read-only, no backup, no writes' : 'REAL RUN — will back up, then write' },
+    'Target auth database',
+  );
 
   if (!dryRun) {
     const backupPath = await backupAuthDb(dbPath);
-    console.log(`Backed up auth.db to: ${backupPath}`);
+    log.info({ backupPath }, 'Backed up auth.db');
   }
 
   const db = openAuthDb(dbPath);
@@ -226,6 +232,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error('Rotation failed:', err instanceof Error ? err.message : String(err));
+  log.error({ errorMessage: err instanceof Error ? err.message : String(err) }, 'Rotation failed');
   process.exitCode = 1;
 });

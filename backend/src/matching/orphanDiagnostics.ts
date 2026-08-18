@@ -1,4 +1,7 @@
 import type { CraOorRow, MatchedOrder, VendorOorRow } from '../types.js';
+import { createLogger } from '../logging/logger.js';
+
+const log = createLogger('matching');
 
 export interface OrphanDiagnostics {
   vendorOorUniqueVendors: number;
@@ -102,38 +105,34 @@ export function computeOrphanDiagnostics(
 }
 
 export function printOrphanDiagnostics(diagnostics: OrphanDiagnostics): void {
-  console.log('');
-  console.log('--- Orphan-rate diagnostic ---');
-  console.log(`Unique vendors in Vendor OOR: ${diagnostics.vendorOorUniqueVendors}`);
-  console.log(`Unique vendors in CRA OOR: ${diagnostics.craOorUniqueVendors}`);
-  console.log(`Orphaned CRA-only rows: ${diagnostics.orphanedCraRows}`);
-  console.log(
+  const hypothesisConfirmed = diagnostics.likelyDuplicateOrders.length === 0;
+  const lines = [
+    '--- Orphan-rate diagnostic ---',
+    `Unique vendors in Vendor OOR: ${diagnostics.vendorOorUniqueVendors}`,
+    `Unique vendors in CRA OOR: ${diagnostics.craOorUniqueVendors}`,
+    `Orphaned CRA-only rows: ${diagnostics.orphanedCraRows}`,
     `  - from vendors absent from Vendor OOR entirely (expected): ${diagnostics.orphanedFromAbsentVendor}`,
-  );
-  console.log(
     `  - from vendors present elsewhere in Vendor OOR (not itself suspicious — see below): ${diagnostics.orphanedFromPresentVendor}`,
-  );
-  console.log(
     `  - of those, matched by Part Number + Serial Number to a DIFFERENT order number for the same vendor ` +
       `(the actual bug signal): ${diagnostics.likelyDuplicateOrders.length}`,
-  );
+  ];
 
-  if (diagnostics.likelyDuplicateOrders.length === 0) {
-    console.log(
+  if (hypothesisConfirmed) {
+    lines.push(
       'Hypothesis CONFIRMED: no orphaned CRA row shares a Part Number + Serial Number with a differently-numbered ' +
         'Vendor OOR row. The high orphan rate reflects reporting coverage (vendors with more open orders than ' +
         'replies this cycle), not an Order Number matching bug.',
     );
   } else {
-    console.log(
+    lines.push(
       `Hypothesis NOT confirmed: ${diagnostics.likelyDuplicateOrders.length} orphaned row(s) share an exact ` +
         'Part Number + Serial Number with a Vendor OOR row filed under a different Order Number for the same ' +
         'vendor — that can only be the same physical part. Investigate before trusting the match rate:',
     );
     for (const dup of diagnostics.likelyDuplicateOrders.slice(0, 20)) {
-      console.log(
-        `  CRA "${dup.craOrderNumber}" vs Vendor OOR "${dup.vendorOrderNumber}" (${dup.vendorName})`,
-      );
+      lines.push(`  CRA "${dup.craOrderNumber}" vs Vendor OOR "${dup.vendorOrderNumber}" (${dup.vendorName})`);
     }
   }
+
+  log.info({ diagnostics, hypothesisConfirmed }, lines.join('\n'));
 }

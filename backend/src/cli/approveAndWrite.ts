@@ -8,6 +8,9 @@ import { navigateToOrder, readIssuedCount } from '../mxiWriter/selectors.js';
 import { writeEsdAndNotes } from '../mxiWriter/writeEsdAndNotes.js';
 import { writeToolOutputFlags, type WriteOutcomeByOrder } from '../output/writeToolOutputFlags.js';
 import type { InferenceRecord } from '../types.js';
+import { createLogger } from '../logging/logger.js';
+
+const log = createLogger('cli');
 
 /**
  * The real, permanent "approve these specific orders for real" tool —
@@ -127,7 +130,7 @@ async function main(): Promise<void> {
   const action = rest[2];
 
   if (!runId || !toolFilePath || (action !== 'approve' && action !== 'reject' && action !== 'refresh')) {
-    console.error(
+    log.error(
       'Usage: tsx approveAndWrite.ts <runId> <toolFilePath> approve|reject <orderNumber1,orderNumber2,...> <approvedBy> [--env production]\n' +
         '       tsx approveAndWrite.ts <runId> <toolFilePath> refresh   (re-writes the tool-table from the run\'s existing mxi_writes history only — no new approve/reject action, no MXI client created; use this to retry the tool-table write-back after a file-lock failure without re-touching MXI)',
     );
@@ -136,14 +139,14 @@ async function main(): Promise<void> {
   }
 
   if (action === 'refresh') {
-    console.log(`Refreshing tool-table for run ${runId} from existing history only — no new MXI action taken.`);
+    log.info({ runId }, 'Refreshing tool-table from existing history only — no new MXI action taken.');
     const refreshDb = new Database('data/audit.db');
     const allRows = refreshDb.prepare('SELECT * FROM esd_inferences WHERE run_id = ?').all(runId) as RawEsdInferenceRow[];
     const records = allRows.map(toInferenceRecord);
     const outcomes = loadHistoricalOutcomes(refreshDb, runId);
     refreshDb.close();
     const writeBackResult = await writeToolOutputFlags(toolFilePath, records, outcomes);
-    console.log(writeBackResult.summary);
+    log.info({ summary: writeBackResult.summary }, 'Tool-table write-back summary');
     return;
   }
 
@@ -151,7 +154,7 @@ async function main(): Promise<void> {
   const approvedBy = rest[4] ?? 'manual-approval';
 
   if (!orderNumbersArg) {
-    console.error(
+    log.error(
       'Usage: tsx approveAndWrite.ts <runId> <toolFilePath> approve|reject <orderNumber1,orderNumber2,...>|all <approvedBy> [--env production] [--confirm]',
     );
     process.exitCode = 1;
@@ -169,16 +172,19 @@ async function main(): Promise<void> {
     orderNumbers = allOkRows.map((r) => r.order_number).filter((o) => !(o in existingOutcomes));
 
     if (orderNumbers.length === 0) {
-      console.log(`No pending flag='ok' orders remain for run ${runId} — everything already has a recorded outcome.`);
+      log.info({ runId }, "No pending flag='ok' orders remain — everything already has a recorded outcome.");
       db.close();
       return;
     }
 
-    console.log(`"all" resolved to ${orderNumbers.length} order(s) with no existing outcome yet for run ${runId}:`);
-    console.log(`  ${orderNumbers.join(', ')}`);
+    log.info({ runId, orderCount: orderNumbers.length }, '"all" resolved to order(s) with no existing outcome yet');
+    log.info({ orderNumbers }, 'Resolved order numbers');
 
     if (!confirmed) {
-      console.log(`\nNothing has been written. Re-run with --confirm added to actually ${action} all ${orderNumbers.length} of these.`);
+      log.info(
+        { action, orderCount: orderNumbers.length },
+        'Nothing has been written. Re-run with --confirm added to actually act on all of these.',
+      );
       db.close();
       return;
     }
@@ -187,7 +193,7 @@ async function main(): Promise<void> {
   }
 
   if (orderNumbers.length === 0) {
-    console.error(
+    log.error(
       'Usage: tsx approveAndWrite.ts <runId> <toolFilePath> approve|reject <orderNumber1,orderNumber2,...>|all <approvedBy> [--env production] [--confirm]',
     );
     db.close();
@@ -196,7 +202,7 @@ async function main(): Promise<void> {
   }
 
   if (action === 'approve') {
-    console.log(`Target MXI environment: ${env.toUpperCase()}`);
+    log.info({ env: env.toUpperCase() }, 'Target MXI environment');
   }
 
   const placeholders = orderNumbers.map(() => '?').join(',');
@@ -208,8 +214,9 @@ async function main(): Promise<void> {
     .all(runId, ...orderNumbers) as Array<{ id: number; order_number: string; inferred_esd: string; vendor_notes: string | null }>;
 
   if (rows.length !== orderNumbers.length) {
-    console.error(
-      `Expected ${orderNumbers.length} matching flag='ok' rows for run ${runId} but found ${rows.length}. Aborting before touching anything.`,
+    log.error(
+      { runId, expectedCount: orderNumbers.length, foundCount: rows.length },
+      "Expected matching flag='ok' rows count mismatch — aborting before touching anything.",
     );
     db.close();
     process.exitCode = 1;
@@ -231,7 +238,7 @@ async function main(): Promise<void> {
         errorMessage: null,
         approvedBy,
       });
-      console.log(`${row.order_number}: rejected (no MXI write attempted).`);
+      log.info({ orderNumber: row.order_number }, 'Rejected (no MXI write attempted).');
     }
   } else {
     const client = await createReadyMxiClient(env);
@@ -243,7 +250,7 @@ async function main(): Promise<void> {
         const expectedEsd = toMxiDateFormat(row.inferred_esd);
         const noteText = assembleNoteText(row.vendor_notes) ?? undefined;
 
-        console.log(`\n=== ${orderNumber} ===`);
+        log.info({ orderNumber }, 'Processing order');
 
         // Order numbers are confirmed NOT unique across environments (found
         // live during aeroRepair testing). Real mxi_writes history shows
@@ -254,9 +261,9 @@ async function main(): Promise<void> {
         const priorEnvs = getPriorMxiWriteEnvironments(db, orderNumber);
         const differingEnvs = priorEnvs.filter((e) => e !== env);
         if (differingEnvs.length > 0) {
-          console.warn(
-            `  [cross-environment] ${orderNumber} has prior mxi_writes history under ${differingEnvs.join(', ')}, ` +
-              `but this run is using "${env}". Confirm this is the same real order intentionally handled in both, not a coincidental collision.`,
+          log.warn(
+            { orderNumber, priorEnvs: differingEnvs, requestedEnv: env },
+            'Cross-environment: order has prior mxi_writes history under a different environment — confirm this is the same real order intentionally handled in both, not a coincidental collision.',
           );
         }
 
@@ -276,8 +283,8 @@ async function main(): Promise<void> {
             /MXI client was never initialized|Re-authentication failed/i.test(result.errorMessage ?? '');
 
           if (looksLikeSessionLoss) {
-            console.error(`SESSION/LOGIN LOSS on ${orderNumber}: ${result.errorMessage}`);
-            console.error('Halting immediately, per the standing rule.');
+            log.error({ orderNumber, errorMessage: result.errorMessage }, 'SESSION/LOGIN LOSS');
+            log.error('Halting immediately, per the standing rule.');
             insertMxiWrite(db, {
               esdInferenceId: row.id,
               orderNumber,
@@ -298,7 +305,7 @@ async function main(): Promise<void> {
               .catch(() => ''),
           );
 
-          console.log(`FAILED${notFound ? ' (order not found in stage MXI)' : ''}: ${result.errorMessage}`);
+          log.info({ orderNumber, notFound, errorMessage: result.errorMessage }, 'FAILED');
           insertMxiWrite(db, {
             esdInferenceId: row.id,
             orderNumber,
@@ -315,8 +322,9 @@ async function main(): Promise<void> {
         const issuedAfter = await navigateToOrder(page, orderNumber, client.todoListUrl)
           .then(() => readIssuedCount(page))
           .catch(() => null);
-        console.log(
-          `SUCCESS — ESD${noteText ? ' and note' : ''} independently verified by writeEsdAndNotes itself. Issued: ${issuedBefore} -> ${issuedAfter}. Duration: ${durationMs}ms.`,
+        log.info(
+          { orderNumber, includesNote: !!noteText, issuedBefore, issuedAfter, durationMs },
+          'SUCCESS — ESD independently verified by writeEsdAndNotes itself.',
         );
         insertMxiWrite(db, {
           esdInferenceId: row.id,
@@ -334,17 +342,17 @@ async function main(): Promise<void> {
     }
   }
 
-  console.log('\n=== Refreshing tool-table with the full real history for this run ===');
+  log.info('Refreshing tool-table with the full real history for this run');
   const allRows = db.prepare('SELECT * FROM esd_inferences WHERE run_id = ?').all(runId) as RawEsdInferenceRow[];
   const records = allRows.map(toInferenceRecord);
   const outcomes = loadHistoricalOutcomes(db, runId);
   db.close();
 
   const writeBackResult = await writeToolOutputFlags(toolFilePath, records, outcomes);
-  console.log(writeBackResult.summary);
+  log.info({ summary: writeBackResult.summary }, 'Tool-table write-back summary');
 }
 
 main().catch((err) => {
-  console.error('Failed:', err instanceof Error ? err.message : String(err));
+  log.error({ errorMessage: err instanceof Error ? err.message : String(err) }, 'Failed');
   process.exitCode = 1;
 });

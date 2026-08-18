@@ -1,6 +1,9 @@
 import type { Page } from 'playwright';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { createLogger } from '../../logging/logger.js';
+
+const log = createLogger('writeup');
 
 /**
  * Instrumentation-only, added specifically because a real "consistent
@@ -50,11 +53,11 @@ export async function captureEmptyReadEvidence(
     ].join('\n');
     await fs.writeFile(textPath, report, 'utf-8');
 
-    console.warn(`[empty-read-capture] "${label}" — evidence saved: ${screenshotPath}, ${textPath}`);
+    log.warn({ label, screenshotPath, textPath }, '[empty-read-capture] evidence saved');
   } catch (err) {
-    console.warn(
-      `[empty-read-capture] Failed to capture evidence for "${label}" (non-fatal, continuing): ` +
-        (err instanceof Error ? err.message : String(err)),
+    log.warn(
+      { label, errorMessage: err instanceof Error ? err.message : String(err) },
+      '[empty-read-capture] Failed to capture evidence (non-fatal, continuing)',
     );
   }
 }
@@ -136,11 +139,11 @@ export async function captureVendorBidDiagnostics(
     ].join('\n');
 
     await fs.writeFile(textPath, report, 'utf-8');
-    console.warn(`[vendor-bid-diagnostics] evidence saved: ${screenshotPath}, ${textPath}`);
+    log.warn({ screenshotPath, textPath }, '[vendor-bid-diagnostics] evidence saved');
   } catch (err) {
-    console.warn(
-      `[vendor-bid-diagnostics] Failed to capture evidence (non-fatal, continuing): ` +
-        (err instanceof Error ? err.message : String(err)),
+    log.warn(
+      { errorMessage: err instanceof Error ? err.message : String(err) },
+      '[vendor-bid-diagnostics] Failed to capture evidence (non-fatal, continuing)',
     );
   }
 }
@@ -183,11 +186,11 @@ export async function captureUnassignedTaskPositiveDetection(
     ].join('\n');
     await fs.writeFile(textPath, report, 'utf-8');
 
-    console.warn(`[unassigned-task-positive-detection] evidence saved: ${screenshotPath}, ${textPath}, ${htmlPath}`);
+    log.warn({ screenshotPath, textPath, htmlPath }, '[unassigned-task-positive-detection] evidence saved');
   } catch (err) {
-    console.warn(
-      `[unassigned-task-positive-detection] Failed to capture evidence (non-fatal, continuing): ` +
-        (err instanceof Error ? err.message : String(err)),
+    log.warn(
+      { errorMessage: err instanceof Error ? err.message : String(err) },
+      '[unassigned-task-positive-detection] Failed to capture evidence (non-fatal, continuing)',
     );
   }
 }

@@ -12,6 +12,9 @@ import { logVendorCodeOutcome } from '../../writeUps/shared/vendorCodeOutcomeLog
 import { AERO_REPAIR_VENDOR_ID, listVendors } from '../vendors.js';
 import { aeroRepairResultToLogEvent, quarantinedLineToLogEvent, vendorCodeOutcomeToLogEvent, type RunLogEvent } from '../runLog.js';
 import { watchStdinForCancellation } from './cancellationWatcher.js';
+import { createLogger } from '../../logging/logger.js';
+
+const log = createLogger('api');
 
 /**
  * The one file in this feature with a real import path to write/submit
@@ -149,16 +152,22 @@ async function main(): Promise<void> {
     // jobManager.ts's applyExecuteEnvelope) that only this pass's
     // terminal event resolves.
     if (quarantined.length > 0 && !cancelSignal.aborted) {
-      console.error(`[second-pass] ${quarantined.length} line(s) quarantined — settling ${SECOND_PASS_SETTLE_DELAY_MS / 1000}s before automatic retry.`);
+      log.error(
+        { quarantinedCount: quarantined.length, settleDelayMs: SECOND_PASS_SETTLE_DELAY_MS },
+        '[second-pass] line(s) quarantined — settling before automatic retry',
+      );
       await sleep(SECOND_PASS_SETTLE_DELAY_MS, cancelSignal);
 
       if (!cancelSignal.aborted) {
-        console.error('[second-pass] re-running discovery fresh before reprocessing quarantined line(s)...');
+        log.error('[second-pass] re-running discovery fresh before reprocessing quarantined line(s)...');
         try {
           const freshLines = await discoverEligibleLines(client);
-          console.error(`[second-pass] fresh discovery found ${freshLines.length} real line(s) across all Aero Repair part numbers.`);
+          log.error({ freshLineCount: freshLines.length }, '[second-pass] fresh discovery found real line(s) across all Aero Repair part numbers');
         } catch (err) {
-          console.error(`[second-pass] fresh discovery failed (${err instanceof Error ? err.message : String(err)}) — proceeding to reprocess quarantined line(s) anyway.`);
+          log.error(
+            { errorMessage: err instanceof Error ? err.message : String(err) },
+            '[second-pass] fresh discovery failed — proceeding to reprocess quarantined line(s) anyway',
+          );
         }
 
         for (const target of quarantined) {

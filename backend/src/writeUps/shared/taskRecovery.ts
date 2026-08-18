@@ -1,4 +1,7 @@
 import type { Page } from 'playwright';
+import { createLogger } from '../../logging/logger.js';
+
+const log = createLogger('writeup');
 
 const GRID_WAIT_TIMEOUT_MS = 30_000;
 const GRID_WAIT_POLL_MS = 250;
@@ -35,7 +38,7 @@ export async function waitForBodyTextIncludes(page: Page, markerText: string, co
         `${err instanceof Error ? err.message : String(err)}`,
     );
   }
-  console.log(`[grid-wait] ${contextLabel} resolved in ${Date.now() - start}ms`);
+  log.debug({ contextLabel, durationMs: Date.now() - start }, '[grid-wait] resolved');
 }
 
 export async function waitForWorkPackageDetailsResolved(page: Page): Promise<void> {
@@ -53,7 +56,7 @@ export async function waitForWorkPackageDetailsResolved(page: Page): Promise<voi
         `${err instanceof Error ? err.message : String(err)}`,
     );
   }
-  console.log(`[grid-wait] work-package-details resolved in ${Date.now() - start}ms`);
+  log.debug({ durationMs: Date.now() - start }, '[grid-wait] work-package-details resolved');
 }
 
 export async function waitForTaskDefinitionCandidatesResolved(page: Page): Promise<void> {
@@ -71,7 +74,7 @@ export async function waitForTaskDefinitionCandidatesResolved(page: Page): Promi
         `${err instanceof Error ? err.message : String(err)}`,
     );
   }
-  console.log(`[grid-wait] task-definition candidates resolved in ${Date.now() - start}ms`);
+  log.debug({ durationMs: Date.now() - start }, '[grid-wait] task-definition candidates resolved');
 }
 
 /**

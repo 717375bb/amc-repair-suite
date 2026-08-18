@@ -1,4 +1,7 @@
 import readline from 'node:readline';
+import { createLogger } from '../../logging/logger.js';
+
+const log = createLogger('api');
 
 /**
  * CLAUDE_CODE_PROMPT (cancel button for ESD writer / Order Write-Ups) —
@@ -60,7 +63,7 @@ export function watchStdinForCancellation(): AbortSignal {
     try {
       const message = JSON.parse(trimmed) as { type?: string };
       if (message?.type === 'cancel') {
-        console.error('[cancellation] Cancel request received — will stop at the next safe checkpoint.');
+        log.error('[cancellation] Cancel request received — will stop at the next safe checkpoint.');
         controller.abort();
       }
     } catch {

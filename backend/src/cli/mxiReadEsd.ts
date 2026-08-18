@@ -3,6 +3,9 @@ import type { MxiClient } from '../mxiWriter/mxiClient.js';
 import { createReadyMxiClient } from '../mxiWriter/cliMxiClient.js';
 import { parseEnvFlag } from '../mxiWriter/parseEnvFlag.js';
 import { findOrderByNumber, navigateToOrder, readEsdField, readNoteToReceiver } from '../mxiWriter/selectors.js';
+import { createLogger } from '../logging/logger.js';
+
+const log = createLogger('cli');
 
 /**
  * Read-only connectivity smoke test: log in, look up one order, print its
@@ -22,12 +25,12 @@ async function main(): Promise<void> {
   const { env, rest } = parseEnvFlag(process.argv.slice(2));
   const orderNumber = rest[0];
   if (!orderNumber) {
-    console.error('Usage: npm run mxi:read-esd -- <orderNumber> [--env production]');
+    log.error('Usage: npm run mxi:read-esd -- <orderNumber> [--env production]');
     process.exitCode = 1;
     return;
   }
 
-  console.log(`Target MXI environment: ${env.toUpperCase()}`);
+  log.info({ env: env.toUpperCase() }, 'Target MXI environment');
 
   let client: MxiClient | undefined;
   try {
@@ -36,13 +39,13 @@ async function main(): Promise<void> {
 
     await findOrderByNumber(page, orderNumber, client.todoListUrl);
     const esd = await readEsdField(page);
-    console.log(`Order ${orderNumber}: RO ESD = ${esd ?? '(blank)'}`);
+    log.info({ orderNumber, esd: esd ?? null }, 'RO ESD');
 
     await navigateToOrder(page, orderNumber, client.todoListUrl);
     const note = await readNoteToReceiver(page);
-    console.log(`Order ${orderNumber}: Notes to Receiver = ${note ?? '(blank)'}`);
+    log.info({ orderNumber, note: note ?? null }, 'Notes to Receiver');
   } catch (err) {
-    console.error('Smoke test failed:', err instanceof Error ? err.message : String(err));
+    log.error({ errorMessage: err instanceof Error ? err.message : String(err) }, 'Smoke test failed');
     process.exitCode = 1;
   } finally {
     await client?.shutdown();

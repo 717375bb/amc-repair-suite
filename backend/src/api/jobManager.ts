@@ -5,6 +5,9 @@ import type { MxiEnv } from '../mxiWriter/config.js';
 import type { MxiCredential } from '../auth/authService.js';
 import type { RunLogEvent } from './runLog.js';
 import { listVendors } from './vendors.js';
+import { createLogger } from '../logging/logger.js';
+
+const log = createLogger('api');
 
 /**
  * CLAUDE_CODE_PROMPT (#6, login/account system) — the env vars a spawned
@@ -160,7 +163,7 @@ export function spawnRunner(
       // A non-JSON stdout line (shouldn't happen — the runner only ever
       // writes JSON envelopes) is logged server-side for debugging but
       // never surfaced to the UI as a fabricated event.
-      console.warn(`[job-manager] Non-JSON line from runner, ignored: ${trimmed}`);
+      log.warn({ line: trimmed }, '[job-manager] Non-JSON line from runner, ignored');
     }
   });
 
@@ -171,7 +174,7 @@ export function spawnRunner(
 
   child.on('close', (code) => {
     if (code !== 0 && stderrBuffer.trim()) {
-      console.error(`[job-manager] Runner stderr (exit ${code}):\n${stderrBuffer}`);
+      log.error({ exitCode: code, stderr: stderrBuffer }, '[job-manager] Runner stderr');
     }
     onExit(code);
   });
@@ -200,7 +203,7 @@ export function requestCancellation(child: ChildProcess): void {
   }
   setTimeout(() => {
     if (child.exitCode === null && !child.killed) {
-      console.warn('[job-manager] Runner did not exit within the cancel grace period — force-killing.');
+      log.warn('[job-manager] Runner did not exit within the cancel grace period — force-killing.');
       child.kill();
     }
   }, CANCEL_GRACE_PERIOD_MS);

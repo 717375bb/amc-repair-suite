@@ -2,6 +2,9 @@
 import type { Page } from 'playwright';
 import { waitForBodyTextIncludes } from './taskRecovery.js';
 import { captureUsageTableDiagnostics } from './usageTableDiagnostics.js';
+import { createLogger } from '../../logging/logger.js';
+
+const log = createLogger('writeup');
 
 const CLICK_DELAY_MS = 750;
 
@@ -170,17 +173,18 @@ async function waitForUsageTableResolved(
   while (Date.now() < deadline) {
     last = await probeUsageTable(page);
     if (!last.tableFound || last.rows.length > 0) {
-      console.log(
-        `[grid-wait] usage-table resolved in ${Date.now() - start}ms (tableFound=${last.tableFound}, rows=${last.rows.length})`,
+      log.debug(
+        { durationMs: Date.now() - start, tableFound: last.tableFound, rowCount: last.rows.length },
+        '[grid-wait] usage-table resolved',
       );
       return { result: last, timedOut: false };
     }
     await page.waitForTimeout(USAGE_TABLE_WAIT_POLL_MS);
   }
 
-  console.log(
-    `[grid-wait] usage-table did NOT resolve within ${USAGE_TABLE_WAIT_TIMEOUT_MS}ms (table element found but 0 ` +
-      'structurally-valid data rows) — refusing to treat this as a genuine empty/absent table.',
+  log.debug(
+    { timeoutMs: USAGE_TABLE_WAIT_TIMEOUT_MS },
+    '[grid-wait] usage-table did NOT resolve (table element found but 0 structurally-valid data rows) — refusing to treat this as a genuine empty/absent table',
   );
   return { result: last, timedOut: true };
 }

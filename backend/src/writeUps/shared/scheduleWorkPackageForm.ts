@@ -1,4 +1,7 @@
 import type { Page } from 'playwright';
+import { createLogger } from '../../logging/logger.js';
+
+const log = createLogger('writeup');
 
 const CLICK_DELAY_MS = 750;
 
@@ -60,14 +63,14 @@ export async function waitForGeneratedOrderNumberSettled(
 
   try {
     await orderLink.waitFor({ state: 'attached', timeout: GENERATED_ORDER_SHORT_TIMEOUT_MS });
-    console.log(`[grid-wait] generated-order-number for "${linkText}" appeared in ${Date.now() - start}ms`);
+    log.debug({ linkText, durationMs: Date.now() - start }, '[grid-wait] generated-order-number appeared');
   } catch {
     // Swallowed deliberately: findGeneratedOrderNumber's own .count() check
     // right after this correctly reports null on a genuine absence —
     // already handled correctly downstream.
-    console.log(
-      `[grid-wait] generated-order-number for "${linkText}" did not appear within ${GENERATED_ORDER_SHORT_TIMEOUT_MS}ms — ` +
-        `proceeding to the real check, which may still correctly report null.`,
+    log.debug(
+      { linkText, timeoutMs: GENERATED_ORDER_SHORT_TIMEOUT_MS },
+      '[grid-wait] generated-order-number did not appear within timeout — proceeding to the real check, which may still correctly report null',
     );
   }
 }

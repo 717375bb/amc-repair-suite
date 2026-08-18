@@ -9,6 +9,9 @@ import { readAssignedTasksAreaText } from '../writeUps/aeroRepair/selectors.js';
 import { isNoTasksAssignedException } from '../writeUps/aeroRepair/noTaskException.js';
 import { markAdHocContinuationProven } from '../writeUps/aeroRepair/adHocContinuationProof.js';
 import { logProcessLineResult, processLine } from '../writeUps/aeroRepair/processLine.js';
+import { createLogger } from '../logging/logger.js';
+
+const log = createLogger('cli');
 
 /**
  * The ONE-TIME manual confirmation command for the single-candidate
@@ -41,13 +44,13 @@ async function main(): Promise<void> {
   const serialNumber = rest[1];
 
   if (!partNumber || !serialNumber) {
-    console.error('Usage: npm run aero-repair:continue-ad-hoc -- <partNumber> <serialNumber> [--env production]');
+    log.error('Usage: npm run aero-repair:continue-ad-hoc -- <partNumber> <serialNumber> [--env production]');
     process.exitCode = 1;
     return;
   }
 
-  console.log(`Target MXI environment: ${env.toUpperCase()}`);
-  console.log(`Continuing: ${partNumber} / SN ${serialNumber}`);
+  log.info({ env: env.toUpperCase() }, 'Target MXI environment');
+  log.info({ partNumber, serialNumber }, 'Continuing');
 
   const db = openDb(path.join('data', 'audit.db'));
   let client: MxiClient | undefined;
@@ -63,32 +66,36 @@ async function main(): Promise<void> {
     const { linkText } = await findFirstRepairLineForPart(page, partNumber, client.todoListUrl, serialNumber);
     const assignedTasksText = await readAssignedTasksAreaText(page);
     if (isNoTasksAssignedException(assignedTasksText)) {
-      console.error(
-        `Refusing to proceed: ${linkText} still shows "no tasks assigned" — expected a real task to already exist ` +
-          'from the earlier paused run. State may have changed since then; check manually before retrying.',
+      log.error(
+        { linkText },
+        'Refusing to proceed: line still shows "no tasks assigned" — expected a real task to already exist from the earlier paused run. State may have changed since then; check manually before retrying.',
       );
       process.exitCode = 1;
       return;
     }
-    console.log(`Confirmed: ${linkText} has a real task assigned. Proceeding through the rest of the flow for real.`);
+    log.info({ linkText }, 'Confirmed: line has a real task assigned. Proceeding through the rest of the flow for real.');
 
     const result = await processLine(db, client, env, partNumber, serialNumber, 'second');
     await logProcessLineResult({ partNumber, serialNumber }, result, env);
 
     if (result.status === 'completed') {
       await markAdHocContinuationProven(env, result.orderNumber, partNumber, serialNumber);
-      console.log('');
-      console.log('=== PROVEN: the Ad-Hoc recovery path now runs fully automatically for future single-candidate cases. ===');
-      console.log(`Order ${result.orderNumber}: routed to ${result.routingLocation}, docked (shipment ${result.shipmentId ?? '(n/a)'}).`);
+      log.info('');
+      log.info('=== PROVEN: the Ad-Hoc recovery path now runs fully automatically for future single-candidate cases. ===');
+      log.info(
+        { orderNumber: result.orderNumber, routingLocation: result.routingLocation, shipmentId: result.shipmentId ?? null },
+        'Order routed and docked',
+      );
     } else {
-      console.log('');
-      console.log('=== NOT PROVEN — the pause remains in place for the next single-candidate case. ===');
-      console.log(`Outcome: ${JSON.stringify(result)}`);
+      log.info('');
+      log.info('=== NOT PROVEN — the pause remains in place for the next single-candidate case. ===');
+      log.info({ outcome: result }, 'Outcome');
       process.exitCode = 1;
     }
   } catch (err) {
-    console.error('Continuation attempt failed:', err instanceof Error ? err.message : String(err));
-    console.log('The pause remains in place — this was not counted as a successful proof.');
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    log.error({ errorMessage }, 'Continuation attempt failed');
+    log.info('The pause remains in place — this was not counted as a successful proof.');
     process.exitCode = 1;
   } finally {
     await client?.shutdown();

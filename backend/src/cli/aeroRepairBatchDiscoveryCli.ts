@@ -7,6 +7,9 @@ import { discoverEligibleLines, type DiscoveredLine } from '../writeUps/aeroRepa
 import { appendDiscoveryLogRows, type ExceptionRow } from '../writeUps/aeroRepair/discoveryLog.js';
 import { saveEligibleLines, ELIGIBLE_LINES_FILE_PATH } from '../writeUps/aeroRepair/eligibleLinesFile.js';
 import { AERO_REPAIR_PART_NUMBERS } from '../writeUps/aeroRepair/constants.js';
+import { createLogger } from '../logging/logger.js';
+
+const log = createLogger('cli');
 
 const NO_TASK_SUGGESTED_ACTION =
   'Manually assign a task to this work package before a write-up can be created, or confirm no repair is needed.';
@@ -40,8 +43,8 @@ const LOG_FILE_PATH = path.join('data', 'aero-repair-writeup-log.xlsx');
  */
 async function main(): Promise<void> {
   const { env } = parseEnvFlag(process.argv.slice(2));
-  console.log(`Target MXI environment: ${env.toUpperCase()}`);
-  console.log('Read-only batch discovery — no writes, no order creation, no edit mode.');
+  log.info({ env: env.toUpperCase() }, 'Target MXI environment');
+  log.info('Read-only batch discovery — no writes, no order creation, no edit mode.');
 
   let client: MxiClient | undefined;
   try {
@@ -89,8 +92,9 @@ async function main(): Promise<void> {
       });
 
     const logResult = await appendDiscoveryLogRows(LOG_FILE_PATH, { exceptions: exceptionRows, completed: [] });
-    console.log(
-      `\nAppended ${logResult.exceptionsAdded} exception row(s) to ${LOG_FILE_PATH} (0 completed rows — this pass is read-only).`,
+    log.info(
+      { exceptionsAdded: logResult.exceptionsAdded, logFilePath: LOG_FILE_PATH },
+      'Appended exception row(s) to discovery log (0 completed rows — this pass is read-only)',
     );
 
     // PART B FIX: no-task-exception lines used to be excluded here entirely
@@ -107,15 +111,15 @@ async function main(): Promise<void> {
       .filter((line) => line.classification === 'eligible-for-write-up' || line.classification === 'no-task-exception')
       .map((line) => ({ partNumber: line.partNumber, serialNumber: line.serialNumber }));
     await saveEligibleLines(env, targetsForBatchExecute);
-    console.log(
-      `Saved ${targetsForBatchExecute.length} line(s) to ${ELIGIBLE_LINES_FILE_PATH} (eligible-for-write-up + ` +
-        `no-task-exception, so batch-execute's existing 0/1/2+ no-task recovery can actually run) — run ` +
-        `\`npm run aero-repair:batch-execute -- --env ${env}\` next to process all of them, no manual list needed.`,
+    log.info(
+      { lineCount: targetsForBatchExecute.length, eligibleLinesFilePath: ELIGIBLE_LINES_FILE_PATH, env },
+      "Saved line(s) to eligible-lines file (eligible-for-write-up + no-task-exception, so batch-execute's existing 0/1/2+ no-task recovery can actually run) — run `npm run aero-repair:batch-execute -- --env <env>` next to process all of them, no manual list needed.",
     );
 
     printSummary(lines);
   } catch (err) {
-    console.error('Batch discovery failed:', err instanceof Error ? err.message : String(err));
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    log.error({ errorMessage }, 'Batch discovery failed');
     process.exitCode = 1;
   } finally {
     await client?.shutdown();
@@ -123,13 +127,13 @@ async function main(): Promise<void> {
 }
 
 function printSummary(lines: DiscoveredLine[]): void {
-  console.log('\n=== SUMMARY ===\n');
+  log.info('\n=== SUMMARY ===\n');
 
   for (const partNumber of AERO_REPAIR_PART_NUMBERS) {
     const partLines = lines.filter((l) => l.partNumber === partNumber);
-    console.log(`--- ${partNumber}: ${partLines.length} eligible-candidate line(s) found ---`);
+    log.info({ partNumber, lineCount: partLines.length }, 'Eligible-candidate line(s) found for part');
     if (partLines.length === 0) {
-      console.log('  (none)');
+      log.info('  (none)');
       continue;
     }
     for (const line of partLines) {
@@ -141,23 +145,23 @@ function printSummary(lines: DiscoveredLine[]): void {
             : line.classification === 'no-work-package-exception'
               ? 'NO WORK PACKAGE (BAD FROM STOCK)'
               : `UNRECOGNIZED STATION (${line.stationCode})`;
-      console.log(`  SN ${line.serialNumber} (station ${line.stationCode}) -> ${detail}`);
+      log.info({ serialNumber: line.serialNumber, stationCode: line.stationCode, detail }, 'Eligible-candidate line');
     }
   }
 
-  console.log('\n--- Totals ---');
+  log.info('\n--- Totals ---');
   const eligible = lines.filter((l) => l.classification === 'eligible-for-write-up');
   const noTask = lines.filter((l) => l.classification === 'no-task-exception');
   const unrecognizedStation = lines.filter((l) => l.classification === 'unrecognized-station-exception');
   const noWorkPackage = lines.filter((l) => l.classification === 'no-work-package-exception');
 
-  console.log(`Total lines found: ${lines.length}`);
-  console.log(`  Eligible for write-up: ${eligible.length}`);
-  console.log(`  No Task Assigned exception: ${noTask.length}`);
-  console.log(`  Unrecognized Station exception: ${unrecognizedStation.length}`);
-  console.log(`  No Work Package (Bad From Stock) exception: ${noWorkPackage.length}`);
+  log.info({ totalLines: lines.length }, 'Total lines found');
+  log.info({ eligibleCount: eligible.length }, 'Eligible for write-up');
+  log.info({ noTaskCount: noTask.length }, 'No Task Assigned exception');
+  log.info({ unrecognizedStationCount: unrecognizedStation.length }, 'Unrecognized Station exception');
+  log.info({ noWorkPackageCount: noWorkPackage.length }, 'No Work Package (Bad From Stock) exception');
 
-  console.log('\nEligible lines by routing destination:');
+  log.info('\nEligible lines by routing destination:');
   const byDestination = new Map<string, DiscoveredLine[]>();
   for (const line of eligible) {
     const dest = line.routingLocation ?? '(unknown)';
@@ -165,40 +169,52 @@ function printSummary(lines: DiscoveredLine[]): void {
     byDestination.get(dest)!.push(line);
   }
   if (byDestination.size === 0) {
-    console.log('  (none)');
+    log.info('  (none)');
   } else {
     for (const [dest, destLines] of byDestination) {
-      console.log(`  ${dest}: ${destLines.length}`);
+      log.info({ destination: dest, lineCount: destLines.length }, 'Eligible lines for destination');
       for (const line of destLines) {
-        console.log(`    ${line.partNumber} / SN ${line.serialNumber} (station ${line.stationCode})`);
+        log.info(
+          { partNumber: line.partNumber, serialNumber: line.serialNumber, stationCode: line.stationCode },
+          'Eligible line routed to destination',
+        );
       }
     }
   }
 
-  console.log('\nNo Task Assigned exceptions:');
+  log.info('\nNo Task Assigned exceptions:');
   if (noTask.length === 0) {
-    console.log('  (none)');
+    log.info('  (none)');
   } else {
     for (const line of noTask) {
-      console.log(`  ${line.partNumber} / SN ${line.serialNumber} (station ${line.stationCode})`);
+      log.info(
+        { partNumber: line.partNumber, serialNumber: line.serialNumber, stationCode: line.stationCode },
+        'No Task Assigned exception line',
+      );
     }
   }
 
-  console.log('\nUnrecognized Station exceptions:');
+  log.info('\nUnrecognized Station exceptions:');
   if (unrecognizedStation.length === 0) {
-    console.log('  (none)');
+    log.info('  (none)');
   } else {
     for (const line of unrecognizedStation) {
-      console.log(`  ${line.partNumber} / SN ${line.serialNumber} (station ${line.stationCode})`);
+      log.info(
+        { partNumber: line.partNumber, serialNumber: line.serialNumber, stationCode: line.stationCode },
+        'Unrecognized Station exception line',
+      );
     }
   }
 
-  console.log('\nNo Work Package (Bad From Stock) exceptions:');
+  log.info('\nNo Work Package (Bad From Stock) exceptions:');
   if (noWorkPackage.length === 0) {
-    console.log('  (none)');
+    log.info('  (none)');
   } else {
     for (const line of noWorkPackage) {
-      console.log(`  ${line.partNumber} / SN ${line.serialNumber} (station ${line.stationCode})`);
+      log.info(
+        { partNumber: line.partNumber, serialNumber: line.serialNumber, stationCode: line.stationCode },
+        'No Work Package (Bad From Stock) exception line',
+      );
     }
   }
 }

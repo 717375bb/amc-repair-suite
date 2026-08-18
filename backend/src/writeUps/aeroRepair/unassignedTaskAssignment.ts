@@ -1,5 +1,8 @@
 /// <reference lib="dom" />
 import type { Page } from 'playwright';
+import { createLogger } from '../../logging/logger.js';
+
+const log = createLogger('writeup');
 
 const CLICK_DELAY_MS = 750;
 
@@ -46,8 +49,8 @@ export async function readUnassignedTaskCandidates(
   });
 
   const filtered = raw.filter((row) => row.taskClass !== 'PC');
-  console.log(`[unassigned-task-assignment] raw candidates (${raw.length}): ${JSON.stringify(raw)}`);
-  console.log(`[unassigned-task-assignment] post-PC-filter candidates (${filtered.length}): ${JSON.stringify(filtered)}`);
+  log.info({ candidateCount: raw.length, candidates: raw }, '[unassigned-task-assignment] raw candidates');
+  log.info({ candidateCount: filtered.length, candidates: filtered }, '[unassigned-task-assignment] post-PC-filter candidates');
   return { raw, filtered };
 }
 
