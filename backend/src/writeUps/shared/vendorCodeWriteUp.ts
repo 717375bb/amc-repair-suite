@@ -55,6 +55,24 @@ const GRID_WAIT_POLL_MS = 250;
 const BN_OVERRIDE_ID = 'BN_SERIAL_REPAIR_FLOW';
 
 /**
+ * CLAUDE_CODE_PROMPT (mayday, preferred-vendor check disabled) — per
+ * explicit user direction: the preferred-vendor check (Addition 3) only
+ * behaves correctly for a specific list of part numbers the user doesn't
+ * currently have, so it's disabled globally rather than being trusted
+ * broadly. This is a single kill-switch, not a removal — every piece of
+ * the feature (readPreferredVendorIndicator, the per-candidate read in
+ * findCandidateLinesForVendorCodeOnce, the vendor_not_preferred outcome,
+ * its DB/UI mapping) stays fully intact and untouched. Flip this back to
+ * `true` once the real part-number list exists (and at that point,
+ * consider narrowing via config.checkPreferredVendor per-vendor/per-part
+ * instead of this all-or-nothing switch, per that field's own docstring
+ * in vendorConfig.ts). Deliberately NOT touched per-vendor in the
+ * registry — that would mean re-editing every entry to re-enable later,
+ * instead of this one line.
+ */
+const PREFERRED_VENDOR_CHECK_GLOBALLY_ENABLED = false;
+
+/**
  * CLAUDE_CODE_PROMPT ("Create Order Only" terminal state) — literal
  * fallback for a blank-autofilled Charge To Account, per explicit user
  * direction given after the first live test showed leaving it blank
@@ -509,7 +527,12 @@ export async function runVendorCodeWriteUp(
     // untouched since it never calls this module. A 'not_found' read is
     // never silently treated as "not preferred" — refusing to guess, same
     // discipline as every other definitive-read requirement in this project.
-    const checkPreferredVendor = config.checkPreferredVendor !== false;
+    //
+    // Globally disabled for now (PREFERRED_VENDOR_CHECK_GLOBALLY_ENABLED,
+    // see its own docstring above) — the read itself still happens
+    // unconditionally in findCandidateLinesForVendorCodeOnce (cheap,
+    // harmless), only the decision to act on it is suppressed here.
+    const checkPreferredVendor = PREFERRED_VENDOR_CHECK_GLOBALLY_ENABLED && config.checkPreferredVendor !== false;
     if (checkPreferredVendor) {
       if (candidate.preferredVendorState === 'not_found') {
         throw new Error(
