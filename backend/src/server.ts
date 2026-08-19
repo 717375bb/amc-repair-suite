@@ -13,7 +13,7 @@ import { assembleNoteText, toMxiDateFormat } from './mxiWriter/esdFormatting.js'
 import { MxiClient } from './mxiWriter/mxiClient.js';
 import { writeEsdAndNotes } from './mxiWriter/writeEsdAndNotes.js';
 import { cancelJob, getActiveJob, getJob, getVendorList, startDiscoveryJob, startExecuteJob } from './api/jobManager.js';
-import { isKnownVendorId } from './api/vendors.js';
+import { isKnownVendorId, listCraGroupsForKnownVendors } from './api/vendors.js';
 import { cancelEsdJob, getActiveEsdJob, getEsdJob, startEsdCompareJob, startEsdWriteJob } from './api/esdFinder/esdFinderJobManager.js';
 import { MissingHeadersError, peekEsdFinderFile, validateHeadersOnly } from './api/esdFinder/ingestion.js';
 import {
@@ -158,6 +158,14 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
 
   app.get('/api/vendors', requireSession, (_req, res) => {
     res.json(getVendorList());
+  });
+
+  // CLAUDE_CODE_PROMPT (CRA/vendor grouping, 2026-08-19) — feeds the
+  // Order Write-Ups CRA dropdown: selecting a CRA auto-checks all of its
+  // registered vendors in the existing vendor selection list. Only CRAs
+  // with at least one registered vendor are returned.
+  app.get('/api/vendors/cra-groups', requireSession, (_req, res) => {
+    res.json(listCraGroupsForKnownVendors());
   });
 
   // State A needs to know, before even starting a job, whether one is

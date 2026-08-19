@@ -34,6 +34,14 @@ export interface VendorListEntry {
   searchKind: VendorSearchKind
 }
 
+/** CRA (Component Repair Analyst) grouping — see backend/src/writeUps/shared/craAssignments.ts. Only CRAs with at least one registered vendor are ever returned. */
+export interface CraGroupEntry {
+  craCode: string
+  craName: string
+  /** VendorListEntry ids — ready to feed straight into the existing selectedVendorIds Set. */
+  vendorIds: string[]
+}
+
 export interface UsageParmRow {
   label: string
   tsn: string
@@ -141,6 +149,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function getVendors(): Promise<VendorListEntry[]> {
   return request('/api/vendors')
+}
+
+export function getCraGroups(): Promise<CraGroupEntry[]> {
+  return request('/api/vendors/cra-groups')
 }
 
 export function getActiveJob(): Promise<{ activeRunId: string | null; kind: 'discovery' | 'execute' | null }> {

@@ -5,9 +5,11 @@ import { ConfirmDialog } from '../components/ConfirmDialog'
 import {
   ApiError,
   getActiveJob,
+  getCraGroups,
   getVendors,
   startDiscovery,
   startExecute,
+  type CraGroupEntry,
   type DiscoveredLineSummary,
   type MxiEnv,
   type RunLogEvent,
@@ -41,8 +43,10 @@ function useNow(intervalMs: number): number {
 }
 
 // ---------------------------------------------------------------------------
-// Environment selector — stage is always the default; production requires a
-// separate, explicit confirmation before it can be used to Run or Confirm.
+// Environment selector — production is the default (per explicit user
+// instruction, 2026-08-19). Switching TO production still requires a
+// separate, explicit confirmation before it can be used to Run or Confirm —
+// that safety gate is independent of which environment loads by default.
 // ---------------------------------------------------------------------------
 function EnvironmentBar({
   env,
@@ -242,8 +246,9 @@ function LogRow({ event }: { event: RunLogEvent }) {
 // Main page
 // ---------------------------------------------------------------------------
 export default function OrderWriteUps() {
-  const [env, setEnv] = useState<MxiEnv>('stage')
+  const [env, setEnv] = useState<MxiEnv>('production')
   const [vendors, setVendors] = useState<VendorListEntry[]>([])
+  const [craGroups, setCraGroups] = useState<CraGroupEntry[]>([])
   const [selectedVendorIds, setSelectedVendorIds] = useState<Set<string>>(new Set())
   const [loadError, setLoadError] = useState<string | null>(null)
   const [activeJobRunId, setActiveJobRunId] = useState<string | null>(null)
@@ -285,6 +290,12 @@ export default function OrderWriteUps() {
     getVendors()
       .then(setVendors)
       .catch((err) => setLoadError(err instanceof ApiError ? err.message : String(err)))
+    // Non-fatal if this fails — the CRA dropdown just won't offer any
+    // options; it's a convenience on top of the existing vendor search,
+    // never a requirement for the page to function.
+    getCraGroups()
+      .then(setCraGroups)
+      .catch(() => {})
     getActiveJob()
       .then((r) => setActiveJobRunId(r.activeRunId))
       .catch(() => {
@@ -332,6 +343,27 @@ export default function OrderWriteUps() {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id)
       else next.add(id)
+      return next
+    })
+  }
+
+  // CLAUDE_CODE_PROMPT (CRA/vendor grouping, 2026-08-19) — additive union,
+  // never a replace: per explicit user instruction, picking a CRA from the
+  // dropdown adds its vendors to whatever's already selected (including
+  // vendors picked via the existing type-ahead search), and picking a
+  // second CRA afterward keeps the first CRA's vendors checked too —
+  // "multiple CRA's is allowed" means selecting several in sequence, not a
+  // multi-select control.
+  // Shared by the CRA dropdown and the "Select all" button — both are an
+  // additive union into whatever's already selected, never a replace.
+  const selectVendors = (vendorIds: string[]) => {
+    setSelectedVendorIds((prev) => new Set([...prev, ...vendorIds]))
+  }
+
+  const deselectVendors = (vendorIds: string[]) => {
+    setSelectedVendorIds((prev) => {
+      const next = new Set(prev)
+      for (const id of vendorIds) next.delete(id)
       return next
     })
   }
@@ -451,8 +483,12 @@ export default function OrderWriteUps() {
       {effectivePhase === 'select' && (
         <SelectState
           vendors={vendors}
+          craGroups={craGroups}
           selectedVendorIds={selectedVendorIds}
           onToggleVendor={toggleVendor}
+          onSelectCra={selectVendors}
+          onSelectVendors={selectVendors}
+          onDeselectVendors={deselectVendors}
           onRun={handleRun}
           disabled={jobIsActive}
         />
@@ -544,14 +580,22 @@ function RunningBanner({
 // ---------------------------------------------------------------------------
 function SelectState({
   vendors,
+  craGroups,
   selectedVendorIds,
   onToggleVendor,
+  onSelectCra,
+  onSelectVendors,
+  onDeselectVendors,
   onRun,
   disabled,
 }: {
   vendors: VendorListEntry[]
+  craGroups: CraGroupEntry[]
   selectedVendorIds: Set<string>
   onToggleVendor: (id: string) => void
+  onSelectCra: (vendorIds: string[]) => void
+  onSelectVendors: (vendorIds: string[]) => void
+  onDeselectVendors: (vendorIds: string[]) => void
   onRun: () => void
   disabled: boolean
 }) {
@@ -569,9 +613,28 @@ function SelectState({
 
   return (
     <Card className={disabled ? 'opacity-60' : ''}>
-      <CardHeader title="Select vendors" description="Choose which write-up workflows to scan for open, eligible lines." />
-      <div className="border-b border-border px-5 py-3">
-        <div className="relative">
+      <CardHeader
+        title="Select vendors"
+        description="Choose which write-up workflows to scan for open, eligible lines."
+        action={
+          <div className="flex gap-2">
+            <SecondaryButton
+              onClick={() => onSelectVendors(filteredVendors.map((v) => v.id))}
+              disabled={disabled || filteredVendors.length === 0}
+            >
+              Select all
+            </SecondaryButton>
+            <SecondaryButton
+              onClick={() => onDeselectVendors(filteredVendors.map((v) => v.id))}
+              disabled={disabled || filteredVendors.length === 0}
+            >
+              Deselect all
+            </SecondaryButton>
+          </div>
+        }
+      />
+      <div className="flex flex-col gap-2 border-b border-border px-5 py-3 sm:flex-row sm:items-center">
+        <div className="relative flex-1">
           <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
           <input
             type="text"
@@ -582,6 +645,28 @@ function SelectState({
             className="w-full rounded-md border border-border bg-bg py-2 pl-9 pr-3 text-sm text-text placeholder:text-muted focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
           />
         </div>
+        {craGroups.length > 0 && (
+          <select
+            value=""
+            disabled={disabled}
+            onChange={(e) => {
+              const group = craGroups.find((g) => g.craCode === e.target.value)
+              if (group) onSelectCra(group.vendorIds)
+              e.target.value = ''
+            }}
+            className="rounded-md border border-border bg-bg py-2 px-3 text-sm text-text focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-60 sm:w-64"
+            title="Selecting a CRA checks all of their vendors below — pick again for another CRA, selections add up."
+          >
+            <option value="" disabled>
+              Select all vendors for a CRA...
+            </option>
+            {craGroups.map((g) => (
+              <option key={g.craCode} value={g.craCode}>
+                {g.craName} ({g.vendorIds.length})
+              </option>
+            ))}
+          </select>
+        )}
       </div>
       <div className="divide-y divide-border">
         {filteredVendors.map((v) => (

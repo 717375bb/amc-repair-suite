@@ -84,7 +84,7 @@ export default function InvoicePriceWriter() {
   const [rowCount, setRowCount] = useState<number | null>(null)
   const [peekError, setPeekError] = useState<string | null>(null)
   const [isDragOver, setIsDragOver] = useState(false)
-  const [env, setEnv] = useState<MxiEnv>('stage')
+  const [env, setEnv] = useState<MxiEnv>('production')
   const [loadError, setLoadError] = useState<string | null>(null)
   const [activeJobRunId, setActiveJobRunId] = useState<string | null>(null)
   const [showCancelConfirm, setShowCancelConfirm] = useState(false)

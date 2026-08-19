@@ -15,13 +15,15 @@ export interface MxiConfig {
 }
 
 /**
- * MXI_ENV defaults to 'stage'. Reading production requires the env var to be
- * set to the literal string "production" — no shorthand, no fuzzy match, no
- * silent default. Anything other than exactly "stage" or "production" is a
- * hard failure, so a typo can never accidentally resolve to either.
+ * MXI_ENV defaults to 'production' (per explicit user instruction,
+ * 2026-08-19 — 'stage' as the default was confusing since stage doesn't
+ * mirror production data). Reading stage still requires the env var to be
+ * set to the literal string "stage" — no shorthand, no fuzzy match.
+ * Anything other than exactly "stage" or "production" is a hard failure, so
+ * a typo can never accidentally resolve to either.
  */
 export function loadMxiConfig(): MxiConfig {
-  const rawEnv = (process.env.MXI_ENV ?? 'stage').trim();
+  const rawEnv = (process.env.MXI_ENV ?? 'production').trim();
 
   let env: MxiEnv;
   if (rawEnv === 'production') {

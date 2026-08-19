@@ -273,7 +273,7 @@ export default function EsdFinder() {
 
   const [reviewScreen, setReviewScreen] = useState<ReviewScreen>('actionable')
   const [removedOrderNumbers, setRemovedOrderNumbers] = useState<Set<string>>(new Set())
-  const [env, setEnv] = useState<MxiEnv>('stage')
+  const [env, setEnv] = useState<MxiEnv>('production')
   const [showCancelConfirm, setShowCancelConfirm] = useState(false)
   const [cancelling, setCancelling] = useState(false)
 

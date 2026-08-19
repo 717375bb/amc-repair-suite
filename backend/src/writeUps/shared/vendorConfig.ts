@@ -1,4 +1,5 @@
 import { createLogger } from '../../logging/logger.js';
+import { resolvePurchasingContactForVendorCode } from './craAssignments.js';
 
 const log = createLogger('writeup');
 
@@ -250,7 +251,15 @@ export function buildWarrantyTerminalStateVendorConfig(
     Pick<VendorConfig, 'form' | 'authFlowPolicy' | 'defaultTerminalState' | 'warrantyEligible' | 'shipsetCase' | 'hasPartDetailsStep'>
   >,
 ): VendorConfig {
-  return {
+  // CLAUDE_CODE_PROMPT (CRA/vendor grouping, 2026-08-19) — every vendor in
+  // this family gets its Purchasing Contact from the real CRA assignment
+  // table (craAssignments.ts), keyed by this vendor's own real MXI vendor
+  // code, applied AFTER `overrides` below rather than merged into the base
+  // `form` — a vendor-specific override that replaces `form` wholesale
+  // (e.g. 76863's COLLINSDISPATCH100 charge-to-account) would otherwise
+  // silently lose this and fall back to the stale global default.
+  const purchasingContact = resolvePurchasingContactForVendorCode(vendorCode);
+  const merged: VendorConfig = {
     id: vendorCode.toLowerCase(),
     displayName,
     search: { kind: 'vendorCode', vendorCode },
@@ -274,6 +283,8 @@ export function buildWarrantyTerminalStateVendorConfig(
     warrantyEligible: true,
     ...overrides,
   };
+  merged.form = { ...merged.form, purchasingContact };
+  return merged;
 }
 
 export function resolveAuthFlowPolicy(serialNumber: string, config: VendorConfig): ResolvedAuthFlowPolicy {

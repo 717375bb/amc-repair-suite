@@ -1,4 +1,5 @@
 import { buildVendorFormConfig, type VendorConfig } from '../shared/vendorConfig.js';
+import { AERO_REPAIR_CRA_CODE } from '../shared/craAssignments.js';
 import {
   AERO_REPAIR_PART_NUMBERS,
   AUTH_FLOW,
@@ -23,11 +24,21 @@ import {
  * behavior for every serial number, no matter its prefix. This restates
  * current behavior as config; it does not change it.
  *
- * `form` is built via buildVendorFormConfig(), inheriting Purchasing
- * Contact/Terms & Conditions from the shared global defaults and
- * overriding only `transportation` — the one field Aero Repair genuinely
- * needs different from every other vendor (PICKUP vs. the FEDEX-2 global
- * default).
+ * `form` is built via buildVendorFormConfig(), inheriting Terms &
+ * Conditions from the shared global defaults and overriding
+ * `transportation` (PICKUP vs. the FEDEX-2 global default) and
+ * `purchasingContact` (explicit AERO_REPAIR_CRA_CODE, not the generic
+ * global default) — the two fields Aero Repair genuinely needs different
+ * from every other vendor.
+ *
+ * CLAUDE_CODE_PROMPT (CRA/vendor grouping, 2026-08-19) — Aero Repair has no
+ * single real MXI vendor code (it's found by a fixed part-number list, see
+ * search below), so it can't use craAssignments.ts's
+ * resolvePurchasingContactForVendorCode() the way every other vendor does.
+ * AERO_REPAIR_CRA_CODE is set explicitly instead — confirmed correct
+ * because all 4 real Aero Repair vendor codes in the CRA assignment table
+ * resolve to the same CRA (Brayden Bury, 717375), so there's no per-code
+ * ambiguity to resolve at request time.
  */
 export const AERO_REPAIR_VENDOR_CONFIG: VendorConfig = {
   id: 'aeroRepair',
@@ -37,6 +48,7 @@ export const AERO_REPAIR_VENDOR_CONFIG: VendorConfig = {
     transportation: TRANSPORTATION_LABEL,
     chargeToAccountSuffix: CHARGE_TO_ACCOUNT_REPLACEMENT,
     notesHeader: NOTES_HEADER_TEXT,
+    purchasingContact: AERO_REPAIR_CRA_CODE,
   }),
   authFlowPolicy: { default: AUTH_FLOW, overrides: [] },
   defaultTerminalState: 'ISSUE_AND_DOCK',

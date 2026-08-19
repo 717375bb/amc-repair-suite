@@ -1,5 +1,6 @@
 import { AERO_REPAIR_PART_NUMBERS } from '../writeUps/aeroRepair/constants.js';
 import { VENDOR_REGISTRY } from '../writeUps/shared/vendorRegistry.js';
+import { AERO_REPAIR_CRA_CODE, listCraGroups } from '../writeUps/shared/craAssignments.js';
 
 /**
  * "vendor" in this API is a broader concept than shared/vendorRegistry.ts's
@@ -49,4 +50,40 @@ export function aeroRepairPartNumberCount(): number {
 export function isKnownVendorId(vendorId: string): boolean {
   if (vendorId === AERO_REPAIR_VENDOR_ID) return true;
   return Object.values(VENDOR_REGISTRY).some((c) => c.id === vendorId);
+}
+
+export interface CraGroupEntry {
+  craCode: string;
+  craName: string;
+  /** VendorListEntry ids (never raw vendor codes) — ready to feed straight into the existing selection Set. */
+  vendorIds: string[];
+}
+
+/**
+ * CLAUDE_CODE_PROMPT (CRA/vendor grouping, 2026-08-19) — the real CRA ->
+ * vendor-code assignment table (craAssignments.ts) retains every vendor,
+ * registered or not, per explicit user instruction. This function is what
+ * actually narrows that down to "registered vendors only" for the live UI:
+ * a CRA's group here only ever contains ids that are real, selectable
+ * VendorListEntry ids (registry entries + Aero Repair), and a CRA with zero
+ * registered vendors is dropped entirely rather than shown as an empty,
+ * useless option in the dropdown.
+ */
+export function listCraGroupsForKnownVendors(): CraGroupEntry[] {
+  return listCraGroups()
+    .map((group) => {
+      const vendorIds = new Set<string>();
+      for (const vendorCode of group.vendorCodes) {
+        const config = VENDOR_REGISTRY[vendorCode.trim().toUpperCase()];
+        if (config) vendorIds.add(config.id);
+      }
+      // Aero Repair has no per-vendor-code registry entry of its own (see
+      // craAssignments.ts's AERO_REPAIR_CRA_CODE doc comment) — included
+      // once, on the one CRA group it's confirmed to belong to.
+      if (group.craCode === AERO_REPAIR_CRA_CODE) {
+        vendorIds.add(AERO_REPAIR_VENDOR_ID);
+      }
+      return { craCode: group.craCode, craName: group.craName, vendorIds: [...vendorIds] };
+    })
+    .filter((group) => group.vendorIds.length > 0);
 }

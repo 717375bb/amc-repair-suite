@@ -6,7 +6,8 @@ import { getSecretProvider } from '../security/secretProvider.js';
  * Shared bootstrap for the mxi:read-esd, mxi:write-esd, and
  * approve-and-write CLI tools. Supersedes the old stage-only
  * createReadyStageMxiClient() — env is now an explicit argument (defaults
- * to 'stage'), not hardcoded.
+ * to 'production', per explicit user instruction 2026-08-19 — stage was
+ * confusing as a default since it doesn't mirror production data).
  *
  * Stage and production each read their own fully separate
  * MXI_{STAGE,PROD}_BASE_URL / MXI_{STAGE,PROD}_USERNAME /
@@ -16,7 +17,7 @@ import { getSecretProvider } from '../security/secretProvider.js';
  * the original mxiReadEsd.ts design intent: this diagnostic/writer path
  * never depends on the HTTP server's credential config).
  */
-export async function createReadyMxiClient(env: MxiEnv = 'stage'): Promise<MxiClient> {
+export async function createReadyMxiClient(env: MxiEnv = 'production'): Promise<MxiClient> {
   // CLAUDE_CODE_PROMPT (#6-hardening, secrets-seam) — this is the one
   // chokepoint every CLI tool and job runner in this backend goes through
   // for MXI credentials (confirmed by grep across src/cli/ and

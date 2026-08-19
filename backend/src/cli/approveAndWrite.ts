@@ -32,14 +32,13 @@ const log = createLogger('cli');
  * previously required a separate, bespoke script every time.
  *
  * Usage:
- *   tsx approveAndWrite.ts <runId> <toolFilePath> approve <orderNumber1,orderNumber2,...> <approvedBy> [--env production]
- *   tsx approveAndWrite.ts <runId> <toolFilePath> reject  <orderNumber1,orderNumber2,...> <approvedBy> [--env production]
+ *   tsx approveAndWrite.ts <runId> <toolFilePath> approve <orderNumber1,orderNumber2,...> <approvedBy> [--env stage]
+ *   tsx approveAndWrite.ts <runId> <toolFilePath> reject  <orderNumber1,orderNumber2,...> <approvedBy> [--env stage]
  *
- * Defaults to stage. `--env production` (can appear anywhere in the args)
- * makes `approve` write to real live Maintenix instead — an explicit,
- * per-invocation opt-in, never an ambient default, given this really does
- * write. `reject` never touches MXI at all (no client is created for it),
- * so --env is accepted but has no effect on that path.
+ * Defaults to production (per explicit user instruction, 2026-08-19).
+ * `--env stage` (can appear anywhere in the args) makes `approve` write to
+ * stage instead. `reject` never touches MXI at all (no client is created
+ * for it), so --env only affects the targetEnv recorded on its audit row.
  *
  * Pass the literal word `all` instead of a comma-separated list to act on
  * every flag='ok' order for this run that doesn't already have a recorded
@@ -231,7 +230,7 @@ async function main(): Promise<void> {
       insertMxiWrite(db, {
         esdInferenceId: row.id,
         orderNumber: row.order_number,
-        targetEnv: 'stage',
+        targetEnv: env,
         action: 'rejected',
         inferredEsd: row.inferred_esd,
         writeStatus: 'skipped',

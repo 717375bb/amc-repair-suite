@@ -5,13 +5,17 @@ import { Card, PrimaryButton, SecondaryButton } from './ui'
 export type MxiEnv = 'stage' | 'production'
 
 /**
- * Shared environment selector — stage is always the default; production
- * requires a separate, explicit confirmation before it can be used to
- * write anything real. Lifted out as its own component so new tabs (like
- * Open Order ESD Finder) can reuse the exact same proven design instead of
- * a second, potentially-drifting copy — pages/OrderWriteUps.tsx keeps its
- * own original inline version untouched, so this carries zero risk of
- * regressing that already-working tab.
+ * Shared environment selector — production is the default (per explicit
+ * user instruction, 2026-08-19: stage as the default was confusing since
+ * it doesn't mirror production data). Switching TO production still
+ * requires a separate, explicit confirmation dialog before it can be used
+ * to write anything real — that safety gate is independent of which
+ * environment loads by default, and stays in place regardless. Lifted out
+ * as its own component so new tabs (like Open Order ESD Finder) can reuse
+ * the exact same proven design instead of a second, potentially-drifting
+ * copy — pages/OrderWriteUps.tsx keeps its own original inline version
+ * untouched, so this carries zero risk of regressing that already-working
+ * tab.
  */
 export function EnvironmentBar({
   env,
