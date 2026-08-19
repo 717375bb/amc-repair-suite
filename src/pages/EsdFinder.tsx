@@ -476,6 +476,16 @@ export default function EsdFinder() {
               return next
             })
           }
+          onBulkSetRemoved={(orderNumbers, removed) =>
+            setRemovedOrderNumbers((prev) => {
+              const next = new Set(prev)
+              for (const o of orderNumbers) {
+                if (removed) next.add(o)
+                else next.delete(o)
+              }
+              return next
+            })
+          }
           env={env}
           onEnvChange={setEnv}
           isWriting={isWriting}
@@ -514,6 +524,7 @@ function ReviewState({
   onChangeScreen,
   removedOrderNumbers,
   onToggleRemoved,
+  onBulkSetRemoved,
   env,
   onEnvChange,
   isWriting,
@@ -528,6 +539,8 @@ function ReviewState({
   onChangeScreen: (screen: ReviewScreen) => void
   removedOrderNumbers: Set<string>
   onToggleRemoved: (orderNumber: string) => void
+  /** Bulk version of onToggleRemoved — `removed: true` excludes every listed order, `false` restores them. */
+  onBulkSetRemoved: (orderNumbers: string[], removed: boolean) => void
   env: MxiEnv
   onEnvChange: (env: MxiEnv) => void
   isWriting: boolean
@@ -560,6 +573,13 @@ function ReviewState({
   const writeableRows = actionable.filter(
     (r) => !removedOrderNumbers.has(r.orderNumber) && !duplicateOrderNumbers.has(r.orderNumber.trim().toUpperCase()),
   )
+
+  // Bulk select/deselect, split by actionType — duplicates are excluded from
+  // both groups since they have no remove/restore control at all (always
+  // excluded from the write set regardless of removedOrderNumbers).
+  const togglableActionable = actionable.filter((r) => !duplicateOrderNumbers.has(r.orderNumber.trim().toUpperCase()))
+  const esdWriteOrderNumbers = togglableActionable.filter((r) => r.actionType === 'esd_write').map((r) => r.orderNumber)
+  const noteOnlyOrderNumbers = togglableActionable.filter((r) => r.actionType !== 'esd_write').map((r) => r.orderNumber)
 
   const hasWriteRun = writeStatus !== null
   const writeResultByOrder = new Map((writeStatus?.writeResults ?? []).map((r) => [r.orderNumber, r]))
@@ -650,6 +670,32 @@ function ReviewState({
               ) : undefined
             }
           />
+          {!hasWriteRun && (
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-border px-5 py-3">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-medium uppercase tracking-wide text-muted">
+                  ESD Write rows ({esdWriteOrderNumbers.length}):
+                </span>
+                <SecondaryButton onClick={() => onBulkSetRemoved(esdWriteOrderNumbers, false)} disabled={esdWriteOrderNumbers.length === 0}>
+                  Select all
+                </SecondaryButton>
+                <SecondaryButton onClick={() => onBulkSetRemoved(esdWriteOrderNumbers, true)} disabled={esdWriteOrderNumbers.length === 0}>
+                  Deselect all
+                </SecondaryButton>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-medium uppercase tracking-wide text-muted">
+                  Note Only rows ({noteOnlyOrderNumbers.length}):
+                </span>
+                <SecondaryButton onClick={() => onBulkSetRemoved(noteOnlyOrderNumbers, false)} disabled={noteOnlyOrderNumbers.length === 0}>
+                  Select all
+                </SecondaryButton>
+                <SecondaryButton onClick={() => onBulkSetRemoved(noteOnlyOrderNumbers, true)} disabled={noteOnlyOrderNumbers.length === 0}>
+                  Deselect all
+                </SecondaryButton>
+              </div>
+            </div>
+          )}
           <div className="overflow-x-auto">
             <table className="w-full text-left text-sm">
               <thead>

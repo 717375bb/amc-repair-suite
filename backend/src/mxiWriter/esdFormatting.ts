@@ -38,13 +38,21 @@ export function toMxiDateFormat(isoDate: string): string {
  * note-only path (A4) — the ESD field was never touched, so the note never
  * mentions one: "M.D.YY - Vendor Notes", unchanged from before.
  *
- * If Vendor Notes is blank/empty, returns null so the caller skips the
- * Notes to Receiver write entirely — a date-only entry with no actual
- * content isn't worth adding to the log.
+ * REAL BUG FOUND AND FIXED (2026-08-19): this used to return null whenever
+ * Vendor Notes was blank/empty, REGARDLESS of pushedEsd — so an order with
+ * a genuine pushed ESD but no vendor commentary got no Notes to Receiver
+ * entry at all, silently. Per explicit user direction: the note must still
+ * be written whenever an ESD is being pushed, vendor commentary or not —
+ * "ESD: DD-MMM-YYYY" alone is a real, useful log entry on its own. Only
+ * returns null when there's truly nothing to say (no notes AND no pushed
+ * ESD) — the original one-empty-write's-not-worth-it rationale still holds
+ * for that case, just not for "blank notes but a real ESD".
  */
 export function assembleNoteText(vendorNotes: string | null, pushedEsd?: string | null): string | null {
-  if (!vendorNotes || !vendorNotes.trim()) return null;
+  const trimmedNotes = vendorNotes?.trim() || null;
+  if (!trimmedNotes && !pushedEsd) return null;
   const today = format(new Date(), 'M.d.yy');
-  const esdSegment = pushedEsd ? `ESD: ${toMxiDateFormat(pushedEsd)}, ` : '';
-  return `${today} - ${esdSegment}${vendorNotes}`;
+  const esdSegment = pushedEsd ? `ESD: ${toMxiDateFormat(pushedEsd)}` : null;
+  const body = esdSegment && trimmedNotes ? `${esdSegment}, ${trimmedNotes}` : (esdSegment ?? trimmedNotes);
+  return `${today} - ${body}`;
 }

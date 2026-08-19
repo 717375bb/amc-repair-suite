@@ -247,7 +247,15 @@ async function main(): Promise<void> {
       for (const row of ordered) {
         const orderNumber = row.order_number;
         const expectedEsd = toMxiDateFormat(row.inferred_esd);
-        const noteText = assembleNoteText(row.vendor_notes) ?? undefined;
+        // REAL BUG FOUND AND FIXED (2026-08-19): this omitted pushedEsd
+        // entirely, so every real approval via this tool wrote the ESD
+        // field but never mentioned it in the Notes to Receiver entry —
+        // inconsistent with server.ts's /approve and the ESD Finder's
+        // esdWriteRunner.ts, which both already passed it. Every row this
+        // tool touches is flag='ok' (the query above filters on it), so
+        // row.inferred_esd is always the real pushed ESD, same invariant
+        // those two call sites rely on.
+        const noteText = assembleNoteText(row.vendor_notes, row.inferred_esd) ?? undefined;
 
         log.info({ orderNumber }, 'Processing order');
 
