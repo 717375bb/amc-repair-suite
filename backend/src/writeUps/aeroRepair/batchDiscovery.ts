@@ -234,7 +234,7 @@ export async function verifyLineStillEligible(
    * instead of burning inline backoff; the full multi-attempt treatment
    * (with Layer 2's fixed 5s/15s/30s backoff) only runs on the second pass.
    */
-  maxAttempts = 3,
+  maxAttempts = 1,
 ): Promise<boolean> {
   const MAX_ATTEMPTS = maxAttempts;
   // With waitForGridResolved in place, verifyLineStillEligibleOnce can now

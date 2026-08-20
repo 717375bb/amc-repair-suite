@@ -290,7 +290,7 @@ export async function findFirstRepairLineForPart(
    * retryable failure quarantines immediately and gets the full
    * multi-attempt treatment only on the second pass.
    */
-  maxAttempts = 3,
+  maxAttempts = 2,
 ): Promise<RepairLineInfo> {
   // Definite-assignment: always set in one of the two branches below
   // (the if-branch either assigns it before breaking out of its retry

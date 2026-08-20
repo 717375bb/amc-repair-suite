@@ -66,12 +66,44 @@ export type PreferredVendorIndicatorState = 'preferred' | 'not_preferred' | 'not
  * rather than silently treating as "not preferred"). Never inferred from
  * absence/timeout — this is a single definitive DOM read.
  */
-export async function readPreferredVendorIndicator(repairLinkLocator: Locator): Promise<PreferredVendorIndicatorState> {
+export async function readPreferredVendorIndicator(
+  repairLinkLocator: Locator
+): Promise<PreferredVendorIndicatorState> {
   return repairLinkLocator.evaluate((linkEl) => {
-    const tr = linkEl.closest('tr');
-    if (!tr) return 'not_found';
-    const checkbox = tr.querySelector('td.checkbox > input[type="CHECKBOX"]') as HTMLInputElement | null;
+    const startRow = linkEl.closest('tr');
+    if (!startRow) return 'not_found';
+
+    // The preferred checkbox may live in the main row OR any sibling row
+    // belonging to this same line (vendor-bid DOM position is random per line).
+    // Walk the starting row + following siblings until the next line begins.
+    const rowsToSearch: HTMLTableRowElement[] = [startRow as HTMLTableRowElement];
+    let sib = startRow.nextElementSibling;
+    while (sib && sib.tagName === 'TR') {
+      const row = sib as HTMLTableRowElement;
+      // Stop at the next line: a row that starts its own repair line will
+      // contain the line-level selectors. Adjust the stop condition to match
+      // whatever marks a new line in your grid (an aInventory box is a safe bet).
+      if (row.querySelector('input[name="aInventory"]')) break;
+      rowsToSearch.push(row);
+      sib = sib.nextElementSibling;
+    }
+
+    // The preferred indicator is the READ-ONLY (disabled) checkbox in td.checkbox.
+    // Key on `disabled` so it can never collide with the enabled selection boxes
+    // (aInventory / radio). Use case-insensitive type match — MXI renders
+    // type="CHECKBOX" in uppercase, and attribute matching is case-sensitive by default.
+    let checkbox: HTMLInputElement | null = null;
+    for (const row of rowsToSearch) {
+      const el = row.querySelector<HTMLInputElement>(
+        'td.checkbox > input[disabled][type="checkbox" i]'
+      );
+      if (el) { checkbox = el; break; }
+    }
+
     if (!checkbox) return 'not_found';
-    return checkbox.checked ? 'preferred' : 'not_preferred';
+
+    // Static, disabled, never-interacted indicator — read the literal attribute
+    // MXI rendered, not the live .checked property.
+    return checkbox.hasAttribute('checked') ? 'preferred' : 'not_preferred';
   });
 }

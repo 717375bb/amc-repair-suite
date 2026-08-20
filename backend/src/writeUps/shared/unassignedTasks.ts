@@ -131,3 +131,86 @@ export async function detectUnassignedTaskState(page: Page): Promise<UnassignedT
   }
   return { state: 'inconclusive', taskCheckboxCount, pageText };
 }
+
+export interface UnassignedTaskRow {
+  /** 0-based index into the page's `input[name="aTask"]` NodeList — used to target the right checkbox. */
+  index: number;
+  /** The row's own task-type cell text, if one exists. */
+  taskClass: string;
+  rowText: string;
+}
+
+/**
+ * Configurable ignore-list for the Unassigned Tasks section's own task
+ * TYPE cell — rows whose type exactly matches one of these are never
+ * assignable, administrative/non-repair task types. Originally just 'PC'
+ * (Parts Card); extended with 'FORECAST', 'REPL', 'PC-PC' per explicit user
+ * confirmation. Centralized here so a future addition/removal is a
+ * one-line change to this array.
+ *
+ * Moved here from aeroRepair/unassignedTaskAssignment.ts (2026-08-20) —
+ * originally Aero Repair-only, now shared with the vendor-code engine's own
+ * Unassigned Tasks check per explicit user direction: both flows must
+ * ignore these same task types on this same MXI page and let the write-up
+ * continue, not just Aero Repair's own recovery path.
+ */
+export const UNASSIGNED_TASK_IGNORED_TYPES: readonly string[] = Object.freeze(['PC', 'FORECAST', 'REPL', 'PC-PC']);
+
+/**
+ * Reads every checkbox-selectable row on the Unassigned Tasks sub-tab and
+ * its own task-type cell, then filters out anything matching
+ * UNASSIGNED_TASK_IGNORED_TYPES.
+ *
+ * Real DOM evidence supplied directly by the user (a live row's outer
+ * HTML): `<td id="<random-per-row-id>" nowrap="" class="shortString">FORECAST</td>`
+ * — the per-row `id` is confirmed NOT stable (different on every line, per
+ * the user), so it can never be used as a locator; `class="shortString"`
+ * is the real, confirmed-stable marker for the task-type cell. Scoped the
+ * read to `td.shortString` specifically (rather than the previous
+ * "scan every `<td>` in the row" approach) for that reason — still an
+ * EXACT, case-sensitive match against the ignore list, never a fuzzy
+ * substring match, so a row that merely contains "REPL" as part of a
+ * longer string is never accidentally excluded. Logs both the raw and
+ * post-filter lists, so the difference is auditable every time this
+ * actually filters something for real.
+ */
+export async function readUnassignedTaskCandidates(
+  page: Page,
+): Promise<{ raw: UnassignedTaskRow[]; filtered: UnassignedTaskRow[] }> {
+  const raw = await page.evaluate(
+    ({ ignoredTypes }: { ignoredTypes: readonly string[] }) => {
+      const checkboxes = Array.from(document.querySelectorAll('input[name="aTask"]')) as HTMLInputElement[];
+      return checkboxes.map((cb, i) => {
+        const tr = cb.closest('tr');
+        const typeCellTexts = tr
+          ? Array.from(tr.querySelectorAll('td.shortString')).map((td) => (td.textContent ?? '').replace(/\s+/g, ' ').trim())
+          : [];
+        const taskClass = typeCellTexts.find((c) => ignoredTypes.includes(c)) ?? '';
+        const rowText = (tr?.textContent ?? '').replace(/\s+/g, ' ').trim();
+        return { index: i, taskClass, rowText };
+      });
+    },
+    { ignoredTypes: UNASSIGNED_TASK_IGNORED_TYPES },
+  );
+
+  const filtered = raw.filter((row) => !UNASSIGNED_TASK_IGNORED_TYPES.includes(row.taskClass));
+  log.info({ candidateCount: raw.length, candidates: raw }, '[unassigned-task-assignment] raw candidates');
+  log.info(
+    { candidateCount: filtered.length, candidates: filtered, ignoredTypes: UNASSIGNED_TASK_IGNORED_TYPES },
+    '[unassigned-task-assignment] post-ignore-list-filter candidates',
+  );
+  return { raw, filtered };
+}
+
+/**
+ * Checks the row's own checkbox, clicks "Assign Task to this Work" — the
+ * confirmed real mechanism (Aero Repair's own recovery path). Caller is
+ * responsible for closing the view afterward (closeUnassignedTasksView)
+ * and for independently re-verifying the assignment actually took.
+ */
+export async function assignUnassignedTask(page: Page, rowIndex: number): Promise<void> {
+  await page.locator('input[name="aTask"]').nth(rowIndex).check();
+  await pace(page);
+  await page.getByRole('link', { name: 'Assign Task to this Work' }).click();
+  await pace(page);
+}

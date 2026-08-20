@@ -447,18 +447,17 @@ export async function runAeroRepairWriteUp(
       const { filtered } = await readUnassignedTaskCandidates(page);
 
       if (filtered.length === 0) {
-        // A real checkbox was detected, but every one of them filtered out
-        // as PC (Parts Card, administrative) — the positive detection
-        // itself is suspect (matches Brayden's real-world report that most
-        // positive detections on other part numbers are false positives).
-        // Refuse to assign a PC row, and refuse to silently proceed as if
-        // nothing needed assigning either — flag for human review instead
-        // (change 3, "Context on observed frequency" self-correcting path).
+        // REAL FIX (2026-08-20, per explicit user direction): a real
+        // checkbox was detected, but every one of them filtered out as an
+        // ignored administrative/non-repair type (PC, PC-PC, FORECAST,
+        // REPL) — genuinely nothing to assign, not a suspect read.
+        // Previously this stopped and flagged the line for manual review
+        // (the original, more cautious behavior from when this ignore list
+        // was still new and unproven at scale); now that it's confirmed
+        // correct, continue the write-up exactly like the confirmed-absent
+        // state instead.
         await closeUnassignedTasksView(page);
-        return { status: 'unassigned_task_detection_suspect', partNumber, serialNumber, workPackageWasCreated };
-      }
-
-      if (filtered.length > 1) {
+      } else if (filtered.length > 1) {
         // Real ambiguity: more than one genuinely-assignable candidate.
         // Per explicit instruction, stop and flag for human review rather
         // than guessing which one(s) to assign or assigning only the first
@@ -471,30 +470,30 @@ export async function runAeroRepairWriteUp(
           candidateCount: filtered.length,
           workPackageWasCreated,
         };
+      } else {
+        // Exactly one genuine, assignable candidate — assign it and
+        // continue the SAME pass into the normal write-up flow (change 1).
+        await assignUnassignedTask(page, filtered[0].index);
+        await closeUnassignedTasksView(page);
+
+        // Independent re-verification (standing discipline #3, change 6):
+        // never trust the click's own apparent success. Re-open the same
+        // view via a fresh navigation and confirm the task is genuinely
+        // gone before proceeding.
+        await navigateToUnassignedTasksView(page);
+        await waitForUnassignedTasksSectionResolved(page);
+        const reVerify = await detectUnassignedTaskState(page);
+        await closeUnassignedTasksView(page);
+
+        if (reVerify.state !== 'absent') {
+          throw new Error(
+            `unassigned_task_assignment_not_confirmed: after assigning task index ${filtered[0].index} for ` +
+              `${partNumber}/${serialNumber}, independent re-verification did not show the confirmed empty state ` +
+              `(re-verified state: ${reVerify.state}).`,
+          );
+        }
+        unassignedTaskWasAssigned = true;
       }
-
-      // Exactly one genuine, assignable candidate — assign it and continue
-      // the SAME pass into the normal write-up flow (change 1).
-      await assignUnassignedTask(page, filtered[0].index);
-      await closeUnassignedTasksView(page);
-
-      // Independent re-verification (standing discipline #3, change 6):
-      // never trust the click's own apparent success. Re-open the same
-      // view via a fresh navigation and confirm the task is genuinely
-      // gone before proceeding.
-      await navigateToUnassignedTasksView(page);
-      await waitForUnassignedTasksSectionResolved(page);
-      const reVerify = await detectUnassignedTaskState(page);
-      await closeUnassignedTasksView(page);
-
-      if (reVerify.state !== 'absent') {
-        throw new Error(
-          `unassigned_task_assignment_not_confirmed: after assigning task index ${filtered[0].index} for ` +
-            `${partNumber}/${serialNumber}, independent re-verification did not show the confirmed empty state ` +
-            `(re-verified state: ${reVerify.state}).`,
-        );
-      }
-      unassignedTaskWasAssigned = true;
     } else {
       // The confirmed-empty state ('absent') is itself a meaningful result
       // being trusted to mean "safe to continue" — captured here, before

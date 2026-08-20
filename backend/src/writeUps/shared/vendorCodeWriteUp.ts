@@ -37,7 +37,13 @@ import {
 } from './scheduleWorkPackageForm.js';
 import { clickRequestAuthorization, confirmAuthorizationRequest, selectAuthFlow } from './authFlow.js';
 import { issueGeneratedOrder, moveOutboundShipmentToDock, readOrderRealState } from './issueAndDock.js';
-import { isUnassignedTaskPresent, navigateToUnassignedTasksView, closeUnassignedTasksView, waitForUnassignedTasksSectionResolved } from './unassignedTasks.js';
+import {
+  isUnassignedTaskPresent,
+  navigateToUnassignedTasksView,
+  closeUnassignedTasksView,
+  waitForUnassignedTasksSectionResolved,
+  readUnassignedTaskCandidates,
+} from './unassignedTasks.js';
 import { isNoTasksAssignedException } from '../aeroRepair/noTaskException.js';
 import { closePartOwnDetails, openPartOwnDetails, readPartOwnDetails, type PartOwnDetails, type UsageParmRow } from './partOwnDetails.js';
 import { completeCreateOrderOnly, composeAwaitingRmaNote, composeDoNotShipNote, verifyExternalReferenceCommitted, ZERO_USAGE_DO_NOT_SHIP_REASON } from './createOrderOnly.js';
@@ -70,7 +76,7 @@ const BN_OVERRIDE_ID = 'BN_SERIAL_REPAIR_FLOW';
  * registry — that would mean re-editing every entry to re-enable later,
  * instead of this one line.
  */
-const PREFERRED_VENDOR_CHECK_GLOBALLY_ENABLED = false;
+const PREFERRED_VENDOR_CHECK_GLOBALLY_ENABLED = true;
 
 /**
  * CLAUDE_CODE_PROMPT ("Create Order Only" terminal state) — literal
@@ -288,7 +294,7 @@ export async function findCandidateLinesForVendorCode(
   todoListUrl: string,
   vendorCode: string,
 ): Promise<VendorCodeCandidateLine[]> {
-  const MAX_ATTEMPTS = 3;
+  const MAX_ATTEMPTS = 1;
   let lastResult: VendorCodeCandidateLine[] = [];
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     lastResult = await findCandidateLinesForVendorCodeOnce(page, todoListUrl, vendorCode);
@@ -664,13 +670,27 @@ export async function runVendorCodeWriteUp(
       await waitForUnassignedTasksSectionResolved(page);
       const unassignedTasksText = await readUnassignedTasksAreaText(page);
       if (isUnassignedTaskPresent(unassignedTasksText)) {
-        await closeUnassignedTasksView(page);
-        return {
-          status: 'unassigned_task_present',
-          partNumber: candidate.partNumber,
-          serialNumber: candidate.serialNumber,
-          taskDetail: unassignedTasksText,
-        };
+        // REAL FIX (2026-08-20, per explicit user direction): this engine
+        // previously blocked on ANY non-empty text here, unlike Aero
+        // Repair's own already-proven ignore list (PC/PC-PC/FORECAST/REPL
+        // — administrative, non-repair task types that were never a real
+        // block). Read the actual row-level task types before deciding —
+        // only a genuinely non-ignored row still blocks. Deliberately does
+        // NOT add Aero Repair's auto-assign-the-one-remaining-candidate
+        // behavior here: that's a separate, unproven-at-this-scale
+        // capability across this family's many already-live vendors, and
+        // was never asked for — this only changes what counts as
+        // "blocking," not what this engine does about it.
+        const { filtered } = await readUnassignedTaskCandidates(page);
+        if (filtered.length > 0) {
+          await closeUnassignedTasksView(page);
+          return {
+            status: 'unassigned_task_present',
+            partNumber: candidate.partNumber,
+            serialNumber: candidate.serialNumber,
+            taskDetail: unassignedTasksText,
+          };
+        }
       }
       await closeUnassignedTasksView(page);
     }

@@ -2,6 +2,13 @@
 
 All notable changes to this project, newest session first. Item numbers refer to the numbered work list agreed with the user (e.g. `[#4a]`).
 
+## 2026-08-20
+
+### Fixed
+- **Unassigned-task ignore list (PC/PC-PC/FORECAST/REPL) now actually lets the write-up continue, in both write-up engines.** Real gap found in Aero Repair's own `writeUp.ts`: when every task on the Unassigned Tasks line filtered out as an ignored type (nothing genuinely assignable left), it stopped and flagged the line for manual review (`unassigned_task_detection_suspect`) instead of proceeding — the opposite of the ignore list's own purpose. Fixed to continue the write-up exactly like the confirmed-absent state. Separately, the shared vendor-code engine (`vendorCodeWriteUp.ts` — 0T1Y4, VC01059, and the rest of that family) had no ignore-list filtering at all; any non-empty text on that sub-tab blocked the line (`unassigned_task_present`), including pure PC/PC-PC/FORECAST/REPL rows. Now reads the same row-level task types before blocking — deliberately does NOT add Aero Repair's auto-assign-the-remaining-candidate behavior to this engine, since that's a separate, unproven-at-this-scale capability across many already-live vendors and was never asked for.
+  - The ignore-list mechanism (`UNASSIGNED_TASK_IGNORED_TYPES`, `readUnassignedTaskCandidates`, `assignUnassignedTask`) moved from `aeroRepair/unassignedTaskAssignment.ts` to `shared/unassignedTasks.ts` so both engines use one implementation (Aero Repair re-exports the old path for compat, zero call-site changes). Real DOM evidence supplied by the user (a live row's outer HTML) confirmed the per-row `id` attribute is not stable across lines, but `class="shortString"` on the task-type `<td>` is — the row-candidate read is now scoped to `td.shortString` specifically instead of scanning every `<td>` in the row.
+  - `tsc --noEmit` clean across the whole backend.
+
 ## 2026-08-19
 
 ### Changed
