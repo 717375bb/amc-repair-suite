@@ -160,7 +160,19 @@ async function processOrder(
     base,
     {
       classification: aiResult.classification,
-      extractedBaseDate: isDatelessClassification ? null : aiResult.extractedBaseDate,
+      // Stores the NORMALIZED ISO form (matching Step 1's own
+      // formatISO(...) above), not the raw string the AI returned. This
+      // column is now read back and formatted for the Notes to Receiver
+      // entry (see mxiWriter/esdFormatting.ts's assembleNoteText), so its
+      // format being consistent actually matters — it previously only ever
+      // fed the audit trail, where a raw passthrough was harmless. Falls
+      // back to the raw value if it somehow didn't parse, so nothing is
+      // lost from the audit record either way.
+      extractedBaseDate: isDatelessClassification
+        ? null
+        : extractedBaseDate
+          ? formatISO(extractedBaseDate, { representation: 'date' })
+          : aiResult.extractedBaseDate,
       bufferDaysApplied,
       usedFallback,
       confidence: aiResult.confidence,

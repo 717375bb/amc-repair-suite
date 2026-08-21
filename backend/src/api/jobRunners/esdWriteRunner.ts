@@ -52,6 +52,13 @@ interface EsdInferenceRowForWrite {
   // nullable at this call site: a note_only_reissue row (flag =
   // 'no_esd_found') genuinely has no usable ESD, by definition.
   inferred_esd: string | null;
+  /**
+   * The vendor's own stated/extracted ESD, BEFORE any buffer — what the
+   * Notes to Receiver entry states (see esdFormatting.ts's assembleNoteText,
+   * corrected 2026-08-20). Distinct from inferred_esd, which is this date
+   * plus the buffer and is what actually gets written into the ESD field.
+   */
+  extracted_base_date: string | null;
   vendor_notes: string | null;
   flag: string;
 }
@@ -94,7 +101,7 @@ async function main(): Promise<void> {
   const placeholders = orderNumbers.map(() => '?').join(',');
   const rows = db
     .prepare(
-      `SELECT id, order_number, inferred_esd, vendor_notes, flag FROM esd_inferences
+      `SELECT id, order_number, inferred_esd, extracted_base_date, vendor_notes, flag FROM esd_inferences
        WHERE run_id = ? AND flag IN ('ok', 'no_esd_found') AND order_number IN (${placeholders})`,
     )
     .all(dbRunId, ...orderNumbers) as EsdInferenceRowForWrite[];
@@ -190,8 +197,11 @@ async function main(): Promise<void> {
           );
         }
         writeUpdate = {
+          // The ESD FIELD still gets the buffered date (inferred_esd) —
+          // unchanged. Only the NOTE changes, to state the vendor's own
+          // pre-buffer assumed date instead (corrected 2026-08-20).
           esd: toMxiDateFormat(row.inferred_esd),
-          noteText: assembleNoteText(row.vendor_notes, row.inferred_esd) ?? undefined,
+          noteText: assembleNoteText(row.vendor_notes, row.extracted_base_date) ?? undefined,
         };
         mxiWriteAction = 'approved_write';
       } else {

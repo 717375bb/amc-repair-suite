@@ -166,7 +166,11 @@ async function main(): Promise<void> {
   const resultRows: EsdCompareResultRow[] = records.map((record, i) => {
     const order = matched[i];
     const actionType = classifyRowAction(record);
-    const pushedEsdForNote = actionType === 'esd_write' ? record.inferredEsd : null;
+    // CORRECTED 2026-08-20 — the note states the vendor's own assumed ESD
+    // (extractedBaseDate, pre-buffer), not inferredEsd (the buffered
+    // promised-by date that goes into the ESD field). Must stay identical
+    // to what esdWriteRunner.ts actually writes, or this preview lies.
+    const assumedEsdForNote = actionType === 'esd_write' ? record.extractedBaseDate : null;
 
     log.info(
       {
@@ -190,7 +194,7 @@ async function main(): Promise<void> {
       // actually be written, so showing a preview for it would be
       // misleading, not just informational.
       notesToReceiverPreview:
-        actionType === 'skipped_no_commentary' ? null : assembleNoteText(record.vendorNotes, pushedEsdForNote),
+        actionType === 'skipped_no_commentary' ? null : assembleNoteText(record.vendorNotes, assumedEsdForNote),
       partNumber: order.vendor?.partNumber ?? order.cra?.partNumber ?? null,
       serialNumber: order.vendor?.serialNumber ?? order.cra?.serialNumber ?? null,
     };

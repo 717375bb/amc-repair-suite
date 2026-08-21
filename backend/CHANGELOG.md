@@ -2,6 +2,15 @@
 
 All notable changes to this project, newest session first. Item numbers refer to the numbered work list agreed with the user (e.g. `[#4a]`).
 
+## 2026-08-21
+
+### Fixed
+- **Notes to Receiver now states the vendor's own assumed ESD, not the buffered promised-by date.** Per explicit user direction — the original instruction ("state the pushed ESD") was a misunderstanding on the user's part, corrected here. The note used to repeat `inferred_esd`, i.e. the exact padded date written into the MXI ESD field; humans reading the note want the date the *vendor* actually gave. `assembleNoteText()`'s second parameter is now `extracted_base_date` (pre-buffer) instead. **The ESD field write itself is deliberately unchanged** — for a vendor-stated 8/24 the field still gets 31-AUG-2026 (+`SHIPPING_BUFFER_DAYS`), only the note now reads `ESD: 24-AUG-2026`.
+  - Reads the stored base date rather than subtracting a constant: the user described this as "promised-by minus 7, or minus 14 for a quote date," which holds for `explicit_date`/`vendor_quote_estimate`, but `parts_pending` rows use an AI-chosen 20-30 day offset — subtracting a fixed 7 or 14 would have silently produced a wrong date on those. Verified all three classifications plus edge cases.
+  - Updated all four real call sites (`server.ts`'s `/approve`, `cli/approveAndWrite.ts`, `jobRunners/esdWriteRunner.ts`, and `jobRunners/esdCompareRunner.ts`'s UI preview — the last matters because a preview that disagrees with the write is worse than no preview). `esdWriteRunner`/`approveAndWrite` needed `extracted_base_date` added to their SELECTs.
+  - **Latent format inconsistency found and fixed while doing this**: `inferred_esd` is always normalized ISO (`formatISO`), but `extracted_base_date` on Step 2/3 rows was stored as the *raw* string the AI returned — harmless while it only fed the audit trail, but not safe once formatted for a real write. `applyInferenceRules.ts` now normalizes it on write, and `assembleNoteText` parses with the tolerant `parseFlexibleDate` (not `toMxiDateFormat`'s strict `parseISO`) so rows written before this change still format correctly. An unparseable value logs a warning and writes the note without the ESD segment rather than throwing and losing the vendor commentary too.
+  - `tsc --noEmit` clean. **Not yet exercised against a real live MXI write** — worth watching the first real order through.
+
 ## 2026-08-20
 
 ### Fixed

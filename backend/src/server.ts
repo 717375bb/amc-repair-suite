@@ -643,11 +643,11 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
 
     const result = await writeEsdAndNotes(mxiClient, orderNumber, {
       esd: toMxiDateFormat(pending.inferredEsd),
-      // CLAUDE_CODE_PROMPT (ESD writer changes, A1) — pending here is
-      // always flag='ok' (getActionableEsdInference's own query), so
-      // pending.inferredEsd is always the real pushed ESD; consistent with
-      // the ESD Finder's esd_write branch (esdWriteRunner.ts).
-      noteText: assembleNoteText(pending.vendorNotes, pending.inferredEsd) ?? undefined,
+      // CORRECTED 2026-08-20 — the note states the vendor's own assumed
+      // ESD (extractedBaseDate, pre-buffer), not the buffered promised-by
+      // date going into the ESD field above. Consistent with the ESD
+      // Finder's esd_write branch (esdWriteRunner.ts) and approveAndWrite.
+      noteText: assembleNoteText(pending.vendorNotes, pending.extractedBaseDate) ?? undefined,
     });
 
     const mxiWriteId = insertMxiWrite(db, {

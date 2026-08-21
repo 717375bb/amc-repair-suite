@@ -207,10 +207,17 @@ async function main(): Promise<void> {
   const placeholders = orderNumbers.map(() => '?').join(',');
   const rows = db
     .prepare(
-      `SELECT id, order_number, inferred_esd, vendor_notes FROM esd_inferences
+      `SELECT id, order_number, inferred_esd, extracted_base_date, vendor_notes FROM esd_inferences
        WHERE run_id = ? AND flag = 'ok' AND order_number IN (${placeholders})`,
     )
-    .all(runId, ...orderNumbers) as Array<{ id: number; order_number: string; inferred_esd: string; vendor_notes: string | null }>;
+    .all(runId, ...orderNumbers) as Array<{
+    id: number;
+    order_number: string;
+    inferred_esd: string;
+    /** Vendor's own stated ESD before the buffer — what the note states (see esdFormatting.ts, corrected 2026-08-20). */
+    extracted_base_date: string | null;
+    vendor_notes: string | null;
+  }>;
 
   if (rows.length !== orderNumbers.length) {
     log.error(
@@ -247,15 +254,18 @@ async function main(): Promise<void> {
       for (const row of ordered) {
         const orderNumber = row.order_number;
         const expectedEsd = toMxiDateFormat(row.inferred_esd);
-        // REAL BUG FOUND AND FIXED (2026-08-19): this omitted pushedEsd
-        // entirely, so every real approval via this tool wrote the ESD
-        // field but never mentioned it in the Notes to Receiver entry —
+        // REAL BUG FOUND AND FIXED (2026-08-19): this omitted the ESD
+        // argument entirely, so every real approval via this tool wrote the
+        // ESD field but never mentioned it in the Notes to Receiver entry —
         // inconsistent with server.ts's /approve and the ESD Finder's
-        // esdWriteRunner.ts, which both already passed it. Every row this
-        // tool touches is flag='ok' (the query above filters on it), so
-        // row.inferred_esd is always the real pushed ESD, same invariant
-        // those two call sites rely on.
-        const noteText = assembleNoteText(row.vendor_notes, row.inferred_esd) ?? undefined;
+        // esdWriteRunner.ts, which both already passed it.
+        //
+        // CORRECTED 2026-08-20: the note now states extracted_base_date
+        // (the vendor's own assumed ESD, pre-buffer) rather than
+        // inferred_esd (the buffered promised-by date). expectedEsd above —
+        // the value actually written into the ESD field — is deliberately
+        // unchanged.
+        const noteText = assembleNoteText(row.vendor_notes, row.extracted_base_date) ?? undefined;
 
         log.info({ orderNumber }, 'Processing order');
 
