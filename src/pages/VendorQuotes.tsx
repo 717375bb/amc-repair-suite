@@ -151,6 +151,8 @@ export default function VendorQuotes() {
   const [showWriteConfirm, setShowWriteConfirm] = useState(false)
   /** How many rows this write actually submitted — the progress bar's denominator. */
   const [submittedCount, setSubmittedCount] = useState<number | null>(null)
+  /** Bumped to restart polling when a new phase begins on an existing runId (see the poll effect). */
+  const [pollEpoch, setPollEpoch] = useState(0)
 
   const pollRef = useRef<number | null>(null)
   const isRunning = !!runId && !isTerminal(run?.status)
@@ -178,8 +180,19 @@ export default function VendorQuotes() {
       })
   }, [])
 
-  // Poll while a run is in flight. Extraction is ~7s per PDF, so rows
-  // stream in progressively rather than all landing at the end.
+  /**
+   * Poll while a run is in flight. Extraction is ~7s per PDF, so rows
+   * stream in progressively rather than all landing at the end.
+   *
+   * REAL BUG FOUND AND FIXED (user-reported twice): this effect used to be
+   * keyed on `[runId]` alone. Polling stops when a run reaches a terminal
+   * status — correct — but a WRITE reuses the SAME runId, so the effect
+   * never re-ran and the client never polled again. The write genuinely
+   * ran server-side while the UI sat frozen on the completed-ingest
+   * snapshot: `kind` stayed 'ingest', `isWriting` was never true, and no
+   * progress appeared at all. `pollEpoch` is bumped whenever a new phase
+   * starts on an existing runId, which is what restarts polling.
+   */
   useEffect(() => {
     if (!runId) return
     let cancelled = false
@@ -206,7 +219,7 @@ export default function VendorQuotes() {
       if (pollRef.current) window.clearInterval(pollRef.current)
       pollRef.current = null
     }
-  }, [runId])
+  }, [runId, pollEpoch])
 
   const handleRun = async () => {
     setLoadError(null)
@@ -296,6 +309,14 @@ export default function VendorQuotes() {
     setSubmittedCount(ids.length)
     try {
       await startQuoteWrite(runId, ids, env)
+      // Optimistically flip the local snapshot to the write phase so the
+      // progress card appears on THIS tick rather than up to POLL_MS later
+      // — the server already set status='running' before returning 202, so
+      // this only anticipates what the next poll confirms.
+      setRun((prev) => (prev ? { ...prev, kind: 'write', status: 'running', phase: 'writing', writeEnv: env } : prev))
+      // Restart polling: the run reached a terminal status after ingest, so
+      // the poll interval was cleared. Without this the write runs blind.
+      setPollEpoch((e) => e + 1)
     } catch (err) {
       setSubmittedCount(null)
       if (err instanceof ApiError && err.status === 409) {
@@ -312,10 +333,17 @@ export default function VendorQuotes() {
       quotes: q,
       skipped: rows.filter((r) => r.documentKind !== 'quote'),
       needsReview: q.filter((r) => r.needsReview),
-      willWrite: q.filter((r) => (pendingDisposition[r.extractionId] ?? r.disposition) === 'pending'),
+      // Excludes anything already successfully written. The runner would
+      // skip those anyway (its already-written guard), but offering
+      // "Write 8 to MXI" when all 8 would be skipped reads as broken.
+      willWrite: q.filter(
+        (r) =>
+          (pendingDisposition[r.extractionId] ?? r.disposition) === 'pending' &&
+          writeResultByExtraction.get(r.extractionId)?.status !== 'success',
+      ),
       nrepCount: q.filter((r) => r.vendorSaysNonRepairable).length,
     }
-  }, [rows, pendingDisposition])
+  }, [rows, pendingDisposition, writeResultByExtraction])
 
   return (
     <div className="space-y-5" data-workflow="vendor-quotes">
