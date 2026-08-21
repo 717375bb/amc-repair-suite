@@ -34,6 +34,7 @@ interface Args {
   max: number;
   sinceDays: number;
   dryRun: boolean;
+  unreadOnly: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -52,6 +53,7 @@ function parseArgs(argv: string[]): Args {
     max: Number(get('--max') ?? 25),
     sinceDays: Number(get('--since-days') ?? 0),
     dryRun: argv.includes('--dry-run'),
+    unreadOnly: argv.includes('--unread-only'),
   };
 }
 
@@ -80,6 +82,7 @@ async function main(): Promise<void> {
       folderPath: args.folderPath,
       maxMessages: args.max,
       sinceDays: args.sinceDays,
+      unreadOnly: args.unreadOnly,
     });
   } catch (err) {
     if (err instanceof OutlookReadError) {

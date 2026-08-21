@@ -94,7 +94,7 @@ export const navGroups: NavGroup[] = [
         key: 'email-quotes',
         path: '/email-quotes',
         label: 'Email Quote Analysis',
-        description: 'Review repair quotes received by email',
+        description: 'Read vendor quote PDFs from your Outlook Quotes folder',
         icon: Mail,
       },
       {

@@ -14,6 +14,7 @@ import { MxiClient } from './mxiWriter/mxiClient.js';
 import { writeEsdAndNotes } from './mxiWriter/writeEsdAndNotes.js';
 import { cancelJob, getActiveJob, getJob, getVendorList, startDiscoveryJob, startExecuteJob } from './api/jobManager.js';
 import { isKnownVendorId, listCraGroupsForKnownVendors } from './api/vendors.js';
+import { cancelQuoteJob, getActiveQuoteJob, getQuoteJob, startQuoteIngestJob } from './api/quoteWriter/quoteJobManager.js';
 import { cancelEsdJob, getActiveEsdJob, getEsdJob, startEsdCompareJob, startEsdWriteJob } from './api/esdFinder/esdFinderJobManager.js';
 import { MissingHeadersError, peekEsdFinderFile, validateHeadersOnly } from './api/esdFinder/ingestion.js';
 import {
@@ -600,6 +601,72 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
       return;
     }
     res.status(202).json({ runId });
+  });
+
+  // -------------------------------------------------------------------
+  // Vendor Quote Writer (docs/VENDOR_QUOTE_WRITER_SPEC.md)
+  //
+  // Ingest only — reads the configured Outlook folder, extracts each PDF,
+  // derives an ESD, records to audit.db. Touches neither MXI nor the
+  // mailbox; the write half is a separate, human-approved step.
+  // -------------------------------------------------------------------
+  app.post('/api/quotes/ingest', requireSession, (req, res) => {
+    const folderPath: string | undefined = req.body?.folderPath || process.env.QUOTES_FOLDER_PATH;
+    if (!folderPath) {
+      res.status(400).json({
+        error:
+          'No quotes folder configured. Set QUOTES_FOLDER_PATH in the server\'s .env, or pass folderPath in the request body.',
+      });
+      return;
+    }
+
+    // Bounded server-side regardless of what the client asks for: each PDF
+    // is a real, paid model call, so an accidental (or malicious) huge
+    // value must not be able to spend unbounded money.
+    const requestedMax = Number(req.body?.maxMessages ?? 10);
+    const maxMessages = Number.isFinite(requestedMax) ? Math.min(Math.max(1, Math.trunc(requestedMax)), 100) : 10;
+    const unreadOnly = req.body?.unreadOnly !== false; // default ON — the intended operating mode
+
+    const result = startQuoteIngestJob({ folderPath, maxMessages, unreadOnly });
+    if (!result.ok) {
+      res.status(409).json({ error: 'A Vendor Quote job is already running.', activeRunId: result.conflictRunId });
+      return;
+    }
+    res.status(202).json({ runId: result.runId });
+  });
+
+  app.get('/api/quotes/active-job', requireSession, (_req, res) => {
+    const job = getActiveQuoteJob();
+    res.json({ activeRunId: job?.runId ?? null });
+  });
+
+  app.get('/api/quotes/runs/:runId', requireSession, (req, res) => {
+    const job = getQuoteJob(req.params.runId);
+    if (!job) {
+      res.status(404).json({ error: `No Vendor Quote run found for runId "${req.params.runId}".` });
+      return;
+    }
+    res.json({
+      runId: job.runId,
+      status: job.status,
+      startedAt: job.startedAt,
+      completedAt: job.completedAt,
+      fatalError: job.fatalError,
+      phase: job.phase,
+      folderPath: job.folderPath,
+      scannedCount: job.scannedCount,
+      pdfCount: job.pdfCount,
+      rows: job.rows,
+    });
+  });
+
+  app.post('/api/quotes/runs/:runId/cancel', requireSession, (req, res) => {
+    const ok = cancelQuoteJob(req.params.runId);
+    if (!ok) {
+      res.status(400).json({ error: `Run "${req.params.runId}" is not cancellable (not found or already finished).` });
+      return;
+    }
+    res.json({ ok: true });
   });
 
   app.get('/pending-esd-updates', requireAutomationKey, (_req, res) => {

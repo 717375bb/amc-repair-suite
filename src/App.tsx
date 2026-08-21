@@ -5,7 +5,7 @@ import Login from './pages/Login'
 import CreateAccount from './pages/CreateAccount'
 import ChangePassword from './pages/ChangePassword'
 import RepairOrders from './pages/RepairOrders'
-import EmailQuoteAnalysis from './pages/EmailQuoteAnalysis'
+import VendorQuotes from './pages/VendorQuotes'
 import OpenOrderTracking from './pages/OpenOrderTracking'
 import Discrepancies from './pages/Discrepancies'
 import BackshopRepairs from './pages/BackshopRepairs'
@@ -36,7 +36,7 @@ function App() {
           <Route path="/order-write-ups" element={<OrderWriteUps />} />
           <Route path="/esd-finder" element={<EsdFinder />} />
           <Route path="/invoice-price-writer" element={<InvoicePriceWriter />} />
-          <Route path="/email-quotes" element={<EmailQuoteAnalysis />} />
+          <Route path="/email-quotes" element={<VendorQuotes />} />
           <Route path="/quotes-reports" element={<QuotesReports />} />
           <Route path="/discrepancies" element={<Discrepancies />} />
           <Route path="/warranty-assessment" element={<WarrantyAssessment />} />

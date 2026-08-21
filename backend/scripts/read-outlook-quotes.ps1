@@ -34,12 +34,20 @@
 
 .PARAMETER SinceDays
   Only consider mail received in the last N days. 0 (default) = no limit.
+
+.PARAMETER UnreadOnly
+  Only consider UNREAD mail. Combined with mark-outlook-mail-read.ps1 (which
+  runs only after a verified-successful MXI write), this makes the folder a
+  self-draining work queue: unread == not yet processed. Uses Outlook's own
+  Restrict() so a folder of hundreds of mostly-read messages doesn't have to
+  be walked item by item.
 #>
 param(
   [Parameter(Mandatory = $true)][string]$FolderPath,
   [Parameter(Mandatory = $true)][string]$OutDir,
   [int]$MaxMessages = 200,
-  [int]$SinceDays = 0
+  [int]$SinceDays = 0,
+  [switch]$UnreadOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -124,6 +132,20 @@ $OutDirResolved = (Resolve-Path $OutDir).Path
 # Collect messages, newest first
 # ---------------------------------------------------------------------------
 $items = $folder.Items
+
+if ($UnreadOnly) {
+  # Server-side filter rather than an in-loop skip: with MaxMessages capping
+  # the walk, an in-loop skip would burn the whole cap on already-read mail
+  # in a folder that's mostly processed, and silently return fewer new
+  # quotes than asked for.
+  try {
+    $items = $items.Restrict("[Unread] = true")
+    Write-Diag ("UnreadOnly: " + $items.Count + " unread item(s) in this folder.")
+  } catch {
+    Fail "Could not apply the unread-only filter: $($_.Exception.Message)"
+  }
+}
+
 try {
   $items.Sort("[ReceivedTime]", $true)   # descending
 } catch {

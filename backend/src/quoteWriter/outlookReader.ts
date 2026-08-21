@@ -21,6 +21,12 @@ export interface ReadOutlookQuotesOptions {
   maxMessages?: number;
   /** 0 (default) = no date limit. */
   sinceDays?: number;
+  /**
+   * Only consider unread mail. Paired with the post-write mark-as-read,
+   * this turns the folder into a self-draining queue: unread == not yet
+   * processed.
+   */
+  unreadOnly?: boolean;
 }
 
 export class OutlookReadError extends Error {}
@@ -60,8 +66,12 @@ export async function readOutlookQuotes(
     '-SinceDays',
     String(options.sinceDays ?? 0),
   ];
+  if (options.unreadOnly) args.push('-UnreadOnly');
 
-  log.info({ folderPath: options.folderPath, outDir }, '[outlook] reading quote folder');
+  log.info(
+    { folderPath: options.folderPath, outDir, unreadOnly: !!options.unreadOnly },
+    '[outlook] reading quote folder',
+  );
 
   let stdout: string;
   try {
