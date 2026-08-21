@@ -153,6 +153,8 @@ CREATE TABLE IF NOT EXISTS quote_extractions (
   -- quote_dispositions below.
   vendor_says_non_repairable INTEGER NOT NULL DEFAULT 0,
   non_repairable_evidence TEXT,
+  -- First name from the email's sign-off, for the approval reply greeting.
+  sender_first_name TEXT,
   -- The disposition this row STARTED at (auto-derived from the NREP flag).
   -- The effective disposition is this, overridden by the latest
   -- quote_dispositions row if one exists.
@@ -185,6 +187,11 @@ CREATE TABLE IF NOT EXISTS quote_writes (
   error_message TEXT,
   -- Whether the source email was successfully marked read afterwards.
   marked_read INTEGER NOT NULL DEFAULT 0,
+  -- Approval reply: 'drafted', 'sent', 'failed', or 'skipped'. Separate from
+  -- write_status because a reply failure must never make a committed MXI
+  -- write look like it failed.
+  reply_status TEXT,
+  reply_error TEXT,
   approved_by TEXT,
   created_at TEXT NOT NULL
 );
@@ -216,6 +223,9 @@ export function openDb(dbPath: string): Database.Database {
   ensureColumn(db, 'quote_extractions', 'vendor_says_non_repairable', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'quote_extractions', 'non_repairable_evidence', 'TEXT');
   ensureColumn(db, 'quote_extractions', 'initial_disposition', "TEXT NOT NULL DEFAULT 'pending'");
+  ensureColumn(db, 'quote_extractions', 'sender_first_name', 'TEXT');
+  ensureColumn(db, 'quote_writes', 'reply_status', 'TEXT');
+  ensureColumn(db, 'quote_writes', 'reply_error', 'TEXT');
   return db;
 }
 
@@ -935,6 +945,7 @@ export interface QuoteExtractionInsert {
   needsReview: boolean;
   vendorSaysNonRepairable: boolean;
   nonRepairableEvidence: string | null;
+  senderFirstName: string | null;
   initialDisposition: string;
   confidence: string | null;
   reasoningNote: string | null;
@@ -949,14 +960,14 @@ export function insertQuoteExtraction(db: Database.Database, params: QuoteExtrac
       quote_number, vendor_name, part_number, serial_number, unit_price, currency,
       quote_date, promised_ship_date, lead_time_days, resolved_esd, esd_basis,
       needs_review, vendor_says_non_repairable, non_repairable_evidence,
-      initial_disposition, confidence, reasoning_note, created_at
+      sender_first_name, initial_disposition, confidence, reasoning_note, created_at
     ) VALUES (
       @runId, @sourceEntryId, @subject, @senderName, @senderEmail, @receivedTime,
       @fileName, @savedPath, @documentKind, @orderNumber, @orderNumberSource,
       @quoteNumber, @vendorName, @partNumber, @serialNumber, @unitPrice, @currency,
       @quoteDate, @promisedShipDate, @leadTimeDays, @resolvedEsd, @esdBasis,
       @needsReview, @vendorSaysNonRepairable, @nonRepairableEvidence,
-      @initialDisposition, @confidence, @reasoningNote, @createdAt
+      @senderFirstName, @initialDisposition, @confidence, @reasoningNote, @createdAt
     )
   `);
   const result = stmt.run({
@@ -1043,6 +1054,8 @@ export interface QuoteWriteInsert {
   writeStatus: 'success' | 'failed' | 'skipped';
   errorMessage: string | null;
   markedRead: boolean;
+  replyStatus: 'drafted' | 'sent' | 'failed' | 'skipped' | null;
+  replyError: string | null;
   approvedBy: string | null;
 }
 
@@ -1051,10 +1064,12 @@ export function insertQuoteWrite(db: Database.Database, params: QuoteWriteInsert
   const stmt = db.prepare(`
     INSERT INTO quote_writes (
       quote_extraction_id, order_number, target_env, written_price, written_esd,
-      write_status, error_message, marked_read, approved_by, created_at
+      write_status, error_message, marked_read, reply_status, reply_error,
+      approved_by, created_at
     ) VALUES (
       @quoteExtractionId, @orderNumber, @targetEnv, @writtenPrice, @writtenEsd,
-      @writeStatus, @errorMessage, @markedRead, @approvedBy, @createdAt
+      @writeStatus, @errorMessage, @markedRead, @replyStatus, @replyError,
+      @approvedBy, @createdAt
     )
   `);
   const result = stmt.run({

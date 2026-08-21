@@ -164,6 +164,7 @@ async function main(): Promise<void> {
         needsReview: rowNeedsReview,
         vendorSaysNonRepairable: extraction.vendorSaysNonRepairable,
         nonRepairableEvidence: extraction.nonRepairableEvidence,
+        senderFirstName: extraction.senderFirstName,
         initialDisposition: isQuote ? initialDisposition(extraction.vendorSaysNonRepairable) : 'excluded_other',
         confidence: extraction.confidence,
         reasoningNote: extraction.reasoningNote,

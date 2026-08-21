@@ -1,0 +1,32 @@
+<!--
+  Vendor Quote Writer — APPROVAL reply template.
+
+  Wording supplied verbatim by the user (2026-08-21). This text goes to
+  REAL VENDORS under Brayden's own name, so it is the user's to change —
+  edit it here, not in code. Everything between the comments is the email
+  body; it is prepended above Outlook's own quoted chain.
+
+  Placeholders (substituted then HTML-escaped):
+    {{senderFirstName}} first name from the sender's sign-off, e.g. Brennan
+    {{orderNumber}}     PSA repair order, e.g. P000BF4C
+    {{price}}           formatted amount WITHOUT a symbol, e.g. 3,116.35
+    {{esd}}             ESD written into MXI, e.g. 30-AUG-2026
+    {{quoteNumber}}     vendor quote ref, e.g. WQP1146814
+    {{partNumber}}      e.g. 5013640
+    {{serialNumber}}    e.g. JUL04-0938
+    {{currency}}        e.g. USD
+    {{vendorName}}      e.g. AeroRepair Corp.
+
+  Note: one email carrying several quote PDFs produces one reply PER QUOTE,
+  each naming its own order number and amount — per explicit user
+  direction.
+
+  There is deliberately NO deny/rejection template. Denials are handled by
+  a CRA by hand and this tool never sends one.
+
+  Safety: if the CLAUDE_TEMPLATE_NOT_CONFIGURED marker is present anywhere
+  in this file, the system refuses to draft or send any reply at all.
+-->
+<p>Hello {{senderFirstName}}!</p>
+
+<p>Thank you for sending over this quote! The quote for {{orderNumber}} is approved for ${{price}}.</p>

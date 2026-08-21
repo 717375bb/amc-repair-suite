@@ -10,6 +10,13 @@ import { createReadyMxiClient } from '../../mxiWriter/cliMxiClient.js';
 import { toMxiDateFormat } from '../../mxiWriter/esdFormatting.js';
 import { writePriceLineUpdate } from '../../mxiWriter/writePriceLineUpdate.js';
 import { markOutlookMailRead } from '../../quoteWriter/outlookMarkRead.js';
+import { createOutlookReply, resolveReplyMode } from '../../quoteWriter/outlookReply.js';
+import {
+  firstNameFromDisplayName,
+  formatPriceForEmail,
+  loadApprovalTemplate,
+  renderApprovalReply,
+} from '../../quoteWriter/quoteReplyTemplate.js';
 import { isWritable, type QuoteDisposition } from '../../quoteWriter/quoteDisposition.js';
 import type { MxiEnv } from '../../mxiWriter/config.js';
 import { watchStdinForCancellation } from './cancellationWatcher.js';
@@ -80,6 +87,12 @@ interface WritableRow {
   resolved_esd: string | null;
   source_entry_id: string;
   document_kind: string;
+  quote_number: string | null;
+  vendor_name: string | null;
+  currency: string | null;
+  part_number: string | null;
+  sender_name: string | null;
+  sender_first_name: string | null;
 }
 
 async function main(): Promise<void> {
@@ -89,7 +102,8 @@ async function main(): Promise<void> {
   const placeholders = extractionIds.map(() => '?').join(',');
   const rows = db
     .prepare(
-      `SELECT id, order_number, serial_number, unit_price, resolved_esd, source_entry_id, document_kind
+      `SELECT id, order_number, serial_number, unit_price, resolved_esd, source_entry_id, document_kind,
+              quote_number, vendor_name, currency, part_number, sender_name, sender_first_name
        FROM quote_extractions
        WHERE run_id = ? AND id IN (${placeholders})`,
     )
@@ -105,6 +119,23 @@ async function main(): Promise<void> {
 
   const client = await createReadyMxiClient(env);
   const password = env === 'production' ? process.env.MXI_PROD_PASSWORD : process.env.MXI_STAGE_PASSWORD;
+
+  // Load the approval template ONCE, before any write. If it hasn't been
+  // given real wording yet, every row records reply_status='skipped' with
+  // the reason — the MXI writes still happen (they're the point), but no
+  // placeholder text can ever reach a vendor. Deliberately not a fatal
+  // error: refusing to write real prices because an email template isn't
+  // filled in would be the wrong tradeoff.
+  const replyMode = resolveReplyMode();
+  let approvalTemplate: string | null = null;
+  let templateError: string | null = null;
+  try {
+    approvalTemplate = loadApprovalTemplate();
+    log.info({ replyMode }, 'approval reply template loaded');
+  } catch (err) {
+    templateError = err instanceof Error ? err.message : String(err);
+    log.warn({ error: templateError }, 'approval replies disabled — template not configured');
+  }
 
   let written = 0;
   let skipped = 0;
@@ -160,13 +191,51 @@ async function main(): Promise<void> {
         esdMxi,
       );
 
-      // Guard 4: mail is only ever marked read after a verified success.
+      // Guard 4: mail is only ever marked read, or replied to, after a
+      // verified success. A failed write never emails a vendor.
       let markedRead = false;
       let markReadError: string | null = null;
+      let replyStatus: 'drafted' | 'sent' | 'failed' | 'skipped' | null = null;
+      let replyError: string | null = null;
+
       if (result.status === 'success') {
         const mark = await markOutlookMailRead(row.source_entry_id);
         markedRead = mark.ok;
         markReadError = mark.error;
+
+        if (approvalTemplate) {
+          // Greeting name: the sign-off the AI read from the body, falling
+          // back to parsing the From display name. If NEITHER yields a
+          // plausible first name, the reply is skipped rather than sent as
+          // "Hello !" — a malformed greeting to a real vendor is worse
+          // than no reply, and the MXI write still stands either way.
+          const greetingName = row.sender_first_name?.trim() || firstNameFromDisplayName(row.sender_name);
+
+          if (!greetingName) {
+            replyStatus = 'skipped';
+            replyError =
+              `No sender first name could be determined (no sign-off in the body, and the From name ` +
+              `"${row.sender_name ?? '(none)'}" didn't parse) — skipped rather than greeting the vendor with a blank name.`;
+          } else {
+            const body = renderApprovalReply(approvalTemplate, {
+              orderNumber: row.order_number!,
+              quoteNumber: row.quote_number,
+              partNumber: row.part_number,
+              serialNumber: row.serial_number,
+              price: formatPriceForEmail(priceString),
+              currency: row.currency,
+              esd: esdMxi,
+              vendorName: row.vendor_name,
+              senderFirstName: greetingName,
+            });
+            const reply = await createOutlookReply(row.source_entry_id, body, replyMode);
+            replyStatus = reply.ok ? (reply.mode === 'send' ? 'sent' : 'drafted') : 'failed';
+            replyError = reply.error;
+          }
+        } else {
+          replyStatus = 'skipped';
+          replyError = templateError;
+        }
       }
 
       insertQuoteWrite(db, {
@@ -178,6 +247,8 @@ async function main(): Promise<void> {
         writeStatus: result.status,
         errorMessage: result.errorMessage,
         markedRead,
+        replyStatus,
+        replyError,
         approvedBy: 'quote-writer-ui',
       });
 
@@ -196,8 +267,11 @@ async function main(): Promise<void> {
         writtenEsd: row.resolved_esd,
         markedRead,
         // Deliberately distinct from errorMessage: a mailbox bookkeeping
-        // miss is NOT a failed MXI write, and must not read like one.
+        // miss is NOT a failed MXI write, and must not read like one. Same
+        // reasoning for replyStatus/replyError.
         markReadError,
+        replyStatus,
+        replyError,
         errorMessage: result.errorMessage,
       });
     }

@@ -42,6 +42,8 @@ Check the EMAIL BODY for this as well as the PDF. This is not hypothetical: a re
 
 Be strict about this. It must reflect what the VENDOR said, not your own judgement about whether the price seems too high to be worth repairing — that commercial call belongs to PSA, never to you and never to the vendor. A quote that is merely expensive is NOT non-repairable. If the vendor is quoting a price to perform a repair, that is a normal repairable quote, however costly. If the document is ambiguous, set it false and explain the ambiguity in reasoningNote.
 
+SENDER FIRST NAME: read the sign-off at the bottom of the EMAIL BODY (e.g. "Kind regards, Brennan Rowland" -> "Brennan") and return just the first name in senderFirstName. Use the name the person actually signed with, not the From header, and not a company name. If the body has no legible human sign-off, return null rather than guessing — this is used to greet a real vendor by name, so a wrong or invented name is worse than none.
+
 CONFIDENCE: "high" only when the document is clearly legible and the key fields are unambiguous. Use "low" for scans you are partly guessing at, and say what was unclear in reasoningNote.
 
 Always call the record_quote_extraction tool.`;
@@ -89,6 +91,11 @@ const inputSchema = {
       type: ['string', 'null'],
       description: "The vendor's own supporting words, verbatim. Null when vendorSaysNonRepairable is false.",
     },
+    senderFirstName: {
+      type: ['string', 'null'],
+      description:
+        "First name from the email body's sign-off (e.g. 'Brennan'). Null if there is no legible human sign-off. Never invent one.",
+    },
     confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
     reasoningNote: { type: 'string' },
   },
@@ -114,6 +121,7 @@ function failureResult(reason: string): QuoteExtractionResult {
     // regardless, and must never silently assert a scrap-relevant claim.
     vendorSaysNonRepairable: false,
     nonRepairableEvidence: null,
+    senderFirstName: null,
     confidence: 'low',
     reasoningNote: reason,
   };
@@ -214,6 +222,7 @@ export class AnthropicQuoteProvider implements QuoteExtractionProvider {
           // boolean true must not become a scrap signal by coercion.
           vendorSaysNonRepairable: raw.vendorSaysNonRepairable === true,
           nonRepairableEvidence: raw.nonRepairableEvidence ?? null,
+          senderFirstName: raw.senderFirstName ?? null,
           confidence: raw.confidence ?? 'low',
           reasoningNote: raw.reasoningNote ?? '(no reasoning note returned)',
         };

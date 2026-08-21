@@ -157,6 +157,7 @@ async function main(): Promise<void> {
         needsReview: reviewReasons.length > 0,
         vendorSaysNonRepairable: extraction.vendorSaysNonRepairable,
         nonRepairableEvidence: extraction.nonRepairableEvidence,
+        senderFirstName: extraction.senderFirstName,
         initialDisposition: disposition,
         confidence: extraction.confidence,
         reasoningNote: extraction.reasoningNote,

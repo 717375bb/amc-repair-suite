@@ -82,6 +82,21 @@ export interface QuoteExtractionResult {
   /** The vendor's own words supporting vendorSaysNonRepairable, verbatim. Null when false. */
   nonRepairableEvidence: string | null;
 
+  /**
+   * FIRST NAME of the person who signed off the email, for the approval
+   * reply's greeting ("Hello Brennan!").
+   *
+   * Deliberately taken from the SIGN-OFF in the body rather than the From
+   * header: per explicit user direction it's "the person who signs off on
+   * the email". Those usually match, but a shared or dispatch mailbox can
+   * send mail signed by someone else, and greeting a real vendor by the
+   * wrong name is exactly the kind of small error that undermines trust in
+   * the whole tool. Null when no sign-off name is legible — the caller
+   * falls back to parsing the From display name, and skips the reply
+   * rather than sending "Hello !".
+   */
+  senderFirstName: string | null;
+
   confidence: 'high' | 'medium' | 'low';
   /** 1-2 sentence audit note. Never customer-facing. */
   reasoningNote: string;
