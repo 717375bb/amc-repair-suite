@@ -554,6 +554,49 @@ fix:
 
 ---
 
+## RESOLVED (2026-08-21): the "reissueOrder() reliability gap" below was a misdiagnosis
+
+**Read this before the addendum that follows — that addendum's conclusion is
+now known to be wrong about the cause.**
+
+The long-standing anomaly ("the click reports no error / times out, yet the
+ESD committed anyway") was never really about `reissueOrder()`. The actual
+cause was in `confirmEsdLineEdit()`, one step earlier: it clicked "OK" and
+then **unconditionally** waited for a "YES" link.
+
+That "YES" is the *"this line will need to be re-issued"* warning, and MXI
+only raises it when the edit genuinely forces re-issue/re-authorization. On
+an order that doesn't require it, the OK commits the edit and the page goes
+straight back to RO Details — so the code sat waiting 30s for a dialog that
+was never coming, then threw. The edit had already succeeded. That is
+exactly the reported shape: *"a thrown exception here doesn't reliably mean
+nothing changed."*
+
+Reported by the user with the verbatim error:
+
+```
+locator.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for getByRole('link', { name: 'YES' })
+```
+
+Fixed by waiting for a **definitive end state** — either the YES
+confirmation is present (click it) or we're already back on RO Details
+(nothing to confirm) — instead of assuming the warning always appears. The
+same treatment was applied to `reissueOrder()`'s own trailing "OK", which
+had the identical unconditional-wait shape. Neither throws on a missing
+confirmation now; every caller independently re-verifies the real committed
+value anyway, so a slow page surfaces as a verification failure with real
+evidence rather than a spurious timeout on a write that worked.
+
+Note the precedent that already existed and wasn't applied here:
+`writeUps/shared/authFlow.ts`'s `handleMinimumPurchaseAmountConfirmation`
+had been checking for its own YES dialog conditionally all along.
+
+The original addendum is kept below unedited, because its *observations*
+were accurate and valuable — it was the attribution to `reissueOrder()`
+that was wrong.
+
 ## Addendum: a real, unresolved reissueOrder() reliability gap found via live testing
 
 A routine real smoke test (`npm run mxi:write-esd -- P000B2YT 25-JUL-2026

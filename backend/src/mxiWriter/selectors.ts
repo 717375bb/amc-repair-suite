@@ -176,18 +176,76 @@ export async function updateEsdField(page: Page, newEsd: string): Promise<void> 
 }
 
 /**
- * Confirms the "this line will need to be re-issued" warning ("OK" then
- * "YES") that appears after editing a field inside "Edit Lines" (e.g. the
- * ESD field). Exits back to the RO Details page — "Details" tab and
- * "Issue Order" are both reachable from there afterward, confirmed via live
- * diagnostic (neither is reachable from inside an unconfirmed Edit Lines
- * view).
+ * Confirms an edit made inside "Edit Lines" (e.g. the ESD or price field).
+ * Exits back to the RO Details page — the "Details" tab and "Issue Order"
+ * are both reachable from there afterward, confirmed via live diagnostic
+ * (neither is reachable from inside an unconfirmed Edit Lines view).
+ *
+ * REAL BUG FOUND AND FIXED (user-reported, 2026-08-21): this used to click
+ * "OK" and then UNCONDITIONALLY click "YES", producing
+ * `locator.click: Timeout 30000ms exceeded - waiting for
+ * getByRole('link', { name: 'YES' })` whenever that warning never appeared.
+ *
+ * The "YES" is the *"this line will need to be re-issued"* confirmation —
+ * by definition it only shows when the edit actually forces re-issue/
+ * re-authorization. On an order that doesn't need it, MXI commits the OK
+ * and goes straight back to RO Details, so waiting for YES was waiting for
+ * something that was never coming.
+ *
+ * **This is almost certainly the root of the long-documented "reissueOrder
+ * reliability gap"** (see writeEsdAndNotes.ts and
+ * PHASE2_MXI_WRITER_SPEC.md): a real 40-order run recorded thrown
+ * exceptions here where the ESD had nonetheless committed correctly. That
+ * is exactly this shape — the OK committed the edit, then the YES wait
+ * timed out and threw, so a genuinely successful write was reported as a
+ * failure. It was described as an anomaly rather than diagnosed.
+ *
+ * Now waits for a DEFINITIVE end state instead of assuming one: either the
+ * YES confirmation is present (click it), or we're already back on RO
+ * Details (nothing to confirm). Same content-aware-wait discipline as
+ * shared/unassignedTasks.ts's waitForUnassignedTasksSectionResolved, and
+ * the same conditional-YES precedent already set by
+ * shared/authFlow.ts's handleMinimumPurchaseAmountConfirmation.
+ *
+ * Deliberately does NOT throw when neither marker resolves in time: every
+ * caller independently re-verifies the real committed value afterward
+ * (writePriceLineUpdate, writeEsdAndNotes), so a slow page becomes a
+ * verification failure with real evidence rather than a spurious timeout
+ * on a write that actually worked. Returns whether the confirmation was
+ * shown, for the audit trail; existing callers may ignore it.
  */
-export async function confirmEsdLineEdit(page: Page): Promise<void> {
+export async function confirmEsdLineEdit(page: Page): Promise<{ confirmationShown: boolean }> {
   await page.getByRole('link', { name: 'OK' }).click();
   await pace(page);
-  await page.getByRole('link', { name: 'YES' }).click();
-  await pace(page);
+
+  const RESOLVE_TIMEOUT_MS = 15_000;
+  try {
+    await page.waitForFunction(
+      () => {
+        const linkNames = Array.from(document.querySelectorAll('a')).map((a) =>
+          (a.textContent ?? '').replace(/\s+/g, ' ').trim().toUpperCase(),
+        );
+        if (linkNames.includes('YES')) return true;
+        // Back on RO Details: no re-issue warning was needed.
+        const bodyText = (document.body?.innerText ?? '').replace(/\s+/g, ' ');
+        return linkNames.includes('ISSUE ORDER') || bodyText.includes('Order Status:');
+      },
+      undefined,
+      { timeout: RESOLVE_TIMEOUT_MS, polling: 250 },
+    );
+  } catch {
+    // Neither marker resolved. Fall through — the caller's own verification
+    // is the authority on whether the edit actually committed.
+  }
+
+  const yesLink = page.getByRole('link', { name: 'YES' });
+  if ((await yesLink.count()) > 0) {
+    await yesLink.first().click();
+    await pace(page);
+    return { confirmationShown: true };
+  }
+
+  return { confirmationShown: false };
 }
 
 /**
@@ -211,8 +269,20 @@ export async function confirmEsdLineEdit(page: Page): Promise<void> {
 export async function reissueOrder(page: Page): Promise<void> {
   await page.getByRole('link', { name: 'Issue Order' }).click();
   await pace(page);
-  await page.getByRole('link', { name: 'OK', exact: true }).click();
-  await pace(page);
+  // Best-effort, for the same reason confirmEsdLineEdit's YES is now
+  // conditional: a confirmation that doesn't always appear must not be
+  // waited on for the full 30s default and then thrown, on an action that
+  // may well have already committed. Short bounded wait, click if present.
+  const ok = page.getByRole('link', { name: 'OK', exact: true });
+  try {
+    await ok.first().waitFor({ state: 'visible', timeout: 10_000 });
+    await ok.first().click();
+    await pace(page);
+  } catch {
+    // No confirmation appeared — callers independently verify the real
+    // outcome (writeEsdAndNotes re-reads; writePriceLineUpdate checks the
+    // issued count), so this is not treated as a failure on its own.
+  }
 }
 
 /**

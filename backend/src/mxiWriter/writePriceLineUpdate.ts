@@ -80,10 +80,11 @@ function describeIssueOutcome(
   issue: IssueControlResult,
   issuedBefore: number | null,
   issuedAfter: number | null,
+  confirmationShown: boolean,
 ): string {
-  const authPart = authWasNeeded
-    ? 'Authorization was requested'
-    : 'Already authorized (no Request Authorization action present)';
+  const authPart =
+    (authWasNeeded ? 'Authorization was requested' : 'Already authorized (no Request Authorization action present)') +
+    (confirmationShown ? '; re-issue warning confirmed' : '; no re-issue warning shown');
 
   if (issue.clicked) {
     const committed =
@@ -203,7 +204,12 @@ export async function writePriceLineUpdate(
     await updateUnitPrice(page, newPrice);
     await updatePriceType(page, 'QUOTE');
     await updateEsdField(page, promiseBy);
-    await confirmEsdLineEdit(page);
+    // confirmationShown tells us whether MXI raised the "this line will
+    // need to be re-issued" warning. It doesn't on an order that doesn't
+    // require re-issue — which used to hang this call for 30s and then
+    // throw. Recorded because it's the clearest signal of which path an
+    // order took.
+    const { confirmationShown } = await confirmEsdLineEdit(page);
 
     // Real, detectable page state — not a guessed business rule for when
     // authorization is/isn't required.
@@ -226,7 +232,7 @@ export async function writePriceLineUpdate(
     const issueResult = await clickIssueOrderTolerant(page);
     const issuedAfter = await readIssuedCount(page);
 
-    issueDetail = describeIssueOutcome(authWasNeeded, issueResult, issuedBefore, issuedAfter);
+    issueDetail = describeIssueOutcome(authWasNeeded, issueResult, issuedBefore, issuedAfter, confirmationShown);
 
     // Independent re-verification, regardless of whether anything above
     // threw — same discipline as writeEsdAndNotes().
