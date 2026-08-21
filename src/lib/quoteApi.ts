@@ -92,6 +92,20 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       /* non-JSON error body — keep the generic message */
     }
+
+    // REAL DIAGNOSIS, from a real incident: a 404 on one of THIS tab's own
+    // endpoints almost never means "wrong URL" — the paths are hardcoded
+    // here and proxied same-origin. It means the backend process is older
+    // than the frontend and simply doesn't have the route yet. That
+    // presented to the user as buttons that "don't do anything," which cost
+    // real debugging time. Say the actual likely cause instead of a bare
+    // "Request failed (404)".
+    if (response.status === 404 && path.startsWith('/api/quotes/')) {
+      message =
+        `The backend doesn't recognise ${path} (404). This usually means the API server is running an ` +
+        `older build than this page — restart it (npm run server in backend/) and try again.`
+    }
+
     throw new ApiError(response.status, message, activeRunId)
   }
   return response.json() as Promise<T>

@@ -153,6 +153,21 @@ export default function VendorQuotes() {
   const pollRef = useRef<number | null>(null)
   const isRunning = !!runId && !isTerminal(run?.status)
 
+  /**
+   * REAL UX BUG, from a real incident: the error banner renders at the top
+   * of the page, but the row-level BER/X buttons live far down a long
+   * table. A failed request therefore showed an error the user never saw,
+   * making a genuine 404 (stale backend) look like a button that simply
+   * did nothing. Errors now pull the page back to the banner, so a failure
+   * is impossible to mistake for "nothing happened".
+   */
+  const errorRef = useRef<HTMLDivElement | null>(null)
+  const reportError = (message: string) => {
+    setLoadError(message)
+    // After paint, so the banner actually exists to scroll to.
+    requestAnimationFrame(() => errorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }))
+  }
+
   useEffect(() => {
     getActiveQuoteJob()
       .then((r) => setActiveJobRunId(r.activeRunId))
@@ -178,7 +193,7 @@ export default function VendorQuotes() {
           setActiveJobRunId(null)
         }
       } catch (err) {
-        if (!cancelled) setLoadError(err instanceof Error ? err.message : String(err))
+        if (!cancelled) reportError(err instanceof Error ? err.message : String(err))
       }
     }
 
@@ -199,9 +214,9 @@ export default function VendorQuotes() {
       setRunId(newRunId)
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
-        setLoadError(`A Vendor Quote job is already running (${err.activeRunId ?? 'unknown'}).`)
+        reportError(`A Vendor Quote job is already running (${err.activeRunId ?? "unknown"}).`)
       } else {
-        setLoadError(err instanceof Error ? err.message : String(err))
+        reportError(err instanceof Error ? err.message : String(err))
       }
     }
   }
@@ -213,7 +228,7 @@ export default function VendorQuotes() {
     try {
       await cancelQuoteRun(runId)
     } catch (err) {
-      setLoadError(err instanceof Error ? err.message : String(err))
+      reportError(err instanceof Error ? err.message : String(err))
     } finally {
       setCancelling(false)
     }
@@ -236,7 +251,7 @@ export default function VendorQuotes() {
       await setQuoteDisposition(row.extractionId, disposition, runId)
     } catch (err) {
       setPendingDisposition((prev) => ({ ...prev, [row.extractionId]: previous }))
-      setLoadError(err instanceof Error ? err.message : String(err))
+      reportError(err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -255,9 +270,9 @@ export default function VendorQuotes() {
       await startQuoteWrite(runId, willWrite.map((r) => r.extractionId), env)
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
-        setLoadError(`A Vendor Quote job is already running (${err.activeRunId ?? 'unknown'}).`)
+        reportError(`A Vendor Quote job is already running (${err.activeRunId ?? "unknown"}).`)
       } else {
-        setLoadError(err instanceof Error ? err.message : String(err))
+        reportError(err instanceof Error ? err.message : String(err))
       }
     }
   }
@@ -276,8 +291,20 @@ export default function VendorQuotes() {
   return (
     <div className="space-y-5" data-workflow="vendor-quotes">
       {loadError && (
-        <div className="rounded-md border border-l-4 border-danger border-l-danger bg-danger-soft px-4 py-3 text-sm text-text">
-          {loadError}
+        <div
+          ref={errorRef}
+          className="flex items-start gap-2 rounded-md border border-l-4 border-danger border-l-danger bg-danger-soft px-4 py-3 text-sm text-text"
+        >
+          <AlertTriangle size={16} className="mt-0.5 shrink-0 text-danger" />
+          <span className="flex-1">{loadError}</span>
+          <button
+            type="button"
+            onClick={() => setLoadError(null)}
+            aria-label="Dismiss error"
+            className="shrink-0 text-muted hover:text-danger"
+          >
+            <X size={15} />
+          </button>
         </div>
       )}
 
