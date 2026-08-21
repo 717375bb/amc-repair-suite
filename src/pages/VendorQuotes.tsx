@@ -149,6 +149,8 @@ export default function VendorQuotes() {
   const [cancelling, setCancelling] = useState(false)
   const [env, setEnv] = useState<MxiEnv>('production')
   const [showWriteConfirm, setShowWriteConfirm] = useState(false)
+  /** How many rows this write actually submitted — the progress bar's denominator. */
+  const [submittedCount, setSubmittedCount] = useState<number | null>(null)
 
   const pollRef = useRef<number | null>(null)
   const isRunning = !!runId && !isTerminal(run?.status)
@@ -261,14 +263,41 @@ export default function VendorQuotes() {
     [writeResults],
   )
   const hasWriteRun = writeResults.length > 0 || run?.kind === 'write'
+  const isWriting = isRunning && run?.kind === 'write'
+
+  /**
+   * Live write progress. `total` is the number actually submitted for this
+   * write (captured when the run started), not the number of rows on
+   * screen — excluded/BER/NREP rows were never submitted and counting them
+   * would make the progress bar stall short of 100% forever.
+   */
+  const writeProgress = useMemo(() => {
+    const written = writeResults.filter((r) => r.status === 'success').length
+    const failed = writeResults.filter((r) => r.status === 'failed').length
+    const skipped = writeResults.filter((r) => r.status === 'skipped').length
+    const amountWritten = writeResults
+      .filter((r) => r.status === 'success' && r.writtenPrice)
+      .reduce((sum, r) => sum + (Number(r.writtenPrice) || 0), 0)
+    return {
+      done: writeResults.length,
+      total: Math.max(submittedCount ?? 0, writeResults.length),
+      written,
+      failed,
+      skipped,
+      amountWritten,
+    }
+  }, [writeResults, submittedCount])
 
   const handleWriteConfirmed = async () => {
     setShowWriteConfirm(false)
     if (!runId) return
     setLoadError(null)
+    const ids = willWrite.map((r) => r.extractionId)
+    setSubmittedCount(ids.length)
     try {
-      await startQuoteWrite(runId, willWrite.map((r) => r.extractionId), env)
+      await startQuoteWrite(runId, ids, env)
     } catch (err) {
+      setSubmittedCount(null)
       if (err instanceof ApiError && err.status === 409) {
         reportError(`A Vendor Quote job is already running (${err.activeRunId ?? "unknown"}).`)
       } else {
@@ -372,13 +401,89 @@ export default function VendorQuotes() {
             </Card>
           )}
 
+          {/* Live write progress. Deliberately its own card rather than a line
+              in the summary: a write is spending real money against real
+              orders, and while it's happening it should be the most
+              prominent thing on the page. */}
+          {isWriting && (
+            <Card className="border-accent p-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <Loader2 size={20} className="animate-spin text-accent" />
+                  <div>
+                    <p className="text-sm font-semibold text-text">
+                      Writing to {run.writeEnv ?? env} — {writeProgress.done} of {writeProgress.total}
+                    </p>
+                    <p className="mt-0.5 text-xs text-muted">
+                      {writeProgress.written} written
+                      {writeProgress.failed > 0 ? `, ${writeProgress.failed} failed` : ''}
+                      {writeProgress.skipped > 0 ? `, ${writeProgress.skipped} skipped` : ''}
+                      {writeProgress.amountWritten > 0
+                        ? ` · ${money(writeProgress.amountWritten, 'USD')} committed so far`
+                        : ''}
+                    </p>
+                  </div>
+                </div>
+                <SecondaryButton onClick={() => setShowCancelConfirm(true)} disabled={cancelling}>
+                  <StopCircle size={16} />
+                  {cancelling ? 'Cancelling...' : 'Cancel write'}
+                </SecondaryButton>
+              </div>
+
+              <div className="mt-4 h-1.5 w-full overflow-hidden rounded-full bg-bg">
+                <div
+                  className="h-full rounded-full bg-accent transition-all duration-300"
+                  style={{
+                    width: `${writeProgress.total > 0 ? Math.round((writeProgress.done / writeProgress.total) * 100) : 0}%`,
+                  }}
+                />
+              </div>
+
+              {/* The amounts themselves, as they land — the specific thing
+                  worth watching during a money write. */}
+              {writeResults.length > 0 && (
+                <ul className="mt-4 max-h-44 space-y-1 overflow-y-auto">
+                  {writeResults.map((r) => (
+                    <li key={r.extractionId} className="flex items-center gap-2 text-xs">
+                      {r.status === 'success' ? (
+                        <CheckCircle2 size={12} className="shrink-0 text-success" />
+                      ) : r.status === 'skipped' ? (
+                        <X size={12} className="shrink-0 text-muted" />
+                      ) : (
+                        <AlertTriangle size={12} className="shrink-0 text-danger" />
+                      )}
+                      <span className="font-medium text-accent">{r.orderNumber}</span>
+                      {r.writtenPrice && <span className="text-text">{money(Number(r.writtenPrice), 'USD')}</span>}
+                      {r.writtenEsd && <span className="text-muted">ESD {r.writtenEsd}</span>}
+                      <span className={r.status === 'success' ? 'text-success' : 'text-muted'}>
+                        {r.status === 'success' ? (r.markedRead ? 'written · email read' : 'written') : r.status}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </Card>
+          )}
+
           <Card className="flex flex-wrap items-center justify-between gap-3 p-4">
             <div className="flex items-center gap-2 text-sm text-text">
               {isRunning ? (
                 <>
                   <Loader2 size={16} className="animate-spin text-accent" />
-                  {run.phase === 'reading-outlook' ? 'Reading Outlook folder...' : 'Extracting PDFs...'}
-                  {run.pdfCount ? ` (${rows.length} of ${run.pdfCount})` : ''}
+                  {run.phase === 'writing'
+                    ? `Writing to MXI — ${writeProgress.done} of ${writeProgress.total}`
+                    : run.phase === 'reading-outlook'
+                      ? 'Reading Outlook folder...'
+                      : `Extracting PDFs...${run.pdfCount ? ` (${rows.length} of ${run.pdfCount})` : ''}`}
+                </>
+              ) : hasWriteRun ? (
+                <>
+                  <CheckCircle2 size={16} className="text-success" />
+                  {run.status === 'cancelled' ? 'Write cancelled — ' : 'Write complete — '}
+                  {writeProgress.written} written
+                  {writeProgress.failed > 0 ? `, ${writeProgress.failed} failed` : ''}
+                  {writeProgress.skipped > 0 ? `, ${writeProgress.skipped} skipped` : ''}
+                  {writeProgress.amountWritten > 0 ? ` · ${money(writeProgress.amountWritten, 'USD')} total` : ''}
                 </>
               ) : (
                 <>
@@ -609,8 +714,12 @@ export default function VendorQuotes() {
 
       {showCancelConfirm && (
         <ConfirmDialog
-          title="Cancel this run?"
-          message="This stops after the current PDF. Quotes already extracted stay recorded. Nothing has been written to MXI or your mailbox, so there's nothing to undo."
+          title={isWriting ? 'Cancel this write?' : 'Cancel this run?'}
+          message={
+            isWriting
+              ? "This stops after the current order. Orders already written are real and stay written — they are not rolled back. Anything not yet attempted is simply left alone, still unread in the folder, and can be run again."
+              : "This stops after the current PDF. Quotes already extracted stay recorded. Nothing has been written to MXI or your mailbox, so there's nothing to undo."
+          }
           confirmLabel="Yes, cancel"
           cancelLabel="Never mind"
           onConfirm={handleCancelConfirmed}

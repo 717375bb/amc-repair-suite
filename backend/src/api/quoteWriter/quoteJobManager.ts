@@ -131,10 +131,15 @@ function handleEnvelope(job: QuoteJob, envelope: unknown): void {
   if (e.type === 'phase') {
     job.phase = e.phase ?? null;
   } else if (e.type === 'summary') {
+    // Every field is applied only when the envelope actually carries it.
+    // The WRITE runner emits a summary too, but without scannedCount /
+    // pdfCount / folderPath — an unconditional `?? null` would blank the
+    // ingest's real counts the moment a write started, making the header
+    // read "0 PDFs" mid-write.
     if (e.dbRunId !== undefined) job.dbRunId = e.dbRunId;
     if (e.folderPath !== undefined) job.folderPath = e.folderPath;
-    job.scannedCount = e.scannedCount ?? null;
-    job.pdfCount = e.pdfCount ?? null;
+    if (e.scannedCount !== undefined) job.scannedCount = e.scannedCount;
+    if (e.pdfCount !== undefined) job.pdfCount = e.pdfCount;
   } else if (e.type === 'extraction' && e.row) {
     // Keyed on extractionId (a real DB primary key), so a row can never be
     // silently merged with a different PDF that happens to share an order
