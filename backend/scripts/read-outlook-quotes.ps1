@@ -81,6 +81,16 @@ $rootStore = $null
 foreach ($store in $namespace.Folders) { $rootStore = $store; break }
 if ($null -eq $rootStore) { Fail "No mail stores found in this Outlook profile." }
 
+# Accept BOTH the mailbox-relative form ("Inbox\Quotes") and the full form
+# Outlook itself displays ("\\brayden.bury@PSAAirlines.com\Inbox\Quotes").
+# The leading backslashes are already gone (empty segments filtered above);
+# this drops a redundant leading store name so the full form a user would
+# naturally copy out of Outlook resolves identically to the short one.
+if ($segments.Count -gt 1 -and $segments[0] -ieq $rootStore.Name) {
+  Write-Diag ("Stripped redundant leading store name '" + $segments[0] + "' from FolderPath.")
+  $segments = $segments[1..($segments.Count - 1)]
+}
+
 $current = $rootStore
 $walked = @($rootStore.Name)
 
