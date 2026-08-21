@@ -14,7 +14,7 @@ import { MxiClient } from './mxiWriter/mxiClient.js';
 import { writeEsdAndNotes } from './mxiWriter/writeEsdAndNotes.js';
 import { cancelJob, getActiveJob, getJob, getVendorList, startDiscoveryJob, startExecuteJob } from './api/jobManager.js';
 import { isKnownVendorId, listCraGroupsForKnownVendors } from './api/vendors.js';
-import { applyQuoteDisposition, cancelQuoteJob, getActiveQuoteJob, getQuoteJob, startQuoteIngestJob } from './api/quoteWriter/quoteJobManager.js';
+import { applyQuoteDisposition, cancelQuoteJob, getActiveQuoteJob, getQuoteJob, startQuoteIngestJob, startQuoteWriteJob } from './api/quoteWriter/quoteJobManager.js';
 import { isHumanSettableDisposition } from './quoteWriter/quoteDisposition.js';
 import { cancelEsdJob, getActiveEsdJob, getEsdJob, startEsdCompareJob, startEsdWriteJob } from './api/esdFinder/esdFinderJobManager.js';
 import { MissingHeadersError, peekEsdFinderFile, validateHeadersOnly } from './api/esdFinder/ingestion.js';
@@ -655,10 +655,74 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
       fatalError: job.fatalError,
       phase: job.phase,
       folderPath: job.folderPath,
+      kind: job.kind,
       scannedCount: job.scannedCount,
       pdfCount: job.pdfCount,
       rows: job.rows,
+      writeEnv: job.writeEnv,
+      writeResults: job.writeResults,
     });
+  });
+
+  /**
+   * Writes approved quotes into MXI: Unit Price + Price Type=QUOTE +
+   * Promise By (the ESD derived from the vendor's own quote), then marks
+   * each source email read — but only after a verified-successful write.
+   *
+   * `env` is required and explicit, never defaulted: this endpoint spends
+   * real money against real orders, and "which environment" must be a
+   * deliberate choice on every single call, the same rule the ESD Finder's
+   * own write endpoint follows.
+   *
+   * Requested ids are validated to belong to this run, but the authoritative
+   * writability check (disposition, already-written, missing fields) lives
+   * in quoteWriteRunner.ts against the DB — a stray or replayed id cannot
+   * force a write of something marked NREP/BER/excluded.
+   */
+  app.post('/api/quotes/write', requireSession, (req, res) => {
+    const env = parseRequiredEnv(req, res);
+    if (!env) return;
+
+    const { runId, extractionIds } = req.body ?? {};
+    if (typeof runId !== 'string' || !runId) {
+      res.status(400).json({ error: 'runId is required.' });
+      return;
+    }
+    if (
+      !Array.isArray(extractionIds) ||
+      extractionIds.length === 0 ||
+      !extractionIds.every((id) => Number.isInteger(id) && id > 0)
+    ) {
+      res.status(400).json({ error: 'extractionIds must be a non-empty array of positive integers.' });
+      return;
+    }
+
+    const job = getQuoteJob(runId);
+    if (!job) {
+      res.status(404).json({ error: `No Vendor Quote run found for runId "${runId}".` });
+      return;
+    }
+    const knownIds = new Set(job.rows.map((r) => r.extractionId));
+    const foreign = extractionIds.filter((id: number) => !knownIds.has(id));
+    if (foreign.length > 0) {
+      res.status(400).json({
+        error: `Extraction id(s) ${foreign.join(', ')} do not belong to run "${runId}". Refusing the whole request.`,
+      });
+      return;
+    }
+
+    const session = (req as AuthedRequest).session!;
+    const mxiCredential = getMxiCredentialForUser(authDb, session.userId);
+    const result = startQuoteWriteJob(runId, env, extractionIds, mxiCredential);
+    if (!result.ok) {
+      if (result.conflictRunId) {
+        res.status(409).json({ error: 'A Vendor Quote job is already running.', activeRunId: result.conflictRunId });
+      } else {
+        res.status(400).json({ error: result.error });
+      }
+      return;
+    }
+    res.status(202).json({ runId, env });
   });
 
   /**

@@ -3,16 +3,20 @@ import { AlertTriangle, CheckCircle2, FileText, Loader2, Mail, PlayCircle, Rotat
 import { Badge, Card, CardHeader, PrimaryButton, SecondaryButton } from '../components/ui'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { ApiError } from '../lib/api'
+import { EnvironmentBar } from '../components/EnvironmentBar'
 import {
   cancelQuoteRun,
   getActiveQuoteJob,
   getQuoteRun,
   setQuoteDisposition,
   startQuoteIngest,
+  startQuoteWrite,
   type HumanSettableDisposition,
+  type MxiEnv,
   type QuoteDisposition,
   type QuoteExtractionRow,
   type QuoteRunStatusResponse,
+  type QuoteWriteResult,
 } from '../lib/quoteApi'
 
 const POLL_MS = 2000
@@ -60,6 +64,77 @@ function dispositionBadge(d: QuoteDisposition): { label: string; tone: 'success'
   }
 }
 
+/**
+ * Per-row MXI write outcome.
+ *
+ * Deliberately shows a successful write whose EMAIL didn't get marked read
+ * as a success with a footnote, not as a failure — the price and ESD really
+ * did land in MXI, and reporting that as failed would invite someone to
+ * "retry" a write that already happened.
+ */
+function WriteStatusCell({
+  result,
+  excluded,
+  jobDone,
+}: {
+  result: QuoteWriteResult | undefined
+  excluded: boolean
+  jobDone: boolean
+}) {
+  const [showDetail, setShowDetail] = useState(false)
+
+  if (excluded) return <span className="text-xs text-muted">Not submitted (excluded)</span>
+  if (!result) {
+    if (jobDone) return <span className="text-xs text-muted">Not attempted</span>
+    return (
+      <span className="flex items-center gap-1.5 text-xs text-muted">
+        <Loader2 size={13} className="animate-spin" />
+        Writing...
+      </span>
+    )
+  }
+
+  if (result.status === 'success') {
+    return (
+      <div>
+        <span className="flex items-center gap-1.5 text-xs font-medium text-success">
+          <CheckCircle2 size={13} />
+          Written — verified
+        </span>
+        {result.markedRead ? (
+          <p className="mt-0.5 text-xs text-muted">Email marked read</p>
+        ) : (
+          <p className="mt-0.5 text-xs text-warning" title={result.markReadError ?? undefined}>
+            Written, but the email couldn&apos;t be marked read
+          </p>
+        )}
+      </div>
+    )
+  }
+
+  if (result.status === 'skipped') {
+    return <span className="text-xs text-muted">Skipped — {result.errorMessage ?? 'not eligible'}</span>
+  }
+
+  return (
+    <div>
+      <span className="flex items-center gap-1.5 text-xs font-semibold text-danger">
+        <AlertTriangle size={13} />
+        Write failed
+      </span>
+      <p className="mt-0.5 text-xs text-muted">Email left unread, so it stays in the queue.</p>
+      {result.errorMessage && (
+        <button type="button" onClick={() => setShowDetail((s) => !s)} className="mt-0.5 text-xs text-accent hover:underline">
+          {showDetail ? 'Hide' : 'Show'} details
+        </button>
+      )}
+      {showDetail && result.errorMessage && (
+        <pre className="mt-1 max-w-xs whitespace-pre-wrap rounded bg-bg p-2 text-xs text-muted">{result.errorMessage}</pre>
+      )}
+    </div>
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Main page
 // ---------------------------------------------------------------------------
@@ -72,6 +147,8 @@ export default function VendorQuotes() {
   const [unreadOnly, setUnreadOnly] = useState(true)
   const [showCancelConfirm, setShowCancelConfirm] = useState(false)
   const [cancelling, setCancelling] = useState(false)
+  const [env, setEnv] = useState<MxiEnv>('production')
+  const [showWriteConfirm, setShowWriteConfirm] = useState(false)
 
   const pollRef = useRef<number | null>(null)
   const isRunning = !!runId && !isTerminal(run?.status)
@@ -160,6 +237,28 @@ export default function VendorQuotes() {
     } catch (err) {
       setPendingDisposition((prev) => ({ ...prev, [row.extractionId]: previous }))
       setLoadError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  const writeResults = run?.writeResults ?? []
+  const writeResultByExtraction = useMemo(
+    () => new Map(writeResults.map((r) => [r.extractionId, r])),
+    [writeResults],
+  )
+  const hasWriteRun = writeResults.length > 0 || run?.kind === 'write'
+
+  const handleWriteConfirmed = async () => {
+    setShowWriteConfirm(false)
+    if (!runId) return
+    setLoadError(null)
+    try {
+      await startQuoteWrite(runId, willWrite.map((r) => r.extractionId), env)
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        setLoadError(`A Vendor Quote job is already running (${err.activeRunId ?? 'unknown'}).`)
+      } else {
+        setLoadError(err instanceof Error ? err.message : String(err))
+      }
     }
   }
 
@@ -286,6 +385,29 @@ export default function VendorQuotes() {
             </div>
           )}
 
+          {!isRunning && quotes.length > 0 && (
+            <>
+              <EnvironmentBar env={env} onChange={setEnv} disabled={isRunning} />
+              <div className="flex items-center justify-between gap-3 rounded-md border border-border bg-surface px-4 py-3">
+                <p className="text-sm text-text">
+                  {willWrite.length > 0 ? (
+                    <>
+                      <span className="font-semibold">{willWrite.length}</span> quote(s) will be written to{' '}
+                      <span className="font-semibold">{env}</span> — price, Price Type=QUOTE, and ESD as Promise By.
+                      Their emails get marked read only after the write is verified.
+                    </>
+                  ) : (
+                    'No quotes are currently marked to write — every row is excluded.'
+                  )}
+                </p>
+                <PrimaryButton onClick={() => setShowWriteConfirm(true)} disabled={willWrite.length === 0}>
+                  <PlayCircle size={16} />
+                  Write {willWrite.length} to MXI
+                </PrimaryButton>
+              </div>
+            </>
+          )}
+
           <Card>
             <CardHeader title="Extracted quotes" description={`${quotes.length} quote(s) read from ${run.pdfCount ?? 0} PDF(s).`} />
             <div className="overflow-x-auto">
@@ -301,6 +423,7 @@ export default function VendorQuotes() {
                     <th className="px-5 py-3 font-medium">Basis</th>
                     <th className="px-5 py-3 font-medium">Conf.</th>
                     <th className="px-5 py-3 font-medium">Disposition</th>
+                    {hasWriteRun && <th className="px-5 py-3 font-medium">Write status</th>}
                     <th className="px-5 py-3 font-medium text-right">Actions</th>
                   </tr>
                 </thead>
@@ -338,9 +461,20 @@ export default function VendorQuotes() {
                           </p>
                         )}
                       </td>
+                      {hasWriteRun && (
+                        <td className="px-5 py-3">
+                          <WriteStatusCell
+                            result={writeResultByExtraction.get(r.extractionId)}
+                            excluded={excluded}
+                            jobDone={!isRunning}
+                          />
+                        </td>
+                      )}
                       <td className="px-5 py-3">
                         <div className="flex items-center justify-end gap-1.5">
-                          {disp === 'pending' ? (
+                          {hasWriteRun ? (
+                            <span className="text-xs text-muted">—</span>
+                          ) : disp === 'pending' ? (
                             <>
                               <button
                                 type="button"
@@ -429,6 +563,21 @@ export default function VendorQuotes() {
             </Card>
           )}
         </>
+      )}
+
+      {showWriteConfirm && (
+        <ConfirmDialog
+          title={`Write ${willWrite.length} quote(s) to ${env}?`}
+          message={
+            `This updates real orders in ${env}: Unit Price, Price Type = QUOTE, and Promise By set to each quote's ESD. ` +
+            `Each source email is marked read only after its write is verified — anything that fails stays unread and can be re-run. ` +
+            `Excluded, BER, and NREP rows are not touched.`
+          }
+          confirmLabel={`Yes, write to ${env}`}
+          cancelLabel="Never mind"
+          onConfirm={handleWriteConfirmed}
+          onCancel={() => setShowWriteConfirm(false)}
+        />
       )}
 
       {showCancelConfirm && (

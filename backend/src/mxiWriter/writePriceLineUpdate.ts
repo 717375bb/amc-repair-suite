@@ -82,6 +82,19 @@ export async function writePriceLineUpdate(
   sheetSerialNumber: string,
   newPrice: string,
   password: string,
+  /**
+   * Promise By date to write, already in MXI's DD-MMM-YYYY format.
+   *
+   * OMITTED (the Invoice Price Writer's own behavior, unchanged): defaults
+   * to tomorrow. Those orders are typically already received, so the date
+   * no longer means anything — it just must not be stale.
+   *
+   * SUPPLIED by the Vendor Quote Writer: the ESD derived from the vendor's
+   * own quote, which is a real forward-looking promise the receiving side
+   * will actually rely on. Optional-with-a-default specifically so adding
+   * this second caller changes nothing about the already-live first one.
+   */
+  promiseByDate?: string,
 ): Promise<PriceLineUpdateResult> {
   let page: Page | undefined;
 
@@ -125,11 +138,11 @@ export async function writePriceLineUpdate(
       };
     }
 
-    const promiseByTomorrow = tomorrowInMxiFormat();
+    const promiseBy = promiseByDate ?? tomorrowInMxiFormat();
 
     await updateUnitPrice(page, newPrice);
     await updatePriceType(page, 'QUOTE');
-    await updateEsdField(page, promiseByTomorrow);
+    await updateEsdField(page, promiseBy);
     await confirmEsdLineEdit(page);
 
     // Real, detectable page state — not a guessed business rule for when
@@ -147,12 +160,12 @@ export async function writePriceLineUpdate(
     const confirmedEsd = await readEsdField(page);
 
     const priceOk = pricesMatch(confirmedPrice, newPrice);
-    const esdOk = confirmedEsd === promiseByTomorrow;
+    const esdOk = confirmedEsd === promiseBy;
 
     if (!priceOk || !esdOk) {
       const problems: string[] = [];
       if (!priceOk) problems.push(`price re-read as "${confirmedPrice ?? '(blank)'}", expected "${newPrice}"`);
-      if (!esdOk) problems.push(`Promise By re-read as "${confirmedEsd ?? '(blank)'}", expected "${promiseByTomorrow}"`);
+      if (!esdOk) problems.push(`Promise By re-read as "${confirmedEsd ?? '(blank)'}", expected "${promiseBy}"`);
       return {
         status: 'failed',
         outcome: 'failed',

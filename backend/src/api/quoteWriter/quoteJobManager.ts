@@ -1,5 +1,7 @@
 import type { ChildProcess } from 'node:child_process';
-import { requestCancellation, spawnRunner } from '../jobManager.js';
+import { mxiCredentialEnvOverrides, requestCancellation, spawnRunner } from '../jobManager.js';
+import type { MxiEnv } from '../../mxiWriter/config.js';
+import type { MxiCredential } from '../../auth/authService.js';
 import type { QuoteDisposition } from '../../quoteWriter/quoteDisposition.js';
 
 /**
@@ -51,8 +53,25 @@ export interface QuoteExtractionRow {
   reasoningNote: string;
 }
 
+export interface QuoteWriteResult {
+  extractionId: number;
+  orderNumber: string;
+  status: 'success' | 'failed' | 'skipped';
+  outcome: string | null;
+  originalPrice: string | null;
+  writtenPrice: string | null;
+  writtenEsd: string | null;
+  /** Whether the source email was marked read. Only ever true after a verified write. */
+  markedRead: boolean;
+  /** A mailbox bookkeeping miss — deliberately separate from errorMessage, which means the MXI write failed. */
+  markReadError: string | null;
+  errorMessage: string | null;
+}
+
 export interface QuoteJob {
   runId: string;
+  /** 'ingest' reads and extracts; 'write' pushes to MXI. Same run slot, two phases. */
+  kind: 'ingest' | 'write';
   status: QuoteJobStatus;
   startedAt: string;
   completedAt: string | null;
@@ -64,6 +83,9 @@ export interface QuoteJob {
   scannedCount: number | null;
   pdfCount: number | null;
   rows: QuoteExtractionRow[];
+  /** Populated by a write job. Keyed by extractionId. */
+  writeEnv: MxiEnv | null;
+  writeResults: QuoteWriteResult[];
   process: ChildProcess | null;
   cancelRequested: boolean;
 }
@@ -92,6 +114,16 @@ interface RunnerEnvelope {
   pdfCount?: number;
   row?: QuoteExtractionRow;
   message?: string;
+  extractionId?: number;
+  orderNumber?: string;
+  status?: 'success' | 'failed' | 'skipped';
+  outcome?: string | null;
+  originalPrice?: string | null;
+  writtenPrice?: string | null;
+  writtenEsd?: string | null;
+  markedRead?: boolean;
+  markReadError?: string | null;
+  errorMessage?: string | null;
 }
 
 function handleEnvelope(job: QuoteJob, envelope: unknown): void {
@@ -110,6 +142,22 @@ function handleEnvelope(job: QuoteJob, envelope: unknown): void {
     const idx = job.rows.findIndex((r) => r.extractionId === e.row!.extractionId);
     if (idx >= 0) job.rows[idx] = e.row;
     else job.rows.push(e.row);
+  } else if (e.type === 'order-result' && typeof e.extractionId === 'number') {
+    const result: QuoteWriteResult = {
+      extractionId: e.extractionId,
+      orderNumber: e.orderNumber ?? '',
+      status: e.status ?? 'failed',
+      outcome: e.outcome ?? null,
+      originalPrice: e.originalPrice ?? null,
+      writtenPrice: e.writtenPrice ?? null,
+      writtenEsd: e.writtenEsd ?? null,
+      markedRead: e.markedRead === true,
+      markReadError: e.markReadError ?? null,
+      errorMessage: e.errorMessage ?? null,
+    };
+    const idx = job.writeResults.findIndex((r) => r.extractionId === result.extractionId);
+    if (idx >= 0) job.writeResults[idx] = result;
+    else job.writeResults.push(result);
   } else if (e.type === 'fatal') {
     job.fatalError = e.message ?? 'Unknown fatal error';
   }
@@ -137,6 +185,7 @@ export function startQuoteIngestJob(options: StartQuoteIngestOptions): StartQuot
   const runId = nextRunId();
   const job: QuoteJob = {
     runId,
+    kind: 'ingest',
     status: 'running',
     startedAt: new Date().toISOString(),
     completedAt: null,
@@ -147,6 +196,8 @@ export function startQuoteIngestJob(options: StartQuoteIngestOptions): StartQuot
     scannedCount: null,
     pdfCount: null,
     rows: [],
+    writeEnv: null,
+    writeResults: [],
     process: null,
     cancelRequested: false,
   };
@@ -173,6 +224,65 @@ export function startQuoteIngestJob(options: StartQuoteIngestOptions): StartQuot
   );
 
   return { ok: true, runId };
+}
+
+export interface StartQuoteWriteResult {
+  ok: boolean;
+  error?: string;
+  conflictRunId?: string;
+}
+
+/**
+ * Starts the MXI write for specific extractions of an already-ingested run.
+ *
+ * Appends to the SAME runId the UI is already polling (like the Invoice
+ * Price Writer's retry does) rather than opening a second run, so the
+ * review table can show extraction and write outcomes side by side.
+ *
+ * Deliberately does NOT filter by disposition here — quoteWriteRunner.ts
+ * re-reads the effective disposition from the DB and refuses anything not
+ * writable. Filtering in two places invites the two from drifting apart;
+ * the runner's check is the one that actually protects a real order.
+ */
+export function startQuoteWriteJob(
+  runId: string,
+  env: MxiEnv,
+  extractionIds: number[],
+  mxiCredential: MxiCredential,
+): StartQuoteWriteResult {
+  if (activeRunId) return { ok: false, conflictRunId: activeRunId };
+
+  const job = jobs.get(runId);
+  if (!job) return { ok: false, error: `No Vendor Quote run found for runId "${runId}".` };
+  if (job.dbRunId === null) {
+    return { ok: false, error: `Run ${runId} has no recorded database run id — nothing to write from.` };
+  }
+  if (job.status === 'running' || job.status === 'pending') {
+    return { ok: false, error: `Run ${runId} is still in progress.` };
+  }
+  if (extractionIds.length === 0) return { ok: false, error: 'extractionIds must be a non-empty array.' };
+
+  job.kind = 'write';
+  job.status = 'running';
+  job.completedAt = null;
+  job.fatalError = null;
+  job.cancelRequested = false;
+  job.writeEnv = env;
+  activeRunId = runId;
+
+  job.process = spawnRunner(
+    'src/api/jobRunners/quoteWriteRunner.ts',
+    ['--env', env, '--db-run-id', String(job.dbRunId), '--extraction-ids', JSON.stringify(extractionIds)],
+    (envelope) => handleEnvelope(job, envelope),
+    (code) => {
+      job.completedAt = new Date().toISOString();
+      job.status = job.cancelRequested ? 'cancelled' : job.fatalError || code !== 0 ? 'failed' : 'completed';
+      if (activeRunId === runId) activeRunId = null;
+    },
+    mxiCredentialEnvOverrides(mxiCredential),
+  );
+
+  return { ok: true };
 }
 
 /**

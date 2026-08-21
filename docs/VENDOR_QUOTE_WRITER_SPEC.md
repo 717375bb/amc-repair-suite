@@ -147,11 +147,25 @@ later targets — EntryID is Outlook's own stable per-message identifier.
 
 ## 8. Build order (one stage, proven with real data, before the next)
 
-1. **Outlook reader** — real folder, real attachments saved, JSON emitted. Read-only.
-2. **Claude extraction** — against real quote PDFs; validate/revise the §5 schema.
-3. **Match + persist** — order-number lookup, DB tables, ingest job/endpoint.
-4. **Review UI** — State A/B/C with the PDF viewable next to extracted fields.
-5. **MXI write** — price + ESD, **stage first**, independently verified, then production.
+1. ~~**Outlook reader**~~ — DONE. Real folder, real attachments saved, JSON emitted, read-only proven (every touched message still unread).
+2. ~~**Claude extraction**~~ — DONE. Validated against real quote PDFs; schema revised from real evidence (email body added as input, NREP detection added).
+3. ~~**Match + persist**~~ — DONE. Order-number lookup, DB tables, ingest job/endpoint/CLI.
+4. ~~**Review UI**~~ — DONE at `/email-quotes`, replacing the old mock scaffold. Dispositions (NREP/BER/exclude) included.
+5. **MXI write** — BUILT, guards verified, **but no real write performed yet**. Price + ESD, stage first, one order, watched.
 
-Stage 1 begins now; nothing downstream is built on unverified assumptions
-about the stage before it.
+### Remaining open items
+
+- **The first real MXI write has not happened.** Everything around it is
+  tested — disposition guards, already-written guard, missing-field guard,
+  mark-as-read round-trip — but no price or ESD has actually been pushed by
+  this path. Do the first one as a single order against stage, watched, per
+  this project's standing discipline for any new kind of production action.
+- **The scrap process itself is still out of scope.** NREP and BER rows are
+  recorded and excluded from the write, waiting for that workflow to be
+  built.
+- **Extraction is not perfectly deterministic.** Prices were stable across
+  five real runs, but one document's completion date came back on three
+  runs and null on a fourth, shifting its derived ESD by five days. Human
+  review before writing is load-bearing, not ceremonial.
+- **Multi-line orders are skipped**, inherited from `writePriceLineUpdate()`'s
+  existing single-line limitation.

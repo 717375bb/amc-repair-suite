@@ -43,8 +43,24 @@ export interface QuoteExtractionRow {
 export type QuoteDisposition = 'pending' | 'excluded_nrep' | 'excluded_ber' | 'excluded_other'
 export type HumanSettableDisposition = 'pending' | 'excluded_ber' | 'excluded_other'
 
+export interface QuoteWriteResult {
+  extractionId: number
+  orderNumber: string
+  status: 'success' | 'failed' | 'skipped'
+  outcome: string | null
+  originalPrice: string | null
+  writtenPrice: string | null
+  writtenEsd: string | null
+  /** Whether the source email got marked read. Only ever true after a verified write. */
+  markedRead: boolean
+  /** Mailbox bookkeeping miss — NOT a failed MXI write. Deliberately separate from errorMessage. */
+  markReadError: string | null
+  errorMessage: string | null
+}
+
 export interface QuoteRunStatusResponse {
   runId: string
+  kind: 'ingest' | 'write'
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
   startedAt: string
   completedAt: string | null
@@ -54,7 +70,11 @@ export interface QuoteRunStatusResponse {
   scannedCount: number | null
   pdfCount: number | null
   rows: QuoteExtractionRow[]
+  writeEnv: MxiEnv | null
+  writeResults: QuoteWriteResult[]
 }
+
+export type MxiEnv = 'stage' | 'production'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -96,6 +116,22 @@ export function getQuoteRun(runId: string): Promise<QuoteRunStatusResponse> {
 
 export function cancelQuoteRun(runId: string): Promise<{ ok: boolean }> {
   return request(`/api/quotes/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
+}
+
+/**
+ * Writes the selected quotes into MXI (price + Price Type=QUOTE + ESD as
+ * Promise By), then marks each source email read on success. `env` is
+ * always explicit — never defaulted client-side.
+ */
+export function startQuoteWrite(
+  runId: string,
+  extractionIds: number[],
+  env: MxiEnv,
+): Promise<{ runId: string; env: MxiEnv }> {
+  return request('/api/quotes/write', {
+    method: 'POST',
+    body: JSON.stringify({ runId, extractionIds, env }),
+  })
 }
 
 /**
