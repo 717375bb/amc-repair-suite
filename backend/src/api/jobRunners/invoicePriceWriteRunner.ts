@@ -152,6 +152,10 @@ async function main(): Promise<void> {
 
       log.info({ orderNumber: row.orderNumber }, 'invoice price writer: processing row');
       const result = await writePriceLineUpdate(client, row.orderNumber, row.serialNumber, row.newPrice, password);
+      // Logged for every row, success included: which authorize/issue path an
+      // order took (already authorized vs freshly authorized) is exactly the
+      // detail that was previously invisible.
+      if (result.issueDetail) log.info({ orderNumber: row.orderNumber, issueDetail: result.issueDetail }, 'authorize/issue outcome');
 
       insertInvoicePriceWrite(db, {
         runId,

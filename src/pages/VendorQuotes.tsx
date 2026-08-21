@@ -108,6 +108,14 @@ function WriteStatusCell({
             Written, but the email couldn&apos;t be marked read
           </p>
         )}
+        {/* Which authorize/issue path this order took. Shown on success
+            too — "already authorized, issue clicked" is a normal outcome
+            that used to be completely invisible. */}
+        {result.issueDetail && (
+          <p className="mt-0.5 max-w-xs text-xs text-muted" title={result.issueDetail}>
+            {result.issueDetail.startsWith('Already authorized') ? 'Already authorized · issued' : 'Authorized · issued'}
+          </p>
+        )}
       </div>
     )
   }

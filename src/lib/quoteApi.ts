@@ -55,6 +55,8 @@ export interface QuoteWriteResult {
   markedRead: boolean
   /** Mailbox bookkeeping miss — NOT a failed MXI write. Deliberately separate from errorMessage. */
   markReadError: string | null
+  /** What happened at the authorize/issue step. Present on success too. */
+  issueDetail: string | null
   errorMessage: string | null
 }
 

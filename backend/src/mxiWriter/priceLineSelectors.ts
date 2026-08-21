@@ -112,3 +112,78 @@ export async function performReauthorization(page: Page, password: string): Prom
 export async function countOrderLines(page: Page): Promise<number> {
   return page.locator('input[id^="idUnitPrice_"]').count();
 }
+
+/**
+ * The "Issue Order" step, made tolerant of the order already being
+ * authorized.
+ *
+ * REAL CASE, per explicit user direction (2026-08-21): an order that is
+ * already authorized shows NO "Request Authorization" action, but the Issue
+ * control is still present and still has to be clicked — and that run
+ * should count as a success.
+ *
+ * The previous code always called selectors.ts's reissueOrder(), which
+ * clicks a hard-coded 'Issue Order' link and THROWS on a timeout if it
+ * isn't found. That turned an otherwise-perfectly-good write (price and ESD
+ * both committed) into a reported failure. This version never throws for a
+ * missing control: it reports what it actually found, and lets the caller
+ * judge against the real order state instead.
+ *
+ * 'Issue Order' is the only label ever confirmed against real MXI in this
+ * project, so it is tried first and exactly. Rather than GUESS at
+ * alternatives — which this project's discipline forbids — an unmatched
+ * case enumerates every link whose name starts with "Issue" and returns
+ * them as evidence, so the first real occurrence tells us the true label
+ * instead of failing blind.
+ */
+export interface IssueControlResult {
+  clicked: boolean;
+  /** The label actually clicked, or null when nothing was. */
+  label: string | null;
+  /** Every "Issue*" link present when the expected one wasn't matched — real evidence, not a guess. */
+  candidates: string[];
+}
+
+export async function clickIssueOrderTolerant(page: Page): Promise<IssueControlResult> {
+  const exact = page.getByRole('link', { name: 'Issue Order' });
+  if ((await exact.count()) > 0) {
+    await exact.first().click();
+    await pace(page);
+    await confirmIssueDialogIfPresent(page);
+    return { clicked: true, label: 'Issue Order', candidates: [] };
+  }
+
+  // Not the confirmed label. Collect what IS there before deciding.
+  const candidates = (await page.getByRole('link').allInnerTexts())
+    .map((t) => t.replace(/\s+/g, ' ').trim())
+    .filter((t) => /^issue\b/i.test(t));
+
+  const unique = [...new Set(candidates)];
+  if (unique.length === 1) {
+    await page.getByRole('link', { name: unique[0] }).first().click();
+    await pace(page);
+    await confirmIssueDialogIfPresent(page);
+    return { clicked: true, label: unique[0], candidates: unique };
+  }
+
+  // Zero candidates (already issued, or the action genuinely isn't
+  // offered), or several (ambiguous — never guess which one issues a real
+  // order). Report rather than act.
+  return { clicked: false, label: null, candidates: unique };
+}
+
+/**
+ * The confirmation that follows Issue Order. Best-effort with a short
+ * timeout: it does not always appear, and blocking the full default
+ * timeout on an absent dialog would stall every order in a batch.
+ */
+async function confirmIssueDialogIfPresent(page: Page): Promise<void> {
+  const ok = page.getByRole('link', { name: 'OK', exact: true });
+  try {
+    await ok.first().waitFor({ state: 'visible', timeout: 5000 });
+  } catch {
+    return; // no confirmation shown — nothing to click
+  }
+  await ok.first().click();
+  await pace(page);
+}

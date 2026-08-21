@@ -65,6 +65,8 @@ export interface QuoteWriteResult {
   markedRead: boolean;
   /** A mailbox bookkeeping miss — deliberately separate from errorMessage, which means the MXI write failed. */
   markReadError: string | null;
+  /** What happened at the authorize/issue step. Present on success too. */
+  issueDetail: string | null;
   errorMessage: string | null;
 }
 
@@ -123,6 +125,7 @@ interface RunnerEnvelope {
   writtenEsd?: string | null;
   markedRead?: boolean;
   markReadError?: string | null;
+  issueDetail?: string | null;
   errorMessage?: string | null;
 }
 
@@ -158,6 +161,7 @@ function handleEnvelope(job: QuoteJob, envelope: unknown): void {
       writtenEsd: e.writtenEsd ?? null,
       markedRead: e.markedRead === true,
       markReadError: e.markReadError ?? null,
+      issueDetail: e.issueDetail ?? null,
       errorMessage: e.errorMessage ?? null,
     };
     const idx = job.writeResults.findIndex((r) => r.extractionId === result.extractionId);

@@ -266,6 +266,7 @@ async function main(): Promise<void> {
         writtenPrice: priceString,
         writtenEsd: row.resolved_esd,
         markedRead,
+        issueDetail: result.issueDetail,
         // Deliberately distinct from errorMessage: a mailbox bookkeeping
         // miss is NOT a failed MXI write, and must not read like one. Same
         // reasoning for replyStatus/replyError.

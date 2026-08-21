@@ -7,10 +7,11 @@ import {
   confirmEsdLineEdit,
   findOrderByNumber,
   readEsdField,
-  reissueOrder,
+  readIssuedCount,
   updateEsdField,
 } from './selectors.js';
 import {
+  clickIssueOrderTolerant,
   countOrderLines,
   isReauthorizationNeeded,
   performReauthorization,
@@ -18,6 +19,7 @@ import {
   readUnitPrice,
   updatePriceType,
   updateUnitPrice,
+  type IssueControlResult,
 } from './priceLineSelectors.js';
 
 export type PriceLineOutcome =
@@ -32,6 +34,13 @@ export interface PriceLineUpdateResult {
   outcome: PriceLineOutcome;
   originalPrice: string | null;
   serialNumberMxi: string | null;
+  /**
+   * Plain-English record of the authorize/issue step — whether the order was
+   * already authorized, which Issue control was clicked, and whether the
+   * issued count actually moved. Present on success too: "already authorized,
+   * issue clicked" is a normal outcome worth seeing, not just an error case.
+   */
+  issueDetail: string | null;
   errorMessage: string | null;
 }
 
@@ -54,6 +63,47 @@ function parsePriceToCents(value: string): number | null {
   const numeric = Number(value.replace(/,/g, '').trim());
   if (!Number.isFinite(numeric)) return null;
   return Math.round(numeric * 100);
+}
+
+/**
+ * Turns the issue step's raw evidence into one plain-English line for the
+ * audit trail and the UI.
+ *
+ * Deliberately descriptive rather than pass/fail: the ONLY thing that makes
+ * this write a failure is price or ESD not verifying (below). An order that
+ * was already authorized and already issued is a normal, successful
+ * outcome, not an error — which is the exact case that used to be reported
+ * as a failure.
+ */
+function describeIssueOutcome(
+  authWasNeeded: boolean,
+  issue: IssueControlResult,
+  issuedBefore: number | null,
+  issuedAfter: number | null,
+): string {
+  const authPart = authWasNeeded
+    ? 'Authorization was requested'
+    : 'Already authorized (no Request Authorization action present)';
+
+  if (issue.clicked) {
+    const committed =
+      issuedBefore !== null && issuedAfter !== null && issuedAfter > issuedBefore
+        ? `issued count ${issuedBefore} -> ${issuedAfter}`
+        : `issued count ${issuedAfter ?? '(unreadable)'} (no confirmed increment)`;
+    return `${authPart}; clicked "${issue.label}"; ${committed}.`;
+  }
+
+  if (issue.candidates.length > 1) {
+    return (
+      `${authPart}; did NOT issue — several ambiguous issue-like actions were present ` +
+      `(${issue.candidates.join(', ')}) and guessing which one issues a real order is not safe.`
+    );
+  }
+
+  return (
+    `${authPart}; no Issue action was present on the page. ` +
+    `Issued count reads ${issuedAfter ?? '(unreadable)'} — if that is 1 or more the order was already issued.`
+  );
 }
 
 function pricesMatch(confirmed: string | null, expected: string): boolean {
@@ -97,6 +147,13 @@ export async function writePriceLineUpdate(
   promiseByDate?: string,
 ): Promise<PriceLineUpdateResult> {
   let page: Page | undefined;
+  /**
+   * What actually happened at the authorize/issue step. Declared out here
+   * so it survives into the result and the catch block — an order that was
+   * already authorized and simply needed Issue clicked should be able to
+   * SAY that, whatever else happens afterward.
+   */
+  let issueDetail: string | null = null;
 
   try {
     page = await client.getAuthenticatedPage();
@@ -109,6 +166,7 @@ export async function writePriceLineUpdate(
         outcome: 'skipped_order_not_found',
         originalPrice: null,
         serialNumberMxi: null,
+        issueDetail: null,
         errorMessage: `No order line found for ${orderNumber} after opening Edit Lines.`,
       };
     }
@@ -118,6 +176,7 @@ export async function writePriceLineUpdate(
         outcome: 'skipped_multi_line',
         originalPrice: null,
         serialNumberMxi: null,
+        issueDetail: null,
         errorMessage: `Order ${orderNumber} has ${lineCount} lines on Edit Lines — skipping rather than guessing which one to update (this project's existing limitation: only single-line orders are handled).`,
       };
     }
@@ -134,6 +193,7 @@ export async function writePriceLineUpdate(
         outcome: 'skipped_serial_mismatch',
         originalPrice,
         serialNumberMxi,
+        issueDetail: null,
         errorMessage: `Serial number mismatch: sheet says "${sheetSerialNumber}", MXI shows "${serialNumberMxi ?? '(none found)'}" — refusing to write.`,
       };
     }
@@ -147,11 +207,26 @@ export async function writePriceLineUpdate(
 
     // Real, detectable page state — not a guessed business rule for when
     // authorization is/isn't required.
-    if (await isReauthorizationNeeded(page)) {
+    const authWasNeeded = await isReauthorizationNeeded(page);
+    if (authWasNeeded) {
       await performReauthorization(page, password);
     }
 
-    await reissueOrder(page);
+    // Issue is required in BOTH cases — whether we just authorized, or the
+    // order was ALREADY authorized and showed no Request Authorization
+    // action at all (per explicit user direction, 2026-08-21: that second
+    // case still needs Issue clicked, and still counts as a success).
+    //
+    // Before/after "Issued: N times" is what actually proves the click
+    // took. This project has already documented an Issue Order click that
+    // reports no error yet doesn't commit (see writeEsdAndNotes.ts's
+    // reissueOrder reliability gap), so the click's own apparent success is
+    // not trusted here either.
+    const issuedBefore = await readIssuedCount(page);
+    const issueResult = await clickIssueOrderTolerant(page);
+    const issuedAfter = await readIssuedCount(page);
+
+    issueDetail = describeIssueOutcome(authWasNeeded, issueResult, issuedBefore, issuedAfter);
 
     // Independent re-verification, regardless of whether anything above
     // threw — same discipline as writeEsdAndNotes().
@@ -171,11 +246,12 @@ export async function writePriceLineUpdate(
         outcome: 'failed',
         originalPrice,
         serialNumberMxi,
-        errorMessage: `Write did not verify: ${problems.join('; ')}`,
+        issueDetail,
+        errorMessage: `Write did not verify: ${problems.join('; ')}${issueDetail ? ` | ${issueDetail}` : ''}`,
       };
     }
 
-    return { status: 'success', outcome: 'written', originalPrice, serialNumberMxi, errorMessage: null };
+    return { status: 'success', outcome: 'written', originalPrice, serialNumberMxi, issueDetail, errorMessage: null };
   } catch (err) {
     if (page) {
       await attemptCancelEdit(page);
@@ -183,6 +259,7 @@ export async function writePriceLineUpdate(
     return {
       status: 'failed',
       outcome: 'failed',
+      issueDetail,
       originalPrice: null,
       serialNumberMxi: null,
       errorMessage: err instanceof Error ? err.message : String(err),
