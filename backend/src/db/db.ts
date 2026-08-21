@@ -110,6 +110,63 @@ CREATE TABLE IF NOT EXISTS invoice_price_writes (
   error_message TEXT,
   created_at TEXT NOT NULL
 );
+
+-- Vendor Quote Writer (docs/VENDOR_QUOTE_WRITER_SPEC.md). Same append-only
+-- run/extraction/write shape as runs/esd_inferences/mxi_writes.
+CREATE TABLE IF NOT EXISTS quote_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  started_at TEXT NOT NULL,
+  folder_path TEXT NOT NULL,
+  scanned_count INTEGER NOT NULL,
+  pdf_count INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS quote_extractions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL REFERENCES quote_runs(id),
+  -- Outlook's own stable per-message id; what mark-outlook-mail-read targets.
+  source_entry_id TEXT NOT NULL,
+  subject TEXT,
+  sender_name TEXT,
+  sender_email TEXT,
+  received_time TEXT,
+  file_name TEXT NOT NULL,
+  saved_path TEXT NOT NULL,
+  document_kind TEXT NOT NULL,
+  order_number TEXT,
+  order_number_source TEXT,
+  quote_number TEXT,
+  vendor_name TEXT,
+  part_number TEXT,
+  serial_number TEXT,
+  unit_price REAL,
+  currency TEXT,
+  quote_date TEXT,
+  promised_ship_date TEXT,
+  lead_time_days INTEGER,
+  -- Derived by quoteEsd.ts, stored so the write step never re-derives it.
+  resolved_esd TEXT,
+  esd_basis TEXT,
+  needs_review INTEGER NOT NULL DEFAULT 0,
+  confidence TEXT,
+  reasoning_note TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS quote_writes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  quote_extraction_id INTEGER NOT NULL REFERENCES quote_extractions(id),
+  order_number TEXT NOT NULL,
+  target_env TEXT NOT NULL,
+  written_price TEXT,
+  written_esd TEXT,
+  write_status TEXT NOT NULL,
+  error_message TEXT,
+  -- Whether the source email was successfully marked read afterwards.
+  marked_read INTEGER NOT NULL DEFAULT 0,
+  approved_by TEXT,
+  created_at TEXT NOT NULL
+);
 `;
 
 /**
@@ -804,4 +861,120 @@ export function getOrdersAwaitingDockMove(db: Database.Database): WriteUpIssueDe
     )
     .all() as RawWriteUpIssueDecisionRow[];
   return rows.map(rowToWriteUpIssueDecision);
+}
+
+// ---------------------------------------------------------------------------
+// Vendor Quote Writer — docs/VENDOR_QUOTE_WRITER_SPEC.md
+// ---------------------------------------------------------------------------
+
+export interface QuoteRunInsert {
+  startedAt: string;
+  folderPath: string;
+  scannedCount: number;
+  pdfCount: number;
+}
+
+export function insertQuoteRun(db: Database.Database, params: QuoteRunInsert): number {
+  const stmt = db.prepare(
+    'INSERT INTO quote_runs (started_at, folder_path, scanned_count, pdf_count) VALUES (?, ?, ?, ?)',
+  );
+  const result = stmt.run(params.startedAt, params.folderPath, params.scannedCount, params.pdfCount);
+  return Number(result.lastInsertRowid);
+}
+
+export interface QuoteExtractionInsert {
+  runId: number;
+  sourceEntryId: string;
+  subject: string | null;
+  senderName: string | null;
+  senderEmail: string | null;
+  receivedTime: string | null;
+  fileName: string;
+  savedPath: string;
+  documentKind: string;
+  orderNumber: string | null;
+  orderNumberSource: string | null;
+  quoteNumber: string | null;
+  vendorName: string | null;
+  partNumber: string | null;
+  serialNumber: string | null;
+  unitPrice: number | null;
+  currency: string | null;
+  quoteDate: string | null;
+  promisedShipDate: string | null;
+  leadTimeDays: number | null;
+  resolvedEsd: string | null;
+  esdBasis: string | null;
+  needsReview: boolean;
+  confidence: string | null;
+  reasoningNote: string | null;
+}
+
+/** Always an INSERT — quote_extractions is append-only, same as every other audit table here. */
+export function insertQuoteExtraction(db: Database.Database, params: QuoteExtractionInsert): number {
+  const stmt = db.prepare(`
+    INSERT INTO quote_extractions (
+      run_id, source_entry_id, subject, sender_name, sender_email, received_time,
+      file_name, saved_path, document_kind, order_number, order_number_source,
+      quote_number, vendor_name, part_number, serial_number, unit_price, currency,
+      quote_date, promised_ship_date, lead_time_days, resolved_esd, esd_basis,
+      needs_review, confidence, reasoning_note, created_at
+    ) VALUES (
+      @runId, @sourceEntryId, @subject, @senderName, @senderEmail, @receivedTime,
+      @fileName, @savedPath, @documentKind, @orderNumber, @orderNumberSource,
+      @quoteNumber, @vendorName, @partNumber, @serialNumber, @unitPrice, @currency,
+      @quoteDate, @promisedShipDate, @leadTimeDays, @resolvedEsd, @esdBasis,
+      @needsReview, @confidence, @reasoningNote, @createdAt
+    )
+  `);
+  const result = stmt.run({
+    ...params,
+    needsReview: params.needsReview ? 1 : 0,
+    createdAt: new Date().toISOString(),
+  });
+  return Number(result.lastInsertRowid);
+}
+
+export interface QuoteWriteInsert {
+  quoteExtractionId: number;
+  orderNumber: string;
+  targetEnv: string;
+  writtenPrice: string | null;
+  writtenEsd: string | null;
+  writeStatus: 'success' | 'failed' | 'skipped';
+  errorMessage: string | null;
+  markedRead: boolean;
+  approvedBy: string | null;
+}
+
+/** Always an INSERT. quote_writes is append-only — never update or delete rows here. */
+export function insertQuoteWrite(db: Database.Database, params: QuoteWriteInsert): number {
+  const stmt = db.prepare(`
+    INSERT INTO quote_writes (
+      quote_extraction_id, order_number, target_env, written_price, written_esd,
+      write_status, error_message, marked_read, approved_by, created_at
+    ) VALUES (
+      @quoteExtractionId, @orderNumber, @targetEnv, @writtenPrice, @writtenEsd,
+      @writeStatus, @errorMessage, @markedRead, @approvedBy, @createdAt
+    )
+  `);
+  const result = stmt.run({
+    ...params,
+    markedRead: params.markedRead ? 1 : 0,
+    createdAt: new Date().toISOString(),
+  });
+  return Number(result.lastInsertRowid);
+}
+
+/**
+ * True if this extraction already has a successful write — the same
+ * structural retry guard esdWriteRunner.ts uses. Writing a price/ESD twice
+ * is not harmless (it reissues the order again), so "only write what hasn't
+ * been written" must not depend on the caller getting it right.
+ */
+export function quoteExtractionAlreadyWritten(db: Database.Database, quoteExtractionId: number): boolean {
+  const row = db
+    .prepare(`SELECT 1 FROM quote_writes WHERE quote_extraction_id = ? AND write_status = 'success' LIMIT 1`)
+    .get(quoteExtractionId);
+  return !!row;
 }
