@@ -23,6 +23,8 @@ export interface OutlookMessage {
   /** ISO 8601, or null if Outlook wouldn't give one up. */
   receivedTime: string | null;
   isRead: boolean;
+  /** Plain-text body, truncated server-side. Real extraction input: a vendor's non-repairable/scrap decision is sometimes stated ONLY here, not in the PDF. */
+  body: string | null;
   attachments: QuoteAttachment[];
 }
 

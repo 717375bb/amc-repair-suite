@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { AlertTriangle, CheckCircle2, FileText, Loader2, Mail, PlayCircle, StopCircle } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, FileText, Loader2, Mail, PlayCircle, RotateCcw, StopCircle, Undo2, X } from 'lucide-react'
 import { Badge, Card, CardHeader, PrimaryButton, SecondaryButton } from '../components/ui'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { ApiError } from '../lib/api'
@@ -7,7 +7,10 @@ import {
   cancelQuoteRun,
   getActiveQuoteJob,
   getQuoteRun,
+  setQuoteDisposition,
   startQuoteIngest,
+  type HumanSettableDisposition,
+  type QuoteDisposition,
   type QuoteExtractionRow,
   type QuoteRunStatusResponse,
 } from '../lib/quoteApi'
@@ -42,6 +45,19 @@ function confidenceTone(c: QuoteExtractionRow['confidence']): 'success' | 'warni
   if (c === 'high') return 'success'
   if (c === 'medium') return 'warning'
   return 'neutral'
+}
+
+function dispositionBadge(d: QuoteDisposition): { label: string; tone: 'success' | 'warning' | 'danger' | 'neutral' } {
+  switch (d) {
+    case 'excluded_nrep':
+      return { label: 'NREP', tone: 'danger' }
+    case 'excluded_ber':
+      return { label: 'BER', tone: 'danger' }
+    case 'excluded_other':
+      return { label: 'Excluded', tone: 'neutral' }
+    default:
+      return { label: 'Will write', tone: 'success' }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -126,15 +142,37 @@ export default function VendorQuotes() {
     }
   }
 
+  // Optimistic local overrides, so clicking BER/X updates the row
+  // immediately instead of waiting for the next 2s poll. The server is
+  // still the source of truth — a failed call rolls the entry back out.
+  const [pendingDisposition, setPendingDisposition] = useState<Record<number, QuoteDisposition>>({})
+
   const rows = run?.rows ?? []
-  const { quotes, skipped, needsReview } = useMemo(() => {
+  const effectiveDisposition = (r: QuoteExtractionRow): QuoteDisposition =>
+    pendingDisposition[r.extractionId] ?? r.disposition
+
+  const handleDisposition = async (row: QuoteExtractionRow, disposition: HumanSettableDisposition) => {
+    if (!runId) return
+    const previous = effectiveDisposition(row)
+    setPendingDisposition((prev) => ({ ...prev, [row.extractionId]: disposition }))
+    try {
+      await setQuoteDisposition(row.extractionId, disposition, runId)
+    } catch (err) {
+      setPendingDisposition((prev) => ({ ...prev, [row.extractionId]: previous }))
+      setLoadError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  const { quotes, skipped, needsReview, willWrite, nrepCount } = useMemo(() => {
     const q = rows.filter((r) => r.documentKind === 'quote')
     return {
       quotes: q,
       skipped: rows.filter((r) => r.documentKind !== 'quote'),
       needsReview: q.filter((r) => r.needsReview),
+      willWrite: q.filter((r) => (pendingDisposition[r.extractionId] ?? r.disposition) === 'pending'),
+      nrepCount: q.filter((r) => r.vendorSaysNonRepairable).length,
     }
-  }, [rows])
+  }, [rows, pendingDisposition])
 
   return (
     <div className="space-y-5" data-workflow="vendor-quotes">
@@ -220,7 +258,7 @@ export default function VendorQuotes() {
                 <>
                   <CheckCircle2 size={16} className="text-success" />
                   {run.status === 'cancelled' ? 'Cancelled — ' : 'Done — '}
-                  {quotes.length} quote(s)
+                  {quotes.length} quote(s), {willWrite.length} will write
                   {skipped.length > 0 ? `, ${skipped.length} non-quote PDF(s) skipped` : ''}
                   {needsReview.length > 0 ? `, ${needsReview.length} need review` : ''}
                 </>
@@ -233,6 +271,14 @@ export default function VendorQuotes() {
               </span>
             )}
           </Card>
+
+          {nrepCount > 0 && (
+            <div className="rounded-md border border-l-4 border-danger border-l-danger bg-danger-soft px-4 py-3 text-sm text-text">
+              <span className="font-semibold">{nrepCount} quote(s): the vendor says the part is NON-REPAIRABLE.</span>{' '}
+              These are excluded from the MXI write automatically and tagged for the scrap process. Undo on a row if you
+              disagree with that read.
+            </div>
+          )}
 
           {needsReview.length > 0 && (
             <div className="rounded-md border border-l-4 border-warning border-l-warning bg-warning-soft px-4 py-3 text-sm text-text">
@@ -254,13 +300,21 @@ export default function VendorQuotes() {
                     <th className="px-5 py-3 font-medium">ESD</th>
                     <th className="px-5 py-3 font-medium">Basis</th>
                     <th className="px-5 py-3 font-medium">Conf.</th>
+                    <th className="px-5 py-3 font-medium">Disposition</th>
+                    <th className="px-5 py-3 font-medium text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {quotes.map((r) => (
+                  {quotes.map((r) => {
+                    const disp = effectiveDisposition(r)
+                    const excluded = disp !== 'pending'
+                    const badge = dispositionBadge(disp)
+                    return (
                     <tr
                       key={r.extractionId}
-                      className={`border-b border-border last:border-0 ${r.needsReview ? 'bg-warning-soft/40' : 'hover:bg-bg'}`}
+                      className={`border-b border-border last:border-0 ${
+                        excluded ? 'opacity-55' : r.needsReview ? 'bg-warning-soft/40' : 'hover:bg-bg'
+                      }`}
                     >
                       <td className="px-5 py-3 font-medium text-accent">
                         {r.orderNumber ?? <span className="text-danger">missing</span>}
@@ -276,11 +330,59 @@ export default function VendorQuotes() {
                       <td className="px-5 py-3">
                         <Badge tone={confidenceTone(r.confidence)}>{r.confidence}</Badge>
                       </td>
+                      <td className="px-5 py-3">
+                        <Badge tone={badge.tone}>{badge.label}</Badge>
+                        {disp === 'excluded_nrep' && r.nonRepairableEvidence && (
+                          <p className="mt-1 max-w-[16rem] text-xs italic text-muted" title={r.nonRepairableEvidence}>
+                            “{r.nonRepairableEvidence}”
+                          </p>
+                        )}
+                      </td>
+                      <td className="px-5 py-3">
+                        <div className="flex items-center justify-end gap-1.5">
+                          {disp === 'pending' ? (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => handleDisposition(r, 'excluded_ber')}
+                                title="Mark Beyond Economical Repair — excludes it from MXI and tags it for the scrap process"
+                                className="rounded border border-border px-2 py-1 text-xs font-medium text-text hover:border-danger hover:text-danger"
+                              >
+                                BER
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDisposition(r, 'excluded_other')}
+                                title="Don't write this one to MXI (no reason needed)"
+                                aria-label={`Exclude ${r.orderNumber ?? r.fileName}`}
+                                className="rounded border border-border p-1 text-muted hover:border-danger hover:text-danger"
+                              >
+                                <X size={14} />
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleDisposition(r, 'pending')}
+                              title={
+                                disp === 'excluded_nrep'
+                                  ? 'Vendor called this non-repairable. Put it back in the write set if you disagree.'
+                                  : 'Put this back in the write set'
+                              }
+                              className="flex items-center gap-1 rounded border border-border px-2 py-1 text-xs font-medium text-accent hover:bg-accent-soft"
+                            >
+                              {disp === 'excluded_nrep' ? <Undo2 size={13} /> : <RotateCcw size={13} />}
+                              Undo
+                            </button>
+                          )}
+                        </div>
+                      </td>
                     </tr>
-                  ))}
+                    )
+                  })}
                   {quotes.length === 0 && (
                     <tr>
-                      <td colSpan={8} className="px-5 py-6 text-center text-muted">
+                      <td colSpan={10} className="px-5 py-6 text-center text-muted">
                         {isRunning ? 'Waiting for the first extraction...' : 'No quotes found.'}
                       </td>
                     </tr>

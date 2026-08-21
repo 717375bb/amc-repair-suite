@@ -25,6 +25,13 @@ export interface QuoteExtractionInput {
   subject: string | null;
   senderName: string | null;
   senderEmail: string | null;
+  /**
+   * The email body. Real extraction input, not decoration: a confirmed
+   * real message in this folder states a scrap decision only in the body
+   * ("The scrap fee for P000BCSG ... is $360"), with nothing about it in
+   * the attached PDF.
+   */
+  emailBody: string | null;
 }
 
 export interface QuoteExtractionResult {
@@ -60,6 +67,20 @@ export interface QuoteExtractionResult {
    * the receiving side is the safer error.
    */
   leadTimeDays: number | null;
+
+  /**
+   * True when the VENDOR states the part cannot be repaired (NREP /
+   * non-repairable / unserviceable / BER-declared-by-the-vendor).
+   *
+   * Deliberately vendor-stated only. BER (Beyond Economical Repair) is a
+   * PSA-side commercial judgement made by the CRA, never something the AI
+   * or the vendor decides — see quoteDisposition.ts. A vendor calling a
+   * part uneconomical to repair is still recorded here as their claim, but
+   * it does not make the row "BER"; only a human can do that.
+   */
+  vendorSaysNonRepairable: boolean;
+  /** The vendor's own words supporting vendorSaysNonRepairable, verbatim. Null when false. */
+  nonRepairableEvidence: string | null;
 
   confidence: 'high' | 'medium' | 'low';
   /** 1-2 sentence audit note. Never customer-facing. */

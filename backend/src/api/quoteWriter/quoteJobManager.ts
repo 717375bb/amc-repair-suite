@@ -1,5 +1,6 @@
 import type { ChildProcess } from 'node:child_process';
 import { requestCancellation, spawnRunner } from '../jobManager.js';
+import type { QuoteDisposition } from '../../quoteWriter/quoteDisposition.js';
 
 /**
  * Job registry for the Vendor Quote Writer tab — a fourth independent
@@ -41,6 +42,11 @@ export interface QuoteExtractionRow {
   esdExplanation: string | null;
   needsReview: boolean;
   reviewReasons: string[];
+  /** Vendor-stated non-repairable (NREP) — an extraction fact, not a human decision. */
+  vendorSaysNonRepairable: boolean;
+  nonRepairableEvidence: string | null;
+  /** Effective disposition: the auto-derived initial value, overridden by any later human decision. */
+  disposition: QuoteDisposition;
   confidence: string;
   reasoningNote: string;
 }
@@ -167,6 +173,25 @@ export function startQuoteIngestJob(options: StartQuoteIngestOptions): StartQuot
   );
 
   return { ok: true, runId };
+}
+
+/**
+ * Reflects a human disposition decision back into the in-memory job so the
+ * UI's next poll shows it, after it's been persisted to
+ * quote_dispositions. The DB is the source of truth; this only keeps the
+ * live view consistent without forcing a re-ingest.
+ */
+export function applyQuoteDisposition(
+  runId: string,
+  extractionId: number,
+  disposition: QuoteDisposition,
+): boolean {
+  const job = jobs.get(runId);
+  if (!job) return false;
+  const row = job.rows.find((r) => r.extractionId === extractionId);
+  if (!row) return false;
+  row.disposition = disposition;
+  return true;
 }
 
 export function cancelQuoteJob(runId: string): boolean {

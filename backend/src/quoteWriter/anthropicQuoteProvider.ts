@@ -36,6 +36,12 @@ PRICE: report the total quoted repair amount as a plain number — no currency s
 
 TURNAROUND: quotes express this two different ways. If an explicit calendar ship/ready/delivery date is given, put it in promisedShipDate as an ISO date and leave leadTimeDays null. If instead it gives a turnaround in days ("10-14 days ARO", "30 day TAT"), put the number in leadTimeDays and leave promisedShipDate null. If a RANGE is given, take the LONGER end — under-promising is the safer error. If neither is stated, both are null.
 
+NON-REPAIRABLE (important): set vendorSaysNonRepairable to true ONLY when the vendor themselves states the part cannot be repaired. Real cues include "NREP", "non-repairable", "not repairable", "unserviceable", "beyond repair", "scrap", "condemned", "BER", or language saying they are returning it unrepaired. When true, quote the vendor's own supporting words verbatim in nonRepairableEvidence.
+
+Check the EMAIL BODY for this as well as the PDF. This is not hypothetical: a real message in this folder stated a scrap decision only in the body ("The scrap fee for P000BCSG ... is $360") while the attached PDF said nothing about it. A vendor quoting a SCRAP FEE rather than a repair price is stating the part is non-repairable.
+
+Be strict about this. It must reflect what the VENDOR said, not your own judgement about whether the price seems too high to be worth repairing — that commercial call belongs to PSA, never to you and never to the vendor. A quote that is merely expensive is NOT non-repairable. If the vendor is quoting a price to perform a repair, that is a normal repairable quote, however costly. If the document is ambiguous, set it false and explain the ambiguity in reasoningNote.
+
 CONFIDENCE: "high" only when the document is clearly legible and the key fields are unambiguous. Use "low" for scans you are partly guessing at, and say what was unclear in reasoningNote.
 
 Always call the record_quote_extraction tool.`;
@@ -74,10 +80,19 @@ const inputSchema = {
       type: ['integer', 'null'],
       description: 'Turnaround in days, longer end of any range. Null when an explicit date is given instead.',
     },
+    vendorSaysNonRepairable: {
+      type: 'boolean',
+      description:
+        'True ONLY if the vendor states the part cannot be repaired (NREP / non-repairable / unserviceable / scrap / condemned). Never your own judgement about whether the price is worth it.',
+    },
+    nonRepairableEvidence: {
+      type: ['string', 'null'],
+      description: "The vendor's own supporting words, verbatim. Null when vendorSaysNonRepairable is false.",
+    },
     confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
     reasoningNote: { type: 'string' },
   },
-  required: ['documentKind', 'confidence', 'reasoningNote'],
+  required: ['documentKind', 'vendorSaysNonRepairable', 'confidence', 'reasoningNote'],
 };
 
 function failureResult(reason: string): QuoteExtractionResult {
@@ -94,6 +109,11 @@ function failureResult(reason: string): QuoteExtractionResult {
     quoteDate: null,
     promisedShipDate: null,
     leadTimeDays: null,
+    // Deliberately false on a failed extraction: absence of evidence is not
+    // evidence the vendor said anything. A failed row is a needs-review row
+    // regardless, and must never silently assert a scrap-relevant claim.
+    vendorSaysNonRepairable: false,
+    nonRepairableEvidence: null,
     confidence: 'low',
     reasoningNote: reason,
   };
@@ -133,6 +153,9 @@ export class AnthropicQuoteProvider implements QuoteExtractionProvider {
       `Attachment filename: ${input.fileName}`,
       `Email subject: ${input.subject ?? '(none)'}`,
       `Sender: ${input.senderName ?? '(unknown)'} <${input.senderEmail ?? 'unknown'}>`,
+      '',
+      'Email body (may be truncated):',
+      input.emailBody?.trim() || '(empty)',
     ].join('\n');
 
     let lastError: string | null = null;
@@ -187,6 +210,10 @@ export class AnthropicQuoteProvider implements QuoteExtractionProvider {
           quoteDate: raw.quoteDate ?? null,
           promisedShipDate: raw.promisedShipDate ?? null,
           leadTimeDays: typeof raw.leadTimeDays === 'number' ? raw.leadTimeDays : null,
+          // Strict === true: anything the model returns other than a real
+          // boolean true must not become a scrap signal by coercion.
+          vendorSaysNonRepairable: raw.vendorSaysNonRepairable === true,
+          nonRepairableEvidence: raw.nonRepairableEvidence ?? null,
           confidence: raw.confidence ?? 'low',
           reasoningNote: raw.reasoningNote ?? '(no reasoning note returned)',
         };

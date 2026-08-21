@@ -6,7 +6,7 @@ import { timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getActionableEsdInference, getPendingEsdUpdates, getPriorMxiWriteEnvironments, insertMxiWrite, openDb } from './db/db.js';
+import { getActionableEsdInference, getPendingEsdUpdates, getPriorMxiWriteEnvironments, insertMxiWrite, insertQuoteDisposition, openDb } from './db/db.js';
 import { openAuthDb } from './db/authDb.js';
 import { loadMxiConfig, type MxiEnv } from './mxiWriter/config.js';
 import { assembleNoteText, toMxiDateFormat } from './mxiWriter/esdFormatting.js';
@@ -14,7 +14,8 @@ import { MxiClient } from './mxiWriter/mxiClient.js';
 import { writeEsdAndNotes } from './mxiWriter/writeEsdAndNotes.js';
 import { cancelJob, getActiveJob, getJob, getVendorList, startDiscoveryJob, startExecuteJob } from './api/jobManager.js';
 import { isKnownVendorId, listCraGroupsForKnownVendors } from './api/vendors.js';
-import { cancelQuoteJob, getActiveQuoteJob, getQuoteJob, startQuoteIngestJob } from './api/quoteWriter/quoteJobManager.js';
+import { applyQuoteDisposition, cancelQuoteJob, getActiveQuoteJob, getQuoteJob, startQuoteIngestJob } from './api/quoteWriter/quoteJobManager.js';
+import { isHumanSettableDisposition } from './quoteWriter/quoteDisposition.js';
 import { cancelEsdJob, getActiveEsdJob, getEsdJob, startEsdCompareJob, startEsdWriteJob } from './api/esdFinder/esdFinderJobManager.js';
 import { MissingHeadersError, peekEsdFinderFile, validateHeadersOnly } from './api/esdFinder/ingestion.js';
 import {
@@ -658,6 +659,51 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
       pdfCount: job.pdfCount,
       rows: job.rows,
     });
+  });
+
+  /**
+   * Records a human disposition decision on one extracted quote: mark it
+   * BER, exclude it outright, or put it back to pending.
+   *
+   * `excluded_nrep` is deliberately NOT accepted here — that disposition is
+   * derived from what the vendor's own document says, so letting a client
+   * assert it would fabricate a vendor claim that was never made. A human
+   * who disagrees with an auto-NREP can set the row back to `pending`
+   * instead, which is recorded as their decision.
+   */
+  app.post('/api/quotes/extractions/:extractionId/disposition', requireSession, (req, res) => {
+    const extractionId = Number(req.params.extractionId);
+    if (!Number.isInteger(extractionId) || extractionId <= 0) {
+      res.status(400).json({ error: 'extractionId must be a positive integer.' });
+      return;
+    }
+
+    const disposition: unknown = req.body?.disposition;
+    if (typeof disposition !== 'string' || !isHumanSettableDisposition(disposition)) {
+      res.status(400).json({
+        error:
+          "disposition must be one of 'pending', 'excluded_ber', or 'excluded_other'. " +
+          "'excluded_nrep' is vendor-derived and cannot be set by hand — set 'pending' to override it.",
+      });
+      return;
+    }
+
+    const exists = db.prepare('SELECT 1 FROM quote_extractions WHERE id = ?').get(extractionId);
+    if (!exists) {
+      res.status(404).json({ error: `No quote extraction found with id ${extractionId}.` });
+      return;
+    }
+
+    const session = (req as AuthedRequest).session!;
+    insertQuoteDisposition(db, { quoteExtractionId: extractionId, disposition, decidedBy: session.username });
+
+    // Best-effort in-memory sync so the UI's next poll reflects it. The DB
+    // row above is the real record — a miss here (e.g. server restarted
+    // since the run) is not a failure.
+    const runId: unknown = req.body?.runId;
+    if (typeof runId === 'string') applyQuoteDisposition(runId, extractionId, disposition);
+
+    res.json({ ok: true, extractionId, disposition });
   });
 
   app.post('/api/quotes/runs/:runId/cancel', requireSession, (req, res) => {

@@ -148,8 +148,29 @@ CREATE TABLE IF NOT EXISTS quote_extractions (
   resolved_esd TEXT,
   esd_basis TEXT,
   needs_review INTEGER NOT NULL DEFAULT 0,
+  -- Vendor-stated non-repairable (NREP). An extraction FACT read off their
+  -- document, not a human decision — human decisions live in
+  -- quote_dispositions below.
+  vendor_says_non_repairable INTEGER NOT NULL DEFAULT 0,
+  non_repairable_evidence TEXT,
+  -- The disposition this row STARTED at (auto-derived from the NREP flag).
+  -- The effective disposition is this, overridden by the latest
+  -- quote_dispositions row if one exists.
+  initial_disposition TEXT NOT NULL DEFAULT 'pending',
   confidence TEXT,
   reasoning_note TEXT,
+  created_at TEXT NOT NULL
+);
+
+-- Human review decisions on an extracted quote (BER / plain exclude /
+-- putting a row back to pending). Append-only, latest row wins — the same
+-- shape as mxi_writes and write_up_issue_decisions, so who decided what,
+-- and when, stays fully auditable rather than being overwritten in place.
+CREATE TABLE IF NOT EXISTS quote_dispositions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  quote_extraction_id INTEGER NOT NULL REFERENCES quote_extractions(id),
+  disposition TEXT NOT NULL,
+  decided_by TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -189,6 +210,12 @@ export function openDb(dbPath: string): Database.Database {
   db.pragma('journal_mode = WAL');
   db.exec(SCHEMA_SQL);
   ensureColumn(db, 'write_up_actions', 'order_number', 'TEXT');
+  // quote_extractions already has real rows in the live audit.db from runs
+  // predating the NREP/disposition work — CREATE TABLE IF NOT EXISTS won't
+  // add these, so they're added explicitly (same reason as order_number above).
+  ensureColumn(db, 'quote_extractions', 'vendor_says_non_repairable', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'quote_extractions', 'non_repairable_evidence', 'TEXT');
+  ensureColumn(db, 'quote_extractions', 'initial_disposition', "TEXT NOT NULL DEFAULT 'pending'");
   return db;
 }
 
@@ -906,6 +933,9 @@ export interface QuoteExtractionInsert {
   resolvedEsd: string | null;
   esdBasis: string | null;
   needsReview: boolean;
+  vendorSaysNonRepairable: boolean;
+  nonRepairableEvidence: string | null;
+  initialDisposition: string;
   confidence: string | null;
   reasoningNote: string | null;
 }
@@ -918,21 +948,90 @@ export function insertQuoteExtraction(db: Database.Database, params: QuoteExtrac
       file_name, saved_path, document_kind, order_number, order_number_source,
       quote_number, vendor_name, part_number, serial_number, unit_price, currency,
       quote_date, promised_ship_date, lead_time_days, resolved_esd, esd_basis,
-      needs_review, confidence, reasoning_note, created_at
+      needs_review, vendor_says_non_repairable, non_repairable_evidence,
+      initial_disposition, confidence, reasoning_note, created_at
     ) VALUES (
       @runId, @sourceEntryId, @subject, @senderName, @senderEmail, @receivedTime,
       @fileName, @savedPath, @documentKind, @orderNumber, @orderNumberSource,
       @quoteNumber, @vendorName, @partNumber, @serialNumber, @unitPrice, @currency,
       @quoteDate, @promisedShipDate, @leadTimeDays, @resolvedEsd, @esdBasis,
-      @needsReview, @confidence, @reasoningNote, @createdAt
+      @needsReview, @vendorSaysNonRepairable, @nonRepairableEvidence,
+      @initialDisposition, @confidence, @reasoningNote, @createdAt
     )
   `);
   const result = stmt.run({
     ...params,
     needsReview: params.needsReview ? 1 : 0,
+    vendorSaysNonRepairable: params.vendorSaysNonRepairable ? 1 : 0,
     createdAt: new Date().toISOString(),
   });
   return Number(result.lastInsertRowid);
+}
+
+/**
+ * Records a human disposition decision (BER / plain exclude / back to
+ * pending). Always an INSERT — quote_dispositions is append-only, latest
+ * row wins, so the full decision history survives.
+ */
+export function insertQuoteDisposition(
+  db: Database.Database,
+  params: { quoteExtractionId: number; disposition: string; decidedBy: string | null },
+): number {
+  const stmt = db.prepare(
+    'INSERT INTO quote_dispositions (quote_extraction_id, disposition, decided_by, created_at) VALUES (?, ?, ?, ?)',
+  );
+  const result = stmt.run(
+    params.quoteExtractionId,
+    params.disposition,
+    params.decidedBy,
+    new Date().toISOString(),
+  );
+  return Number(result.lastInsertRowid);
+}
+
+/**
+ * Effective disposition per extraction for one run: the row's own
+ * initial_disposition, overridden by its most recent quote_dispositions
+ * entry if any. Computed here rather than in the caller so the write path
+ * and the UI can never disagree about what's writable.
+ */
+export function getEffectiveQuoteDispositions(
+  db: Database.Database,
+  runId: number,
+): Map<number, { disposition: string; decidedBy: string | null; wasHumanSet: boolean }> {
+  const rows = db
+    .prepare(
+      `
+    SELECT e.id AS extraction_id,
+           e.initial_disposition,
+           d.disposition AS human_disposition,
+           d.decided_by
+    FROM quote_extractions e
+    LEFT JOIN quote_dispositions d
+      ON d.id = (
+        SELECT id FROM quote_dispositions
+        WHERE quote_extraction_id = e.id
+        ORDER BY id DESC LIMIT 1
+      )
+    WHERE e.run_id = ?
+  `,
+    )
+    .all(runId) as Array<{
+    extraction_id: number;
+    initial_disposition: string;
+    human_disposition: string | null;
+    decided_by: string | null;
+  }>;
+
+  const result = new Map<number, { disposition: string; decidedBy: string | null; wasHumanSet: boolean }>();
+  for (const row of rows) {
+    result.set(row.extraction_id, {
+      disposition: row.human_disposition ?? row.initial_disposition,
+      decidedBy: row.decided_by,
+      wasHumanSet: row.human_disposition !== null,
+    });
+  }
+  return result;
 }
 
 export interface QuoteWriteInsert {

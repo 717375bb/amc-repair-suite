@@ -7,6 +7,7 @@ import { AnthropicQuoteProvider } from '../quoteWriter/anthropicQuoteProvider.js
 import { DryRunQuoteProvider } from '../quoteWriter/dryRunQuoteProvider.js';
 import { readOutlookQuotes, OutlookReadError } from '../quoteWriter/outlookReader.js';
 import { resolveQuoteEsd } from '../quoteWriter/quoteEsd.js';
+import { initialDisposition } from '../quoteWriter/quoteDisposition.js';
 import type { QuoteExtractionProvider } from '../quoteWriter/extractionTypes.js';
 
 const log = createLogger('quote');
@@ -122,6 +123,7 @@ async function main(): Promise<void> {
         subject: message.subject,
         senderName: message.senderName,
         senderEmail: message.senderEmail,
+        emailBody: message.body,
       });
 
       const isQuote = extraction.documentKind === 'quote';
@@ -160,6 +162,9 @@ async function main(): Promise<void> {
         resolvedEsd: esd?.esd ?? null,
         esdBasis: esd?.basis ?? null,
         needsReview: rowNeedsReview,
+        vendorSaysNonRepairable: extraction.vendorSaysNonRepairable,
+        nonRepairableEvidence: extraction.nonRepairableEvidence,
+        initialDisposition: isQuote ? initialDisposition(extraction.vendorSaysNonRepairable) : 'excluded_other',
         confidence: extraction.confidence,
         reasoningNote: extraction.reasoningNote,
       });
@@ -173,6 +178,7 @@ async function main(): Promise<void> {
       if (missingPrice) flags.push('NO PRICE');
       if (esd?.needsReview) flags.push('ESD NEEDS CHECK');
       if (isQuote && extraction.confidence === 'low') flags.push('LOW CONFIDENCE');
+      if (extraction.vendorSaysNonRepairable) flags.push('NREP (vendor says non-repairable)');
 
       if (isQuote) {
         console.log(

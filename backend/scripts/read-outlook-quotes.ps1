@@ -47,7 +47,8 @@ param(
   [Parameter(Mandatory = $true)][string]$OutDir,
   [int]$MaxMessages = 200,
   [int]$SinceDays = 0,
-  [switch]$UnreadOnly
+  [switch]$UnreadOnly,
+  [int]$MaxBodyChars = 6000
 )
 
 $ErrorActionPreference = 'Stop'
@@ -225,6 +226,18 @@ foreach ($item in $items) {
     }
   } catch { }
 
+  # REAL FINDING (2026-08-21): a vendor's non-repairable/scrap decision is
+  # not always in the PDF — a genuine example in this folder states a scrap
+  # fee only in the email body ("The scrap fee for P000BCSG ... is $360").
+  # The body is therefore real extraction input, not just metadata.
+  # Truncated: quoted reply chains and signature blocks make these
+  # arbitrarily long, and the meaningful content is at the top.
+  $body = ''
+  try {
+    $body = [string]$item.Body
+    if ($body.Length -gt $MaxBodyChars) { $body = $body.Substring(0, $MaxBodyChars) }
+  } catch { }
+
   $results += [ordered]@{
     entryId      = [string]$item.EntryID
     subject      = [string]$item.Subject
@@ -232,6 +245,7 @@ foreach ($item in $items) {
     senderEmail  = $senderEmail
     receivedTime = if ($null -ne $received) { $received.ToString('o') } else { $null }
     isRead       = (-not $item.UnRead)
+    body         = $body
     attachments  = $pdfAttachments
   }
 }

@@ -28,9 +28,20 @@ export interface QuoteExtractionRow {
   esdExplanation: string | null
   needsReview: boolean
   reviewReasons: string[]
+  /** Vendor-stated non-repairable (NREP) — read off their document, not a human decision. */
+  vendorSaysNonRepairable: boolean
+  nonRepairableEvidence: string | null
+  disposition: QuoteDisposition
   confidence: 'high' | 'medium' | 'low'
   reasoningNote: string
 }
+
+/**
+ * `excluded_nrep` is vendor-derived and set automatically; only the other
+ * three can be chosen by a human (see the backend's quoteDisposition.ts).
+ */
+export type QuoteDisposition = 'pending' | 'excluded_nrep' | 'excluded_ber' | 'excluded_other'
+export type HumanSettableDisposition = 'pending' | 'excluded_ber' | 'excluded_other'
 
 export interface QuoteRunStatusResponse {
   runId: string
@@ -85,4 +96,20 @@ export function getQuoteRun(runId: string): Promise<QuoteRunStatusResponse> {
 
 export function cancelQuoteRun(runId: string): Promise<{ ok: boolean }> {
   return request(`/api/quotes/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
+}
+
+/**
+ * Records a human decision on one quote: mark BER, exclude outright, or
+ * put it back to pending. Append-only server-side — every decision is kept,
+ * so the future scrap workflow can see who decided what and when.
+ */
+export function setQuoteDisposition(
+  extractionId: number,
+  disposition: HumanSettableDisposition,
+  runId: string,
+): Promise<{ ok: boolean; extractionId: number; disposition: QuoteDisposition }> {
+  return request(`/api/quotes/extractions/${extractionId}/disposition`, {
+    method: 'POST',
+    body: JSON.stringify({ disposition, runId }),
+  })
 }

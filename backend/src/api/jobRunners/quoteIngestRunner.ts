@@ -5,6 +5,7 @@ import { getSecretProvider } from '../../security/secretProvider.js';
 import { AnthropicQuoteProvider } from '../../quoteWriter/anthropicQuoteProvider.js';
 import { readOutlookQuotes, OutlookReadError } from '../../quoteWriter/outlookReader.js';
 import { resolveQuoteEsd } from '../../quoteWriter/quoteEsd.js';
+import { initialDisposition } from '../../quoteWriter/quoteDisposition.js';
 import { watchStdinForCancellation } from './cancellationWatcher.js';
 import { createLogger } from '../../logging/logger.js';
 
@@ -106,10 +107,15 @@ async function main(): Promise<void> {
         subject: message.subject,
         senderName: message.senderName,
         senderEmail: message.senderEmail,
+        emailBody: message.body,
       });
 
       const isQuote = extraction.documentKind === 'quote';
       const esd = isQuote ? resolveQuoteEsd(extraction) : null;
+
+      // A vendor-stated non-repairable auto-excludes: no repair means no
+      // repair to price. A human can still override it back to pending.
+      const disposition = isQuote ? initialDisposition(extraction.vendorSaysNonRepairable) : 'excluded_other';
 
       // Every reason a row can't be auto-trusted, surfaced explicitly
       // rather than collapsed into one opaque boolean — the reviewer needs
@@ -119,6 +125,11 @@ async function main(): Promise<void> {
       if (isQuote && extraction.unitPrice === null) reviewReasons.push('No price found');
       if (isQuote && extraction.confidence === 'low') reviewReasons.push('Low extraction confidence');
       if (esd?.needsReview) reviewReasons.push(esd.explanation);
+      if (extraction.vendorSaysNonRepairable) {
+        reviewReasons.push(
+          `Vendor says NON-REPAIRABLE${extraction.nonRepairableEvidence ? `: "${extraction.nonRepairableEvidence}"` : ''}`,
+        );
+      }
 
       const extractionId = insertQuoteExtraction(db, {
         runId: dbRunId,
@@ -144,6 +155,9 @@ async function main(): Promise<void> {
         resolvedEsd: esd?.esd ?? null,
         esdBasis: esd?.basis ?? null,
         needsReview: reviewReasons.length > 0,
+        vendorSaysNonRepairable: extraction.vendorSaysNonRepairable,
+        nonRepairableEvidence: extraction.nonRepairableEvidence,
+        initialDisposition: disposition,
         confidence: extraction.confidence,
         reasoningNote: extraction.reasoningNote,
       });
@@ -172,6 +186,9 @@ async function main(): Promise<void> {
           esdExplanation: esd?.explanation ?? null,
           needsReview: reviewReasons.length > 0,
           reviewReasons,
+          vendorSaysNonRepairable: extraction.vendorSaysNonRepairable,
+          nonRepairableEvidence: extraction.nonRepairableEvidence,
+          disposition,
           confidence: extraction.confidence,
           reasoningNote: extraction.reasoningNote,
         },
