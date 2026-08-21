@@ -32,7 +32,14 @@ $sensitivePaths = @(
   'backend/data/mxi-stage-storage-state.json',
   'backend/data/tool-backups/placeholder-check.xlsx',
   'backend/discovery-recording.ts',
-  'backend/discovery-notes-recording.ts'
+  'backend/discovery-notes-recording.ts',
+  # Vendor Quote Writer — real confidential vendor pricing PDFs pulled from
+  # Outlook. Checked at two depths plus a bare .pdf anywhere, since the
+  # staging path is configurable and a future caller could legitimately
+  # point it somewhere else under backend/.
+  'backend/data/quote-attachments/example-quote.pdf',
+  'backend/data/quote-attachments/nested/example-quote.pdf',
+  'backend/some-stray-quote.pdf'
 )
 
 Push-Location $repoRoot

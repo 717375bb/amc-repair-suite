@@ -7,6 +7,16 @@ discovery-recording.ts
 data/mxi-stage-storage-state.json
 data/mxi-production-storage-state.json
 
+# Vendor quote PDFs pulled out of Outlook (Vendor Quote Writer, see
+# docs/VENDOR_QUOTE_WRITER_SPEC.md). These are real, confidential vendor
+# PRICING documents — never in git. Covered by the data/ rule above too;
+# kept explicit as a second, independent guard so it still holds even if
+# the data/ rule is ever narrowed, and verified for real via
+# `npm run verify-gitignore` (a .gitignore entry that merely LOOKS right
+# has silently failed twice in this project).
+data/quote-attachments/
+*.pdf
+
 # Real vendor/order spreadsheets dropped directly under backend/ (or its
 # subdirectories, including data/) for manual testing — never real business
 # data in git. Matches at any depth relative to this file, so this covers
