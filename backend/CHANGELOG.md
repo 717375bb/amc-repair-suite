@@ -4,6 +4,20 @@ All notable changes to this project, newest session first. Item numbers refer to
 
 ## 2026-08-23
 
+### Fixed (end of day) — "could not move to dock" was a false negative, not a failed move
+- **A test run reported every order as failing the move to dock. The parts had genuinely docked.** All 13 were false negatives from the verification step, not real failures — no rework is needed on those orders.
+  - Proven with real evidence rather than by reading the regex: a read-only dump of `P000BFNA`'s outbound shipment `SRRR7001NMKS` shows its Current Location cell reading **`DAY/DOCK`**. `P000BFN9` and `P000BFN8` confirm the same. The move worked; the read of the result did not.
+  - Root cause: `readOutboundShipmentDockState()` waited on the text **"Shipment Lines"**, which is the TAB LABEL and renders immediately — well before the grid row underneath it that actually carries the Current Location. The location was read out of a not-yet-populated grid, came back blank, and was honestly reported as `location_unreadable`, which the caller treats as a failed move.
+  - Fixed with a bounded content-aware wait for a real location token appearing AFTER the "Shipment Lines" heading, rather than for the heading itself. On timeout it falls through and still reports the blank honestly — a genuinely empty location must not be silently converted into a success.
+  - This is the same bug class as the 750ms-wait-before-render fault found in the in-house scrap flow: waiting on a flat delay, or on the first text that appears, instead of on the content actually being read.
+
+### Changed (end of day) — unassigned tasks are now assigned automatically instead of skipped
+- **The vendor-code write-up no longer stops on a line whose only problem is an unassigned task.** Per explicit user direction: "It has been explained how to fix that issue, and I don't want those to be skipped anymore." The cost was real — 7 lines skipped for this reason in the last three days alone, across `1DH10`, `0T1Y4`, and `6MXR1`.
+  - Mirrors Aero Repair's long-proven path exactly, reusing the same helpers rather than a second implementation: assign the single genuine candidate, then continue into the normal write-up **in the same pass**.
+  - **Never trusts the click.** After assigning, it re-opens the view through a fresh navigation and independently re-confirms the task is gone. Anything short of a confirmed-empty state stops the line and says so, rather than proceeding on an unverified assignment.
+  - **Still stops when there is more than one candidate.** Ambiguity is not resolved by guessing which task to attach to a real work package — the same line Aero Repair has always drawn.
+  - The assignment stays **visible in the run log**: the line's summary is prefixed "Task assigned to work package, then …", matching Aero Repair's wording. An assignment made on the analyst's behalf must never be invisible.
+
 ### Added (end of day) — multiple serials per in-house scrap; "soon" badge removed
 - **The Scrapped Parts tab is no longer marked "soon"** — the badge and its stale description were still there because an earlier `perl` substitution silently failed to match. Now labelled for what it does.
 - **In-house scrap accepts a pasted list of serials**, run one at a time in order. Newline, comma, tab, or semicolon separated, so a column pasted straight out of Excel works.

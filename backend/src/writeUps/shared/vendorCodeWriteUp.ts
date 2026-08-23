@@ -43,6 +43,8 @@ import {
   closeUnassignedTasksView,
   waitForUnassignedTasksSectionResolved,
   readUnassignedTaskCandidates,
+  assignUnassignedTask,
+  detectUnassignedTaskState,
 } from './unassignedTasks.js';
 import { isNoTasksAssignedException } from '../aeroRepair/noTaskException.js';
 import { closePartOwnDetails, openPartOwnDetails, readPartOwnDetails, type PartOwnDetails, type UsageParmRow } from './partOwnDetails.js';
@@ -392,6 +394,13 @@ export interface VendorCodeWriteUpFields {
   notesText: string;
   generatedOrderNumber: string;
   authFlow: string;
+  /**
+   * True when this line had a genuine unassigned task that was assigned
+   * automatically in the same pass. Kept auditable because the line no
+   * longer stops for it -- without this, an assignment would be invisible
+   * in the outcome record.
+   */
+  unassignedTaskWasAssigned: boolean;
 }
 
 export type VendorCodeWriteUpOutcome =
@@ -579,6 +588,13 @@ export async function runVendorCodeWriteUp(
         }
       : resolveAuthFlowPolicy(candidate.serialNumber, config);
     const isBnFlow = resolved.matchedOverrideId === BN_OVERRIDE_ID;
+    /**
+     * True once a genuine unassigned task was assigned and independently
+     * re-verified in THIS pass. Mirrors Aero Repair's own field of the same
+     * name — kept so "how many lines needed an assignment" stays auditable
+     * rather than becoming invisible now that it no longer skips the line.
+     */
+    let unassignedTaskWasAssigned = false;
     // CLAUDE_CODE_PROMPT (#1, new vendors) — until this batch, REPAIR
     // authorization was ONLY ever reached via the BN override or a shipset
     // case, so isBnFlow doubled as "is this a REPAIR-authorization flow"
@@ -670,29 +686,69 @@ export async function runVendorCodeWriteUp(
       await waitForUnassignedTasksSectionResolved(page);
       const unassignedTasksText = await readUnassignedTasksAreaText(page);
       if (isUnassignedTaskPresent(unassignedTasksText)) {
-        // REAL FIX (2026-08-20, per explicit user direction): this engine
-        // previously blocked on ANY non-empty text here, unlike Aero
-        // Repair's own already-proven ignore list (PC/PC-PC/FORECAST/REPL
-        // — administrative, non-repair task types that were never a real
-        // block). Read the actual row-level task types before deciding —
-        // only a genuinely non-ignored row still blocks. Deliberately does
-        // NOT add Aero Repair's auto-assign-the-one-remaining-candidate
-        // behavior here: that's a separate, unproven-at-this-scale
-        // capability across this family's many already-live vendors, and
-        // was never asked for — this only changes what counts as
-        // "blocking," not what this engine does about it.
+        // Rows whose task type is administrative (PC / PC-PC / FORECAST /
+        // REPL) were never a real block and are filtered out here.
         const { filtered } = await readUnassignedTaskCandidates(page);
-        if (filtered.length > 0) {
+
+        // AUTO-ASSIGN (2026-08-23, per explicit user direction: "I don't
+        // want those to be skipped anymore").
+        //
+        // This engine used to stop at `unassigned_task_present` and skip
+        // the line, while Aero Repair had auto-assigned the single
+        // remaining candidate for months. That asymmetry was a deliberate
+        // caution on my part, not a real difference between the flows —
+        // and it cost real skipped lines (7 in the last three days alone,
+        // across 1DH10, 0T1Y4 and 6MXR1). Same mechanism, same shared
+        // helpers, same independent re-verification as Aero Repair's.
+        if (filtered.length > 1) {
+          // Genuine ambiguity. Still stops rather than guessing which task
+          // to attach to a real work package — matching Aero Repair, which
+          // has always drawn the line here too.
           await closeUnassignedTasksView(page);
           return {
             status: 'unassigned_task_present',
             partNumber: candidate.partNumber,
             serialNumber: candidate.serialNumber,
-            taskDetail: unassignedTasksText,
+            taskDetail:
+              `${filtered.length} genuinely assignable unassigned tasks — refusing to guess which one to attach. ` +
+              `Candidates: ${filtered.map((f) => f.rowText).join(' | ')}`,
           };
         }
+
+        if (filtered.length === 1) {
+          log.info(
+            { vendorCode, partNumber: candidate.partNumber, serialNumber: candidate.serialNumber, task: filtered[0].rowText },
+            '[unassigned-task] assigning the single genuine candidate and continuing',
+          );
+          await assignUnassignedTask(page, filtered[0].index);
+          await closeUnassignedTasksView(page);
+
+          // Never trust the click. Re-open via a fresh navigation and
+          // confirm the task is genuinely gone before continuing into a
+          // real write-up — same discipline as Aero Repair's own path.
+          await navigateToUnassignedTasksView(page);
+          await waitForUnassignedTasksSectionResolved(page);
+          const reVerify = await detectUnassignedTaskState(page);
+          await closeUnassignedTasksView(page);
+
+          if (reVerify.state !== 'absent') {
+            return {
+              status: 'unassigned_task_present',
+              partNumber: candidate.partNumber,
+              serialNumber: candidate.serialNumber,
+              taskDetail:
+                `Assigned the unassigned task, but independent re-verification did not show the confirmed empty ` +
+                `state (re-verified as "${reVerify.state}"). Not continuing on an unconfirmed assignment.`,
+            };
+          }
+          unassignedTaskWasAssigned = true;
+          // Falls through into the normal write-up, in the SAME pass.
+        } else {
+          await closeUnassignedTasksView(page);
+        }
+      } else {
+        await closeUnassignedTasksView(page);
       }
-      await closeUnassignedTasksView(page);
     }
     // else: isBnFlow && a real task already exists — no detour, no Ad-Hoc
     // creation, proceed directly (matches the BN recording's own sequence).
@@ -936,6 +992,7 @@ export async function runVendorCodeWriteUp(
         notesText,
         generatedOrderNumber,
         authFlow: '(not requested — RMA vendor)',
+        unassignedTaskWasAssigned,
       };
       return { status: 'order_created_awaiting_rma', fields: rmaFields, externalReferenceNote: note };
     }
@@ -974,6 +1031,7 @@ export async function runVendorCodeWriteUp(
         notesText,
         generatedOrderNumber,
         authFlow: '(not requested — CREATE_ORDER_ONLY)',
+        unassignedTaskWasAssigned,
       };
       return {
         status: 'order_created_do_not_ship',
@@ -1050,6 +1108,7 @@ export async function runVendorCodeWriteUp(
       notesText,
       generatedOrderNumber,
       authFlow: resolved.authFlow,
+      unassignedTaskWasAssigned,
     };
 
     // Structural dispatch per VENDOR_MODULE_REFACTOR_SPEC.md section 3.2 —

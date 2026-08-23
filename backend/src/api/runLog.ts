@@ -249,6 +249,17 @@ export function aeroRepairResultToLogEvent(
   }
 }
 
+/**
+ * Mirrors aeroRepairResultToLogEvent's own handling of an auto-assigned
+ * task: the line no longer STOPS for an unassigned task (per explicit user
+ * direction -- "I don't want those to be skipped anymore"), so the fact
+ * that one was assigned has to stay visible in the run log, or an
+ * assignment made on the user's behalf would be invisible.
+ */
+function withAssignedTaskPrefix(summary: string, fields: { unassignedTaskWasAssigned: boolean }): string {
+  return fields.unassignedTaskWasAssigned ? `Task assigned to work package, then ${summary.charAt(0).toLowerCase()}${summary.slice(1)}` : summary;
+}
+
 /** Vendor-code family's own execute-time per-line outcome, per runVendorCodeWriteUp()'s real VendorCodeWriteUpOutcome union. */
 export function vendorCodeOutcomeToLogEvent(
   seq: number,
@@ -273,7 +284,7 @@ export function vendorCodeOutcomeToLogEvent(
         ...base,
         partNumber: outcome.fields.partNumber,
         status: 'completed',
-        summary: 'Warranty authorization submitted — no order issued (handled by warranty dept).',
+        summary: withAssignedTaskPrefix('Warranty authorization submitted — no order issued (handled by warranty dept).', outcome.fields),
         orderNumber: outcome.fields.generatedOrderNumber ?? undefined,
       };
     case 'issued_and_docked':
@@ -281,7 +292,7 @@ export function vendorCodeOutcomeToLogEvent(
         ...base,
         partNumber: outcome.fields.partNumber,
         status: 'completed',
-        summary: `Order ${outcome.fields.generatedOrderNumber} created and moved to dock.`,
+        summary: withAssignedTaskPrefix(`Order ${outcome.fields.generatedOrderNumber} created and moved to dock.`, outcome.fields),
         orderNumber: outcome.fields.generatedOrderNumber ?? undefined,
       };
     case 'issued_not_docked':
@@ -289,7 +300,7 @@ export function vendorCodeOutcomeToLogEvent(
         ...base,
         partNumber: outcome.fields.partNumber,
         status: 'completed',
-        summary: `Order ${outcome.fields.generatedOrderNumber} created and issued — move to dock intentionally held back for now.`,
+        summary: withAssignedTaskPrefix(`Order ${outcome.fields.generatedOrderNumber} created and issued — move to dock intentionally held back for now.`, outcome.fields),
         orderNumber: outcome.fields.generatedOrderNumber ?? undefined,
       };
     case 'order_created_do_not_ship':
@@ -297,7 +308,7 @@ export function vendorCodeOutcomeToLogEvent(
         ...base,
         partNumber: outcome.fields.partNumber,
         status: 'exception',
-        summary: `Order ${outcome.fields.generatedOrderNumber} created — marked DO NOT SHIP (${outcome.reason.toLowerCase()}). Needs manual review before it can proceed.`,
+        summary: withAssignedTaskPrefix(`Order ${outcome.fields.generatedOrderNumber} created — marked DO NOT SHIP (${outcome.reason.toLowerCase()}). Needs manual review before it can proceed.`, outcome.fields),
         exceptionType: 'order_created_do_not_ship',
         orderNumber: outcome.fields.generatedOrderNumber ?? undefined,
         detail: outcome.externalReferenceNote,
@@ -307,7 +318,7 @@ export function vendorCodeOutcomeToLogEvent(
         ...base,
         partNumber: outcome.fields.partNumber,
         status: 'exception',
-        summary: `Order ${outcome.fields.generatedOrderNumber} created — awaiting RMA. Needs manual review before it can proceed.`,
+        summary: withAssignedTaskPrefix(`Order ${outcome.fields.generatedOrderNumber} created — awaiting RMA. Needs manual review before it can proceed.`, outcome.fields),
         exceptionType: 'order_created_awaiting_rma',
         orderNumber: outcome.fields.generatedOrderNumber ?? undefined,
         detail: outcome.externalReferenceNote,

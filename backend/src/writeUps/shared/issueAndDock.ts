@@ -182,6 +182,41 @@ export async function readOutboundShipmentDockState(
   }
 
   await waitForBodyTextIncludes(page, 'Shipment Lines', `Shipment lines for ${outboundShipmentId}`);
+
+  /**
+   * REAL BUG FOUND AND FIXED (2026-08-23, second pass): "Shipment Lines" is
+   * the TAB LABEL and renders immediately — well before the grid row that
+   * actually carries the Current Location. Waiting on it therefore read an
+   * empty grid, found no location, and reported `location_unreadable`,
+   * which failed 13 consecutive real orders whose parts had in fact docked
+   * correctly.
+   *
+   * Confirmed by direct evidence: a read-only dump of P000BFNA's outbound
+   * shipment SRRR7001NMKS shows its Current Location cell reading
+   * "DAY/DOCK", and the very same regex matching it, once the page has
+   * genuinely rendered.
+   *
+   * Waits for the LOCATION ITSELF to appear instead. Bounded and
+   * non-throwing: a shipment line legitimately can have a blank Current
+   * Location (confirmed on the same order's INBOUND shipment
+   * SRRR7001NMKT), and that case must still fall through to a reported
+   * `location_unreadable` rather than hanging or erroring.
+   */
+  try {
+    await page.waitForFunction(
+      () => {
+        const text = document.body?.innerText ?? '';
+        const idx = text.indexOf('Shipment Lines');
+        if (idx < 0) return false;
+        return /\b[A-Za-z]{3}\/[A-Za-z0-9]+\b/.test(text.slice(idx));
+      },
+      undefined,
+      { timeout: 15_000, polling: 250 },
+    );
+  } catch {
+    // Genuinely blank location — fall through and report it honestly.
+  }
+
   const fullBodyText = await page.locator('body').innerText();
   const linesSectionIdx = fullBodyText.indexOf('Shipment Lines');
   const linesSectionText = linesSectionIdx >= 0 ? fullBodyText.slice(linesSectionIdx) : fullBodyText;
