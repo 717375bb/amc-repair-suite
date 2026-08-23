@@ -29,22 +29,69 @@ export interface InHouseScrapResult {
  * enough that anything outside it deserves a human.
  */
 async function pickLocationInPopup(popup: Page, candidates: string[]): Promise<string | null> {
-  // The recording types into a find box first on the transfer popup; do it
-  // when one is present so long location lists are filtered down.
+  // TWO REAL BUGS FIXED HERE, both found on the first live run (2026-08-23,
+  // serial D5300-120 at PNS):
+  //
+  // 1. MXI's own location casing is INCONSISTENT between sites. The real
+  //    list contains both "DFW/REPAIR1/SHOP1" (what the recording used) and
+  //    "PNS/Repair1/Shop1", "CAK/Repair1/Shop1", "CLT/Repair1/Shop1". An
+  //    exact, case-sensitive match therefore silently failed at every
+  //    mixed-case site. Matching is now case-insensitive, and the cell is
+  //    clicked using the text MXI actually renders.
+  //
+  // 2. The recording types "repair" into the find box first. Doing that
+  //    here filtered the list to ZERO rows — so nothing could ever match.
+  //    The filter is no longer used; the full list is read directly, which
+  //    is also fewer moving parts.
+  const readAvailable = async (): Promise<string[]> => {
+    const cellTexts = await popup.locator('td').allInnerTexts();
+    return [
+      ...new Set(
+        cellTexts.map((t) => t.replace(/\s+/g, ' ').trim()).filter((t) => t.includes('/') && t.length < 60),
+      ),
+    ];
+  };
+
+  const tryMatch = async (available: string[]): Promise<string | null> => {
+    for (const candidate of candidates) {
+      const match = available.find((a) => a.toUpperCase() === candidate.toUpperCase());
+      if (match) {
+        await popup.getByRole('cell', { name: match, exact: true }).first().click();
+        return match;
+      }
+    }
+    return null;
+  };
+
+  // Unfiltered first. The SCHEDULE popup already lists every repair
+  // location, and filtering it returns zero rows.
+  let picked = await tryMatch(await readAvailable());
+  if (picked) return picked;
+
+  // The TRANSFER popup is genuinely different: it opens on local/store
+  // locations ("PNS/STORE/017", ...) and the repair shops only appear once
+  // a search is run — which is exactly why the recording types into the
+  // find box there. Confirmed live on serial D5300-120, where the schedule
+  // popup listed the shops directly but the transfer popup did not.
   const findBox = popup.locator('#idEditFind');
-  if ((await findBox.count()) > 0) {
-    await findBox.first().fill('repair');
-    await findBox.first().press('Enter');
-    await popup.waitForTimeout(1200);
+  if ((await findBox.count()) === 0) {
+    log.warn({ candidates }, '[in-house scrap] no expected repair location present, and no find box to search with');
+    return null;
   }
 
-  for (const candidate of candidates) {
-    const cell = popup.getByRole('cell', { name: candidate, exact: true });
-    if ((await cell.count()) > 0) {
-      await cell.first().click();
-      return candidate;
-    }
+  const base = (candidates[0]?.split('/')[0] ?? '').trim();
+  for (const term of ['repair', base].filter(Boolean)) {
+    await findBox.first().fill(term);
+    await findBox.first().press('Enter');
+    await popup.waitForTimeout(1800);
+    picked = await tryMatch(await readAvailable());
+    if (picked) return picked;
   }
+
+  log.warn(
+    { candidates, availableAfterSearch: await readAvailable() },
+    '[in-house scrap] no expected repair location present in the picker, even after searching',
+  );
   return null;
 }
 
@@ -77,7 +124,14 @@ export async function writeInHouseScrap(
     // --- Inventory Search by serial ---
     await page.locator('#idMenuButton').click();
     await pace(page);
-    await page.getByRole('link', { name: /Unserviceable Staging Clerk/i }).click();
+    // REAL BUG CAUGHT IN PRE-FLIGHT (2026-08-23): a bare
+    // /Unserviceable Staging Clerk/i matches TWO menu entries — the clerk
+    // role itself AND "Unserviceable Staging Clerk Reports" — which
+    // Playwright's strict mode rejects outright. Anchored so only the role
+    // menu matches: the accessible name normalises to
+    // "Unserviceable Staging Clerk >", while the Reports entry has a word
+    // between the name and the chevron.
+    await page.getByRole('link', { name: /^Unserviceable Staging Clerk\s*>/i }).click();
     await pace(page);
     await page.getByRole('link', { name: 'Inventory Search' }).click();
     await pace(page);
@@ -97,8 +151,27 @@ export async function writeInHouseScrap(
       };
     }
     await hit.first().click();
-    await pace(page);
     stepsTaken.push(`found inventory for serial ${serialNumber}`);
+
+    // REAL BUG FIXED (2026-08-23, first live run): this read the page after
+    // a flat 750ms pace() and got nothing, failing with "could not read a
+    // base station" — while a read-only pre-flight using a 2500ms wait read
+    // "PNS/USSTG" from the same page without trouble. It was never a
+    // parsing problem, just reading before the detail page had rendered.
+    //
+    // Waits for the location pattern itself to appear rather than guessing
+    // a longer sleep — same content-aware-wait discipline as
+    // waitForUnassignedTasksSectionResolved.
+    try {
+      await page.waitForFunction(
+        () => /\b[A-Z]{3}\/[A-Z0-9]+/.test(document.body?.innerText ?? ''),
+        undefined,
+        { timeout: 20_000, polling: 250 },
+      );
+    } catch {
+      // Fall through — the explicit "couldn't read a location" error below
+      // is clearer than a raw timeout.
+    }
 
     // Current location drives which repair shop this goes to.
     const bodyText = await page.locator('body').innerText();
@@ -140,18 +213,26 @@ export async function writeInHouseScrap(
     await checkBox.first().check();
     await pace(page);
 
-    const wpLink = page.getByRole('link', { name: /^Repair\s/i });
+    // Matched by the "(PN: ...)" naming convention rather than a "Repair "
+    // prefix. TWO reasons, both found live:
+    //   - after this flow renames the package it starts with "Scrap", so a
+    //     Repair-prefix match would fail on any retry;
+    //   - "Scrap Inventory" is an ACTION link on this same page, so a
+    //     Scrap-prefix match grabs that instead of the work package.
+    // Every real package name seen carries "(PN: ..., SN: ...)".
+    const wpLink = page.getByRole('link', { name: /\(PN:/i });
     if ((await wpLink.count()) === 0) {
       return {
         status: 'failed',
         stepsTaken,
         locationUsed,
         partDescription,
-        errorMessage: `No "Repair ..." work package link found for serial ${serialNumber}. Nothing was changed.`,
+        errorMessage: `No work package link (matched on "(PN:") found for serial ${serialNumber}. Nothing was changed.`,
       };
     }
     const wpText = (await wpLink.first().innerText()).replace(/\s+/g, ' ').trim();
-    partDescription = wpText.replace(/^Repair\s+/i, '').trim();
+    // Strips EITHER prefix so a re-run doesn't produce "Scrap Scrap ...".
+    partDescription = wpText.replace(/^(Repair|Scrap)\s+/i, '').trim();
     await wpLink.first().click();
     await pace(page);
 

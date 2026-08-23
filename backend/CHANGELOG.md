@@ -4,6 +4,16 @@ All notable changes to this project, newest session first. Item numbers refer to
 
 ## 2026-08-23
 
+### Fixed (same day) — first live in-house scrap: three real bugs
+- **Ran the in-house flow for real against production serial D5300-120 (AED battery pack at PNS/USSTG).** It succeeded on the fourth attempt, having exposed three genuine bugs no amount of code review would have caught. A read-only pre-flight first confirmed the part was a valid candidate.
+  - **Ambiguous menu locator.** `/Unserviceable Staging Clerk/i` matched TWO entries — the clerk role and "Unserviceable Staging Clerk Reports" — which Playwright strict mode rejects outright. Caught by the pre-flight, before anything was touched. Now anchored so only the role menu matches.
+  - **MXI's own location casing is inconsistent between sites.** The real picker contains both `DFW/REPAIR1/SHOP1` (what the recording used) and `PNS/Repair1/Shop1`, `CAK/Repair1/Shop1`, `CLT/Repair1/Shop1`. An exact case-sensitive match silently failed at every mixed-case site. Matching is now case-insensitive, clicking whatever text MXI actually renders.
+  - **The two location popups behave differently.** The SCHEDULE popup lists every repair location directly, and typing "repair" into its find box returns ZERO rows; the TRANSFER popup opens on local store locations (`PNS/STORE/017`...) where the shops only appear after a search — which is why the recording filters there. The picker now tries unfiltered first and only searches if that finds nothing, which is correct for both.
+  - **A flat 750ms wait read the inventory page before it rendered**, failing with "could not read a base station" while a 2500ms read of the same page worked. Replaced with a content-aware wait for the location pattern itself.
+  - Two further robustness fixes fell out: the work package is now matched on its `(PN: ...)` naming convention rather than a "Repair " prefix (after the rename it starts with "Scrap", and "Scrap Inventory" is an ACTION link that a Scrap-prefix match grabs instead), and the rename strips either prefix so a re-run cannot produce "Scrap Scrap ...".
+  - **The location guard proved its worth**: on the first attempt it refused to pick a shop rather than guessing, leaving the part renamed but unscheduled instead of transferred somewhere wrong. All four attempts are in `scrap_outs`, three failed and one successful, with the exact reason each time.
+  - End state independently re-verified: no "Repair ..." link remains and the item now reads `PNS/Repair1/Shop1`.
+
 ### Added
 - **Scrap-out tab (`/scrapped-parts`), replacing the placeholder.** The second scrap step — physically scrapping the part in MXI. Two toggleable modes.
   - **Scrapped at vendor**: drop the vendor's scrap certificate; the order number and serial are read from it, then the full sequence from `discovery-full-scrap-recording.ts` runs — receive shipment, cancel task as SCRAPVEN, complete and sign the work package, inspect as unserviceable, attach the certificate, scrap inventory.
