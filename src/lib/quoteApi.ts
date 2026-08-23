@@ -51,13 +51,26 @@ export type QuoteDisposition = 'pending' | 'excluded_nrep' | 'excluded_ber' | 'e
  */
 export type QuoteWriteAction = 'exchange' | 'scrap_price' | 'price_line' | 'none'
 
+/**
+ * MUST stay identical to the backend's own resolveWriteAction
+ * (quoteWriter/quoteDisposition.ts) — if these drift, the UI promises one
+ * action and the runner performs another.
+ *
+ * Precedence: analyst exclusion, then BER (a human's judgement outranks
+ * anything the model read), then exchange, then NREP, then a normal repair.
+ * Exchange deliberately beats NREP: a vendor saying "not repairable, here
+ * is a replacement" is describing an exchange, and the exchange is how the
+ * non-repairable unit gets resolved.
+ */
 export function resolveWriteAction(
   disposition: QuoteDisposition,
   suggestsExchange: boolean,
 ): QuoteWriteAction {
-  if (disposition === 'excluded_nrep' || disposition === 'excluded_ber') return 'scrap_price'
   if (disposition === 'excluded_other') return 'none'
-  return suggestsExchange ? 'exchange' : 'price_line'
+  if (disposition === 'excluded_ber') return 'scrap_price'
+  if (suggestsExchange) return 'exchange'
+  if (disposition === 'excluded_nrep') return 'scrap_price'
+  return 'price_line'
 }
 
 export type HumanSettableDisposition = 'pending' | 'excluded_ber' | 'excluded_other'

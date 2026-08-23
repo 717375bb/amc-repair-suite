@@ -4,6 +4,15 @@ All notable changes to this project, newest session first. Item numbers refer to
 
 ## 2026-08-23
 
+### Fixed (end of day) — exchange now overrides NREP
+- **A quote that is BOTH vendor-stated NREP and an exchange offer now converts to an exchange, not scrap.** User-reported after testing real exchange quotes: "exchange overrides NREP scraps. When NREP is found but so is exchange, it should only exchange."
+  - `resolveWriteAction()` had scrap winning, on my stated reasoning that "a part being scrapped has no unit to exchange". That was backwards. NREP and exchange are both the vendor's own statements in the SAME document, and a vendor saying "your unit is not repairable, here is a replacement" is describing an exchange — the exchange IS how the non-repairable unit gets resolved. Scrapping instead would charge the wrong thing and discard the replacement.
+  - Precedence is now explicit, most authoritative first: analyst exclusion, then BER, then exchange, then NREP, then an ordinary repair. **BER deliberately still beats exchange** — it is a human's commercial judgement made after seeing the quote, and outranks anything the model merely read off the page.
+  - The frontend's mirrored copy was updated in the same change, and its comment now says explicitly that the two must not drift — otherwise the UI promises one action while the runner performs another.
+  - Row badges are now derived from the resolved ACTION rather than the disposition, so an NREP+exchange row reads "Exchange (over NREP)" instead of the flatly wrong "NREP · scrap price". A new banner surfaces the override rather than letting it look like the NREP was missed.
+  - Fixed a stale banner while here: it still claimed NREP quotes were "excluded from the MXI write automatically", which stopped being true when NREP was routed to scrap pricing earlier in the day.
+  - Verified with an exhaustive 8-case check across every disposition crossed with both exchange states.
+
 ### Fixed (end of day) — Move to Dock: the likely root cause, found by accident
 - **Uppercase-only location matching almost certainly explains "orders written up and issued but never actually moved to dock."** The morning's verification fix made a false success *visible*; this is the reason it was happening.
   - `readOutboundShipmentDockState()` matched locations with `/\b([A-Z]{3})\/([A-Z0-9]+)\b/` and compared `=== 'USSTG'`. The in-house scrap's first live run then proved, incidentally, that **MXI's own location casing varies by site** — the real picker holds `DFW/REPAIR1/SHOP1` right alongside `PNS/Repair1/Shop1`, `CAK/`, `CLT/`, `GSP/`, `ORF/`, `SAV/`.

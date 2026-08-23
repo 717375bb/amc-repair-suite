@@ -53,25 +53,33 @@ function confidenceTone(c: QuoteExtractionRow['confidence']): 'success' | 'warni
 }
 
 /**
- * Names the ACTION, not just the state. NREP and BER are no longer dead
- * ends — they route to scrap pricing — so showing them as a bare red
- * "NREP" would wrongly read as "nothing will happen to this row".
+ * Names the ACTION that will actually run, derived from the same
+ * resolveWriteAction the backend uses — never from the disposition alone.
+ *
+ * That distinction matters: a quote can be BOTH vendor-stated NREP AND an
+ * exchange offer, and exchange wins. Labelling such a row from its
+ * disposition would show "NREP · scrap price" while the runner converts it
+ * to an exchange — the UI promising one thing and the tool doing another.
  */
 function dispositionBadge(
   d: QuoteDisposition,
   suggestsExchange: boolean,
 ): { label: string; tone: 'success' | 'warning' | 'danger' | 'neutral' } {
-  switch (d) {
-    case 'excluded_nrep':
-      return { label: 'NREP · scrap price', tone: 'warning' }
-    case 'excluded_ber':
-      return { label: 'BER · scrap price', tone: 'warning' }
-    case 'excluded_other':
+  const action = resolveWriteAction(d, suggestsExchange)
+  switch (action) {
+    case 'none':
       return { label: 'Excluded', tone: 'neutral' }
+    case 'exchange':
+      // Called out when it overrode an NREP, so the override is visible
+      // rather than looking like the NREP was simply missed.
+      return {
+        label: d === 'excluded_nrep' ? 'Exchange (over NREP)' : 'Convert to exchange',
+        tone: 'warning',
+      }
+    case 'scrap_price':
+      return { label: d === 'excluded_ber' ? 'BER · scrap price' : 'NREP · scrap price', tone: 'warning' }
     default:
-      return suggestsExchange
-        ? { label: 'Convert to exchange', tone: 'warning' }
-        : { label: 'Price + ESD', tone: 'success' }
+      return { label: 'Price + ESD', tone: 'success' }
   }
 }
 
@@ -346,7 +354,7 @@ export default function VendorQuotes() {
     }
   }
 
-  const { quotes, skipped, needsReview, willWrite, nrepCount, berCount } = useMemo(() => {
+  const { quotes, skipped, needsReview, willWrite, nrepScrapCount, nrepOverriddenByExchangeCount, berCount } = useMemo(() => {
     const q = rows.filter((r) => r.documentKind === 'quote')
     return {
       quotes: q,
@@ -370,7 +378,18 @@ export default function VendorQuotes() {
         return writeResultByExtraction.get(r.extractionId)?.status !== 'success'
       }),
       berCount: q.filter((r) => (pendingDisposition[r.extractionId] ?? r.disposition) === 'excluded_ber').length,
-      nrepCount: q.filter((r) => r.vendorSaysNonRepairable).length,
+      // Split by what each NREP row will ACTUALLY do, because exchange
+      // overrides NREP — a combined count would describe neither group.
+      nrepScrapCount: q.filter(
+        (r) =>
+          r.vendorSaysNonRepairable &&
+          resolveWriteAction(pendingDisposition[r.extractionId] ?? r.disposition, r.suggestsExchange) === 'scrap_price',
+      ).length,
+      nrepOverriddenByExchangeCount: q.filter(
+        (r) =>
+          r.vendorSaysNonRepairable &&
+          resolveWriteAction(pendingDisposition[r.extractionId] ?? r.disposition, r.suggestsExchange) === 'exchange',
+      ).length,
     }
   }, [rows, pendingDisposition, writeResultByExtraction])
 
@@ -560,11 +579,24 @@ export default function VendorQuotes() {
             )}
           </Card>
 
-          {nrepCount > 0 && (
+          {nrepScrapCount > 0 && (
             <div className="rounded-md border border-l-4 border-danger border-l-danger bg-danger-soft px-4 py-3 text-sm text-text">
-              <span className="font-semibold">{nrepCount} quote(s): the vendor says the part is NON-REPAIRABLE.</span>{' '}
-              These are excluded from the MXI write automatically and tagged for the scrap process. Undo on a row if you
-              disagree with that read.
+              <span className="font-semibold">
+                {nrepScrapCount} quote(s): the vendor says the part is NON-REPAIRABLE.
+              </span>{' '}
+              These get scrap pricing rather than a repair price — the quoted amount goes onto a SCRAP line and the
+              original line is zeroed. Undo on a row if you disagree with that read.
+            </div>
+          )}
+
+          {nrepOverriddenByExchangeCount > 0 && (
+            <div className="rounded-md border border-l-4 border-accent border-l-accent bg-accent-soft px-4 py-3 text-sm text-text">
+              <span className="font-semibold">
+                {nrepOverriddenByExchangeCount} quote(s) say NON-REPAIRABLE and also offer an exchange — these convert to
+                an exchange, not scrap.
+              </span>{' '}
+              The exchange is how the non-repairable unit gets resolved, so scrapping it instead would charge the wrong
+              thing and discard the replacement.
             </div>
           )}
 

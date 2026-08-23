@@ -80,11 +80,32 @@ export function resolveWriteAction(
   disposition: QuoteDisposition,
   suggestsExchange: boolean,
 ): QuoteWriteAction {
-  // Scrap wins over exchange: if the part is being scrapped there is no
-  // unit to exchange. Checked first so the two can never both fire.
-  if (disposition === 'excluded_nrep' || disposition === 'excluded_ber') return 'scrap_price';
+  // CORRECTED 2026-08-23, per explicit user direction after testing real
+  // exchange quotes: "exchange overrides NREP scraps. When NREP is found
+  // but so is exchange, it should only exchange."
+  //
+  // This code previously had scrap winning, on the reasoning that "a part
+  // being scrapped has no unit to exchange". That was backwards. NREP and
+  // exchange are BOTH the vendor's own statements in the SAME document,
+  // and a vendor saying "your unit is not repairable, here is a
+  // replacement" is describing an exchange — the exchange IS how the
+  // non-repairable unit gets resolved. Scrapping it instead would both
+  // charge the wrong thing and throw away the replacement.
+  //
+  // Precedence, most authoritative first:
+  //   1. excluded_other  — the analyst said don't touch it.
+  //   2. excluded_ber    — a HUMAN's deliberate commercial judgement,
+  //                        made after seeing the quote. It outranks
+  //                        anything the model merely read off the page,
+  //                        exchange included.
+  //   3. exchange        — vendor-stated, and beats vendor-stated NREP.
+  //   4. excluded_nrep   — vendor-stated, with no exchange on offer.
+  //   5. price_line      — an ordinary repair.
   if (disposition === 'excluded_other') return 'none';
-  return suggestsExchange ? 'exchange' : 'price_line';
+  if (disposition === 'excluded_ber') return 'scrap_price';
+  if (suggestsExchange) return 'exchange';
+  if (disposition === 'excluded_nrep') return 'scrap_price';
+  return 'price_line';
 }
 
 export function isWritable(disposition: QuoteDisposition): boolean {
