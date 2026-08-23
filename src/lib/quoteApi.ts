@@ -44,6 +44,22 @@ export interface QuoteExtractionRow {
  * three can be chosen by a human (see the backend's quoteDisposition.ts).
  */
 export type QuoteDisposition = 'pending' | 'excluded_nrep' | 'excluded_ber' | 'excluded_other'
+
+/**
+ * Which MXI action a row will take. NREP/BER are no longer dead ends — they
+ * route to scrap pricing (see the backend's quoteDisposition.ts).
+ */
+export type QuoteWriteAction = 'exchange' | 'scrap_price' | 'price_line' | 'none'
+
+export function resolveWriteAction(
+  disposition: QuoteDisposition,
+  suggestsExchange: boolean,
+): QuoteWriteAction {
+  if (disposition === 'excluded_nrep' || disposition === 'excluded_ber') return 'scrap_price'
+  if (disposition === 'excluded_other') return 'none'
+  return suggestsExchange ? 'exchange' : 'price_line'
+}
+
 export type HumanSettableDisposition = 'pending' | 'excluded_ber' | 'excluded_other'
 
 export interface QuoteWriteResult {

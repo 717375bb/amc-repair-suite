@@ -16,6 +16,7 @@ import {
   type QuoteDisposition,
   type QuoteExtractionRow,
   type QuoteRunStatusResponse,
+  resolveWriteAction,
   type QuoteWriteResult,
 } from '../lib/quoteApi'
 
@@ -51,16 +52,26 @@ function confidenceTone(c: QuoteExtractionRow['confidence']): 'success' | 'warni
   return 'neutral'
 }
 
-function dispositionBadge(d: QuoteDisposition): { label: string; tone: 'success' | 'warning' | 'danger' | 'neutral' } {
+/**
+ * Names the ACTION, not just the state. NREP and BER are no longer dead
+ * ends — they route to scrap pricing — so showing them as a bare red
+ * "NREP" would wrongly read as "nothing will happen to this row".
+ */
+function dispositionBadge(
+  d: QuoteDisposition,
+  suggestsExchange: boolean,
+): { label: string; tone: 'success' | 'warning' | 'danger' | 'neutral' } {
   switch (d) {
     case 'excluded_nrep':
-      return { label: 'NREP', tone: 'danger' }
+      return { label: 'NREP · scrap price', tone: 'warning' }
     case 'excluded_ber':
-      return { label: 'BER', tone: 'danger' }
+      return { label: 'BER · scrap price', tone: 'warning' }
     case 'excluded_other':
       return { label: 'Excluded', tone: 'neutral' }
     default:
-      return { label: 'Will write', tone: 'success' }
+      return suggestsExchange
+        ? { label: 'Convert to exchange', tone: 'warning' }
+        : { label: 'Price + ESD', tone: 'success' }
   }
 }
 
@@ -335,7 +346,7 @@ export default function VendorQuotes() {
     }
   }
 
-  const { quotes, skipped, needsReview, willWrite, nrepCount } = useMemo(() => {
+  const { quotes, skipped, needsReview, willWrite, nrepCount, berCount } = useMemo(() => {
     const q = rows.filter((r) => r.documentKind === 'quote')
     return {
       quotes: q,
@@ -344,11 +355,18 @@ export default function VendorQuotes() {
       // Excludes anything already successfully written. The runner would
       // skip those anyway (its already-written guard), but offering
       // "Write 8 to MXI" when all 8 would be skipped reads as broken.
-      willWrite: q.filter(
-        (r) =>
-          (pendingDisposition[r.extractionId] ?? r.disposition) === 'pending' &&
-          writeResultByExtraction.get(r.extractionId)?.status !== 'success',
-      ),
+      // Action-aware, not just 'pending'. NREP rows are now writable — they
+      // route to scrap pricing. BER rows are deliberately NOT counted: the
+      // runner blocks them because the extracted price is that quote's
+      // REPAIR cost, not a scrap fee, so there is no correct number to
+      // write yet. Counting them would promise a write that can't happen.
+      willWrite: q.filter((r) => {
+        const disp = pendingDisposition[r.extractionId] ?? r.disposition
+        if (resolveWriteAction(disp, r.suggestsExchange) === 'none') return false
+        if (disp === 'excluded_ber') return false
+        return writeResultByExtraction.get(r.extractionId)?.status !== 'success'
+      }),
+      berCount: q.filter((r) => (pendingDisposition[r.extractionId] ?? r.disposition) === 'excluded_ber').length,
       nrepCount: q.filter((r) => r.vendorSaysNonRepairable).length,
     }
   }, [rows, pendingDisposition, writeResultByExtraction])
@@ -547,6 +565,14 @@ export default function VendorQuotes() {
             </div>
           )}
 
+          {berCount > 0 && (
+            <div className="rounded-md border border-l-4 border-warning border-l-warning bg-warning-soft px-4 py-3 text-sm text-text">
+              <span className="font-semibold">{berCount} quote(s) marked BER need a scrap fee before they can be written.</span>{' '}
+              A BER call is made on an ordinary repair quote, so the extracted amount is that quote&apos;s repair cost — not a
+              scrap fee. Writing it would charge the wrong amount, so those rows are held back.
+            </div>
+          )}
+
           {needsReview.length > 0 && (
             <div className="rounded-md border border-l-4 border-warning border-l-warning bg-warning-soft px-4 py-3 text-sm text-text">
               {needsReview.length} quote(s) need a look before they could be written — see the flagged rows below.
@@ -598,8 +624,8 @@ export default function VendorQuotes() {
                 <tbody>
                   {quotes.map((r) => {
                     const disp = effectiveDisposition(r)
-                    const excluded = disp !== 'pending'
-                    const badge = dispositionBadge(disp)
+                    const excluded = disp === 'excluded_other'
+                    const badge = dispositionBadge(disp, r.suggestsExchange)
                     return (
                     <tr
                       key={r.extractionId}

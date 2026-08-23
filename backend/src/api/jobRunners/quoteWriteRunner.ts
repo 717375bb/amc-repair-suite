@@ -10,6 +10,7 @@ import { createReadyMxiClient } from '../../mxiWriter/cliMxiClient.js';
 import { toMxiDateFormat } from '../../mxiWriter/esdFormatting.js';
 import { writePriceLineUpdate, type PriceLineUpdateResult } from '../../mxiWriter/writePriceLineUpdate.js';
 import { convertRepairToExchange } from '../../mxiWriter/convertToExchange.js';
+import { writeScrapPriceLines } from '../../mxiWriter/writeScrapPriceLines.js';
 import { markOutlookMailRead } from '../../quoteWriter/outlookMarkRead.js';
 import { createOutlookReply, resolveReplyMode } from '../../quoteWriter/outlookReply.js';
 import {
@@ -18,7 +19,7 @@ import {
   loadApprovalTemplate,
   renderApprovalReply,
 } from '../../quoteWriter/quoteReplyTemplate.js';
-import { isWritable, type QuoteDisposition } from '../../quoteWriter/quoteDisposition.js';
+import { resolveWriteAction, type QuoteDisposition } from '../../quoteWriter/quoteDisposition.js';
 import type { MxiEnv } from '../../mxiWriter/config.js';
 import { watchStdinForCancellation } from './cancellationWatcher.js';
 import { createLogger } from '../../logging/logger.js';
@@ -34,16 +35,18 @@ const log = createLogger('quote');
  * it's needed, reissue, independently re-verify — then, and only then, mark
  * the source email read.
  *
- * Reuses writePriceLineUpdate() rather than reimplementing the write: it is
- * already live-proven, and carries the integer-cents price comparison and
- * the always-re-verify discipline. A quote whose vendor offered an
- * EXCHANGE instead routes to convertRepairToExchange() — a different MXI
- * action that carries its own price, so the two never both run.
+ * THREE mutually exclusive write actions, resolved by resolveWriteAction()
+ * from the row's disposition and exchange flag — never more than one runs:
+ *   price_line   ordinary repair quote -> writePriceLineUpdate()
+ *   exchange     vendor offered a replacement -> convertRepairToExchange()
+ *   scrap_price  NREP or BER -> writeScrapPriceLines()
+ * Each carries its own price through a different MXI mechanism, so running
+ * two would push the same money twice.
  *
  * FOUR structural guards, none of which depend on the caller behaving:
- *   1. Disposition is re-read from the DB, never trusted from the request.
- *      A row marked NREP/BER/excluded cannot be written even if its id is
- *      passed in explicitly.
+ *   1. Disposition is re-read from the DB, never trusted from the request,
+ *      and it decides WHICH action runs. A row the analyst excluded cannot
+ *      be written even if its id is passed in explicitly.
  *   2. quoteExtractionAlreadyWritten() blocks a second successful write —
  *      re-writing reissues the order again for nothing.
  *   3. Rows missing an order number, price, serial, or ESD are skipped;
@@ -55,6 +58,11 @@ const log = createLogger('quote');
 interface Envelope {
   type: 'phase' | 'summary' | 'order-result' | 'fatal' | 'done';
   [key: string]: unknown;
+}
+
+/** Formats a row's extracted price for a message, before priceString exists. */
+function priceStringFor(row: { unit_price: number | null }): string {
+  return row.unit_price === null ? '(none)' : row.unit_price.toFixed(2);
 }
 
 function emit(envelope: Envelope): void {
@@ -158,8 +166,24 @@ async function main(): Promise<void> {
       };
 
       const disposition = (dispositions.get(row.id)?.disposition ?? 'pending') as QuoteDisposition;
-      if (!isWritable(disposition)) {
+      const writeAction = resolveWriteAction(disposition, row.suggests_exchange === 1);
+      if (writeAction === 'none') {
         skip(`Not writable — disposition is "${disposition}".`);
+        continue;
+      }
+
+      // BER is a PSA-side commercial judgement made on an ordinary repair
+      // quote, so the extracted price is the REPAIR cost, not a scrap fee.
+      // Writing it as a scrap charge would put a large wrong number on a
+      // real order. NREP is different: those quotes literally state a scrap
+      // fee (the real P000BDTA quote reads "Scrap Fee $175.00"), so the
+      // extracted price IS the right figure there.
+      if (writeAction === 'scrap_price' && disposition === 'excluded_ber') {
+        skip(
+          `Marked BER, which needs scrap pricing — but the extracted price (${priceStringFor(row)}) is this quote's ` +
+            `REPAIR cost, not a scrap fee. Writing it would charge the wrong amount. Supply the real scrap fee ` +
+            `before this row can be written.`,
+        );
         continue;
       }
       if (row.document_kind !== 'quote') {
@@ -200,7 +224,20 @@ async function main(): Promise<void> {
       // it — doing both would push the same money twice through two
       // different mechanisms.
       let result: PriceLineUpdateResult;
-      if (row.suggests_exchange) {
+      if (writeAction === 'scrap_price') {
+        // NREP / BER — the part is being scrapped, so the money moves onto
+        // a SCRAP line rather than being written as a repair price.
+        log.info({ orderNumber, env, scrapFee: priceString, disposition }, 'routing to scrap pricing');
+        const scrap = await writeScrapPriceLines(client, row.order_number!, priceString, password ?? '');
+        result = {
+          status: scrap.status,
+          outcome: scrap.status === 'success' ? 'written' : 'failed',
+          originalPrice: null,
+          serialNumberMxi: null,
+          issueDetail: scrap.issueDetail,
+          errorMessage: scrap.errorMessage ?? scrap.skipReason,
+        };
+      } else if (writeAction === 'exchange') {
         log.info({ orderNumber, env, price: priceString }, 'quote suggests exchange — converting rather than pricing');
         const exchange = await convertRepairToExchange(
           client,

@@ -53,8 +53,55 @@ export function initialDisposition(vendorSaysNonRepairable: boolean): QuoteDispo
   return vendorSaysNonRepairable ? 'excluded_nrep' : 'pending';
 }
 
+/**
+ * What MXI action a reviewed quote actually needs.
+ *
+ * CHANGED 2026-08-23, per explicit user direction: NREP and BER rows used
+ * to be a dead end — recorded, excluded from the write, and left for a
+ * scrap workflow that didn't exist yet. That workflow's first half now
+ * does exist (writeScrapPriceLines), so those rows route to it instead of
+ * being skipped.
+ *
+ * The disposition names are deliberately unchanged: `excluded_nrep` and
+ * `excluded_ber` still accurately mean "this part is heading for scrap,
+ * not repair". What changed is that heading for scrap now HAS an action.
+ */
+export type QuoteWriteAction =
+  /** Vendor offered a replacement unit — Convert Repair To Exchange. */
+  | 'exchange'
+  /** Part is being scrapped — add the SCRAP price line and zero the original. */
+  | 'scrap_price'
+  /** Ordinary repair quote — Unit Price + Price Type=QUOTE + ESD. */
+  | 'price_line'
+  /** Nothing to do (analyst excluded it, or it isn't a quote). */
+  | 'none';
+
+export function resolveWriteAction(
+  disposition: QuoteDisposition,
+  suggestsExchange: boolean,
+): QuoteWriteAction {
+  // Scrap wins over exchange: if the part is being scrapped there is no
+  // unit to exchange. Checked first so the two can never both fire.
+  if (disposition === 'excluded_nrep' || disposition === 'excluded_ber') return 'scrap_price';
+  if (disposition === 'excluded_other') return 'none';
+  return suggestsExchange ? 'exchange' : 'price_line';
+}
+
 export function isWritable(disposition: QuoteDisposition): boolean {
-  return disposition === 'pending';
+  return disposition !== 'excluded_other';
+}
+
+export function writeActionLabel(action: QuoteWriteAction): string {
+  switch (action) {
+    case 'exchange':
+      return 'Convert to exchange';
+    case 'scrap_price':
+      return 'Scrap pricing';
+    case 'price_line':
+      return 'Price + ESD';
+    default:
+      return 'No action';
+  }
 }
 
 export function dispositionLabel(disposition: QuoteDisposition): string {
