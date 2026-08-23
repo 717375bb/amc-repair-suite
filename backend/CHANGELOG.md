@@ -4,6 +4,15 @@ All notable changes to this project, newest session first. Item numbers refer to
 
 ## 2026-08-23
 
+### Fixed (end of day) — Move to Dock: the likely root cause, found by accident
+- **Uppercase-only location matching almost certainly explains "orders written up and issued but never actually moved to dock."** The morning's verification fix made a false success *visible*; this is the reason it was happening.
+  - `readOutboundShipmentDockState()` matched locations with `/\b([A-Z]{3})\/([A-Z0-9]+)\b/` and compared `=== 'USSTG'`. The in-house scrap's first live run then proved, incidentally, that **MXI's own location casing varies by site** — the real picker holds `DFW/REPAIR1/SHOP1` right alongside `PNS/Repair1/Shop1`, `CAK/`, `CLT/`, `GSP/`, `ORF/`, `SAV/`.
+  - At any mixed-case site the regex simply did not match. `currentLocationMatch` came back null → `notYetDocked` was **false** → the state read as `already_docked_or_further` → `moveOutboundShipmentToDock()` returned `already_docked_externally` **without ever clicking Move to Dock**. The part never moved, and nothing looked wrong. Verified directly: `PNS/Usstg` and `CAK/Usstg 1 EA` both failed the old test and both pass the new one, while `DFW/USSTG` passes either way — which is exactly why it hit some orders and not others.
+  - Also fixes the outbound-shipment identifier: `.endsWith('/DOCK')` was case-sensitive, so a site rendering `/Dock` reported *no outbound shipment* for an order that has one.
+  - New `location_unreadable` state. An unreadable page is no longer collapsed into "already docked" — that conflation is what let a real failure read as success. `moveOutboundShipmentToDock()` now attempts the move anyway on that state and lets the post-move verification decide.
+  - **Swept the same bug class across the codebase**, since it was never dock-specific: `readCurrentLocationCode()` (threw outright at mixed-case sites), `transformReturnToLocation()`, the `USSTG` line checks in both `aeroRepair/writeUp.ts` and `vendorCodeWriteUp.ts` (which gate the DO-NOT-SHIP diversion), `batchDiscovery.ts`'s station match, and the new in-house scrap's own reads. All location matching is now case-insensitive; a grep confirms none remain.
+  - Not yet re-run against a real dock move. `npm run dock:audit` is the way to measure whether the 788 historical `success` rows hold up.
+
 ### Fixed (same day) — first live in-house scrap: three real bugs
 - **Ran the in-house flow for real against production serial D5300-120 (AED battery pack at PNS/USSTG).** It succeeded on the fourth attempt, having exposed three genuine bugs no amount of code review would have caught. A read-only pre-flight first confirmed the part was a valid candidate.
   - **Ambiguous menu locator.** `/Unserviceable Staging Clerk/i` matched TWO entries — the clerk role and "Unserviceable Staging Clerk Reports" — which Playwright strict mode rejects outright. Caught by the pre-flight, before anything was touched. Now anchored so only the role menu matches.

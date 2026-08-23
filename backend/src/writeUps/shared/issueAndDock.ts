@@ -1,6 +1,9 @@
 import type { Page } from 'playwright';
 import type { MxiClient } from '../../mxiWriter/mxiClient.js';
 import { waitForBodyTextIncludes } from './taskRecovery.js';
+import { createLogger } from '../../logging/logger.js';
+
+const log = createLogger('writeup');
 
 const CLICK_DELAY_MS = 750;
 
@@ -113,7 +116,12 @@ export interface MoveToDockResult {
 }
 
 export interface OutboundShipmentDockState {
-  status: 'not_yet_docked' | 'already_docked_or_further' | 'no_outbound_shipment_found';
+  /**
+   * 'location_unreadable' exists so an unreadable page can never be
+   * mistaken for "already docked" — that conflation is what let a real
+   * failure look like success.
+   */
+  status: 'not_yet_docked' | 'already_docked_or_further' | 'no_outbound_shipment_found' | 'location_unreadable';
   shipmentId: string | null;
 }
 
@@ -156,7 +164,14 @@ export async function readOutboundShipmentDockState(
 
     const bodyText = await page.locator('body').innerText();
     const shipFromMatch = bodyText.match(/Ship From:\s*([^\t\n]+)/);
-    if (shipFromMatch && shipFromMatch[1].trim().endsWith('/DOCK')) {
+    // CASE-INSENSITIVE, and this is not hypothetical. The in-house scrap's
+    // first live run (2026-08-23) proved MXI's own location casing varies
+    // by site: the real picker holds DFW/REPAIR1/SHOP1 alongside
+    // PNS/Repair1/Shop1, CAK/Repair1/Shop1, CLT/Repair1/Shop1,
+    // GSP/, ORF/, SAV/. A site rendering "/Dock" would have failed this
+    // check outright, reporting no outbound shipment for an order that has
+    // one.
+    if (shipFromMatch && shipFromMatch[1].trim().toUpperCase().endsWith('/DOCK')) {
       outboundShipmentId = shipmentId;
       break;
     }
@@ -170,8 +185,40 @@ export async function readOutboundShipmentDockState(
   const fullBodyText = await page.locator('body').innerText();
   const linesSectionIdx = fullBodyText.indexOf('Shipment Lines');
   const linesSectionText = linesSectionIdx >= 0 ? fullBodyText.slice(linesSectionIdx) : fullBodyText;
-  const currentLocationMatch = linesSectionText.match(/\b([A-Z]{3})\/([A-Z0-9]+)\b/);
-  const notYetDocked = !!currentLocationMatch && currentLocationMatch[2] === 'USSTG';
+  /**
+   * LIKELY ROOT CAUSE of the user-reported "orders written up and issued
+   * but never actually moved to dock" (2026-08-23).
+   *
+   * This regex used to be uppercase-only (`[A-Z]{3}\/[A-Z0-9]+`) and
+   * compared with `=== 'USSTG'`. The in-house scrap's first live run then
+   * proved MXI's location casing genuinely varies by site — the real
+   * picker holds PNS/Repair1/Shop1 and CAK/Repair1/Shop1 right alongside
+   * DFW/REPAIR1/SHOP1.
+   *
+   * At any site rendering "Usstg" rather than "USSTG", the regex simply
+   * did not match. `currentLocationMatch` came back null, which made
+   * `notYetDocked` FALSE, which reported 'already_docked_or_further' —
+   * and moveOutboundShipmentToDock returns 'already_docked_externally' on
+   * that, **without ever clicking Move to Dock**. The part never moved and
+   * nothing looked wrong. That is exactly the reported symptom, and it
+   * would silently affect only the mixed-case sites.
+   *
+   * Now case-insensitive on both halves, comparing normalised values.
+   */
+  const currentLocationMatch = linesSectionText.match(/\b([A-Za-z]{3})\/([A-Za-z0-9]+)\b/);
+  const currentSubLocation = currentLocationMatch?.[2]?.toUpperCase() ?? null;
+  const notYetDocked = currentSubLocation === 'USSTG';
+
+  // An unreadable location is NOT evidence the part is already docked.
+  // Treating it as such is what let a silent failure look like success, so
+  // it is now reported as its own state rather than defaulting either way.
+  if (!currentLocationMatch) {
+    log.warn(
+      { orderNumber, shipmentId: outboundShipmentId, linesSectionSample: linesSectionText.slice(0, 200) },
+      '[dock] could not read a current location from the shipment lines — refusing to assume docked',
+    );
+    return { status: 'location_unreadable', shipmentId: outboundShipmentId };
+  }
 
   return {
     status: notYetDocked ? 'not_yet_docked' : 'already_docked_or_further',
@@ -204,6 +251,20 @@ export async function moveOutboundShipmentToDock(client: MxiClient, orderNumber:
 
     if (dockState.status === 'already_docked_or_further') {
       return { status: 'already_docked_externally', shipmentId: dockState.shipmentId, errorMessage: null };
+    }
+
+    if (dockState.status === 'location_unreadable') {
+      // Deliberately falls through and ATTEMPTS the move rather than
+      // returning "already docked". An unreadable location is not evidence
+      // the part moved — assuming it was is precisely what made real
+      // failures look like successes. If it genuinely is already docked,
+      // there will be no selectable shipment line and that surfaces as a
+      // named failure; if it isn't, the move happens and the verification
+      // below confirms it.
+      log.warn(
+        { orderNumber, shipmentId: dockState.shipmentId },
+        '[dock] pre-move location unreadable — attempting the move anyway; post-verification is authoritative',
+      );
     }
 
     // REAL BUG FOUND AND FIXED (user-reported, 2026-08-23): "a significant

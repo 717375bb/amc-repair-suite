@@ -401,7 +401,9 @@ export async function findNoWorkPackageLinesForPart(
         const serialNumber = linkTexts[pnIdx + 1];
         if (!serialNumber) continue; // shape guaranteed by every real row seen; defensive only
 
-        const stationMatch = text.match(/\b([A-Z]{3})\/USSTG\b/);
+        // Case-insensitive — MXI's location casing varies by site (confirmed
+        // live 2026-08-23: PNS/Repair1/Shop1 alongside DFW/REPAIR1/SHOP1).
+        const stationMatch = text.match(/\b([A-Za-z]{3})\/USSTG\b/i);
         found.push({ serialNumber, stationCode: stationMatch?.[1] ?? '', note: text });
       }
       return found;

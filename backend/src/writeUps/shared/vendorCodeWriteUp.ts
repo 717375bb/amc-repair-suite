@@ -739,7 +739,7 @@ export async function runVendorCodeWriteUp(
         // redirect. Confirmed scope: USSTG lines only. currentLocation was
         // already read above in the exact "<STATION>/<CODE>" shape every
         // other station check in this project uses.
-        const isUsstgLine = currentLocation.split('/')[1] === 'USSTG';
+        const isUsstgLine = currentLocation.split('/')[1]?.toUpperCase() === 'USSTG';
         if (isUsstgLine) {
           doNotShipReason = ZERO_USAGE_DO_NOT_SHIP_REASON;
           effectiveTerminalState = 'CREATE_ORDER_ONLY';

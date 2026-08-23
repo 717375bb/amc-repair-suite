@@ -164,7 +164,7 @@ export async function writeInHouseScrap(
     // waitForUnassignedTasksSectionResolved.
     try {
       await page.waitForFunction(
-        () => /\b[A-Z]{3}\/[A-Z0-9]+/.test(document.body?.innerText ?? ''),
+        () => /\b[A-Za-z]{3}\/[A-Za-z0-9]+/.test(document.body?.innerText ?? ''),
         undefined,
         { timeout: 20_000, polling: 250 },
       );
@@ -175,7 +175,11 @@ export async function writeInHouseScrap(
 
     // Current location drives which repair shop this goes to.
     const bodyText = await page.locator('body').innerText();
-    const locationMatch = bodyText.match(/\b([A-Z]{3})\/[A-Z0-9]+/);
+    // Case-insensitive — MXI renders mixed-case locations at many sites
+    // (PNS/Repair1/Shop1, CAK/, CLT/, GSP/, ORF/, SAV/). Only the base
+    // station is used downstream, and repairLocationCandidates() uppercases
+    // it, so a mixed-case read still resolves correctly.
+    const locationMatch = bodyText.match(/\b([A-Za-z]{3})\/[A-Za-z0-9]+/);
     const currentLocation = locationMatch?.[0] ?? '';
     const candidates = repairLocationCandidates(currentLocation);
     if (candidates.length === 0) {

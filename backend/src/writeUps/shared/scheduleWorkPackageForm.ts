@@ -83,7 +83,11 @@ export async function readCurrentLocationCode(page: Page, linkText: string): Pro
   const repairLink = page.getByRole('link', { name: linkText, exact: true });
   const row = repairLink.locator('xpath=ancestor::tr[1]');
   const rowText = await row.innerText();
-  const match = rowText.match(/\b([A-Z]{3})\/([A-Z0-9]+)\b/);
+  // Case-insensitive: MXI's own location casing varies by site — the real
+  // location picker holds DFW/REPAIR1/SHOP1 alongside PNS/Repair1/Shop1,
+  // CAK/, CLT/, GSP/, ORF/, SAV/ (confirmed live 2026-08-23). An
+  // uppercase-only match threw outright at those sites.
+  const match = rowText.match(/\b([A-Za-z]{3})\/([A-Za-z0-9]+)\b/);
   if (!match) {
     throw new Error(
       `Could not find a "<STATION>/<CODE>" location token in the target line's row text: "${rowText}"`,

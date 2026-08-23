@@ -534,7 +534,7 @@ export async function runAeroRepairWriteUp(
     // location state keeps the original zero_usage exception untouched.
     let doNotShipReason: string | null = null;
     if (isZeroUsage(partOwnDetails.usageRows)) {
-      const isUsstgLine = currentLocation.split('/')[1] === 'USSTG';
+      const isUsstgLine = currentLocation.split('/')[1]?.toUpperCase() === 'USSTG';
       if (isUsstgLine) {
         doNotShipReason = ZERO_USAGE_DO_NOT_SHIP_REASON;
         log.info(
