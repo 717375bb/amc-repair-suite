@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type DragEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import { AlertTriangle, CheckCircle2, FileSpreadsheet, Loader2, PlayCircle, StopCircle, UploadCloud, X } from 'lucide-react'
 import { Card, CardHeader, PrimaryButton, SecondaryButton } from '../components/ui'
 import { ConfirmDialog } from '../components/ConfirmDialog'
@@ -11,6 +11,7 @@ import {
   getScrapRun,
   startInHouseScrap,
   startVendorScrap,
+  previewSerialList,
   type ScrapRunStatusResponse,
 } from '../lib/scrapApi'
 
@@ -96,7 +97,11 @@ export default function ScrapOut() {
     setCertificate(files[0])
   }
 
-  const canRun = kind === 'vendor' ? !!certificate : serialNumber.trim().length > 0
+  // Parsed for preview only — the SERVER's own parse is authoritative.
+  const parsedSerials = useMemo(() => previewSerialList(serialNumber), [serialNumber])
+  const succeeded = (run?.results ?? []).filter((r) => r.status === 'success').length
+  const anyFailed = (run?.results ?? []).some((r) => r.status === 'failed')
+  const canRun = kind === 'vendor' ? !!certificate : parsedSerials.serials.length > 0
 
   const handleConfirmed = async () => {
     setShowConfirm(false)
@@ -106,7 +111,7 @@ export default function ScrapOut() {
       const { runId: newRunId } =
         kind === 'vendor'
           ? await startVendorScrap({ certificate: certificate!, env })
-          : await startInHouseScrap(serialNumber.trim(), env)
+          : await startInHouseScrap(serialNumber, env)
       setRunId(newRunId)
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
@@ -250,19 +255,42 @@ export default function ScrapOut() {
           />
           <div className="p-5">
             <label className="flex flex-col gap-1">
-              <span className="text-xs font-medium uppercase tracking-wide text-muted">Serial number</span>
-              <input
-                type="text"
+              <span className="text-xs font-medium uppercase tracking-wide text-muted">
+                Serial number(s)
+              </span>
+              <textarea
                 value={serialNumber}
                 disabled={isRunning}
+                rows={5}
                 onChange={(e) => setSerialNumber(e.target.value)}
-                placeholder="e.g. 233398"
-                className="w-64 rounded-md border border-border bg-bg px-3 py-2 text-sm text-text placeholder:text-muted focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
+                placeholder={'233398\nD5300-120\n...'}
+                className="w-full max-w-lg rounded-md border border-border bg-bg px-3 py-2 font-mono text-sm text-text placeholder:text-muted focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
               />
             </label>
+            <p className="mt-1.5 text-xs text-muted">
+              One per line, or separated by commas. Paste a whole list — they run one at a time, in order.
+            </p>
+
+            {parsedSerials.serials.length > 0 && (
+              <p className="mt-2 text-sm text-text">
+                <span className="font-semibold">{parsedSerials.serials.length}</span> serial
+                {parsedSerials.serials.length === 1 ? '' : 's'} will be scrapped
+                {parsedSerials.duplicatesRemoved > 0 && (
+                  <span className="text-muted">
+                    {' '}
+                    ({parsedSerials.duplicatesRemoved} duplicate
+                    {parsedSerials.duplicatesRemoved === 1 ? '' : 's'} ignored — scrapping the same serial twice would
+                    attempt to destroy something already gone)
+                  </span>
+                )}
+                .
+              </p>
+            )}
+
             <p className="mt-2 text-xs text-muted">
-              The repair shop is derived from the item&apos;s own current location (DAY routes to REPAIR2/SHOP2). If none
-              of the expected locations exist for that site, the run stops rather than guessing.
+              The repair shop is derived from each item&apos;s own current location (DAY routes to REPAIR2/SHOP2). If
+              none of the expected locations exist for a site, that serial stops rather than guessing — the rest of the
+              list still runs.
             </p>
           </div>
         </Card>
@@ -293,16 +321,32 @@ export default function ScrapOut() {
       </div>
 
       {run && (
-        <Card className={run.result?.status === 'failed' || run.status === 'failed' ? 'border-danger' : ''}>
+        <Card className={anyFailed || run.status === 'failed' ? 'border-danger' : ''}>
           <CardHeader
-            title={isRunning ? 'In progress' : run.result?.status === 'success' ? 'Scrapped' : 'Result'}
-            description={`${run.kind === 'vendor' ? 'Vendor scrap' : 'In-house scrap'} in ${run.env}`}
+            title={isRunning ? 'In progress' : succeeded > 0 && !anyFailed ? 'Scrapped' : 'Result'}
+            description={
+              `${run.kind === 'vendor' ? 'Vendor scrap' : 'In-house scrap'} in ${run.env}` +
+              (run.totalRequested > 1 ? ` — ${run.results.length} of ${run.totalRequested} processed` : '')
+            }
           />
           <div className="space-y-3 p-5">
             {isRunning && (
               <p className="flex items-center gap-2 text-sm text-text">
                 <Loader2 size={16} className="animate-spin text-accent" />
                 {phaseLabel(run.phase)}
+                {run.totalRequested > 1 && ` (${run.results.length} of ${run.totalRequested} done)`}
+              </p>
+            )}
+
+            {/* A batch summary, so a single failure among many can't be lost
+                by scrolling past it. */}
+            {run.totalRequested > 1 && run.results.length > 0 && (
+              <p className="text-sm text-text">
+                <span className="font-semibold text-success">{succeeded} scrapped</span>
+                {anyFailed && <span className="font-semibold text-danger">, {run.results.length - succeeded} failed</span>}
+                {!isRunning && run.results.length < run.totalRequested && (
+                  <span className="text-muted"> · {run.totalRequested - run.results.length} never attempted</span>
+                )}
               </p>
             )}
 
@@ -320,10 +364,20 @@ export default function ScrapOut() {
 
             {run.fatalError && <p className="text-sm text-danger">{run.fatalError}</p>}
 
-            {run.result && (
-              <>
+            {/* One block per serial. Each keeps its own steps and reason, so
+                a batch failure says exactly which part and why rather than
+                collapsing into a single verdict. */}
+            {run.results.map((result, idx) => (
+              <div
+                key={result.serialNumber ?? idx}
+                className={
+                  run.results.length > 1
+                    ? `rounded-md border p-3 ${result.status === 'success' ? 'border-border bg-bg' : 'border-danger bg-danger-soft/30'}`
+                    : ''
+                }
+              >
                 <p className="flex items-center gap-2 text-sm font-medium">
-                  {run.result.status === 'success' ? (
+                  {result.status === 'success' ? (
                     <>
                       <CheckCircle2 size={16} className="text-success" />
                       <span className="text-success">Scrapped and verified</span>
@@ -334,28 +388,31 @@ export default function ScrapOut() {
                       <span className="text-danger">Not scrapped</span>
                     </>
                   )}
+                  {result.serialNumber && (
+                    <span className="font-mono text-xs text-muted">{result.serialNumber}</span>
+                  )}
                 </p>
 
-                {run.result.errorMessage && <p className="text-sm text-text">{run.result.errorMessage}</p>}
+                {result.errorMessage && <p className="mt-1 text-sm text-text">{result.errorMessage}</p>}
 
-                {run.kind === 'vendor' && run.result.status === 'success' && !run.result.certAttached && (
-                  <p className="text-sm text-warning">
+                {run.kind === 'vendor' && result.status === 'success' && !result.certAttached && (
+                  <p className="mt-1 text-sm text-warning">
                     The part was scrapped, but the certificate file could not be attached — attach it by hand in MXI.
                   </p>
                 )}
-                {run.result.locationUsed && (
-                  <p className="text-sm text-muted">
-                    Location used: <span className="font-medium text-text">{run.result.locationUsed}</span>
+                {result.locationUsed && (
+                  <p className="mt-1 text-sm text-muted">
+                    Location used: <span className="font-medium text-text">{result.locationUsed}</span>
                   </p>
                 )}
 
-                {run.result.stepsTaken.length > 0 && (
-                  <div>
+                {result.stepsTaken.length > 0 && (
+                  <div className="mt-2">
                     <p className="mb-1 text-xs font-medium uppercase tracking-wide text-muted">
                       Steps actually performed
                     </p>
                     <ul className="space-y-0.5">
-                      {run.result.stepsTaken.map((s, i) => (
+                      {result.stepsTaken.map((s, i) => (
                         <li key={i} className="text-xs text-muted">
                           · {s}
                         </li>
@@ -363,8 +420,8 @@ export default function ScrapOut() {
                     </ul>
                   </div>
                 )}
-              </>
-            )}
+              </div>
+            ))}
           </div>
           {!isRunning && (
             <div className="flex justify-end border-t border-border px-5 py-4">
@@ -376,11 +433,15 @@ export default function ScrapOut() {
 
       {showConfirm && (
         <ConfirmDialog
-          title={`Scrap this part in ${env}?`}
+          title={
+            kind === 'vendor' || parsedSerials.serials.length === 1
+              ? `Scrap this part in ${env}?`
+              : `Scrap ${parsedSerials.serials.length} parts in ${env}?`
+          }
           message={
             kind === 'vendor'
               ? `The order number and serial will be read from "${certificate?.name}", and that part will be physically scrapped in ${env}. This cannot be undone. If the certificate doesn't read cleanly, nothing is scrapped.`
-              : `Serial ${serialNumber.trim()} will be scheduled and transferred for scrap in ${env}. This cannot be undone.`
+              : `${parsedSerials.serials.join(', ')} will be scheduled and transferred for scrap in ${env}, one at a time. This cannot be undone. If one fails, the rest still run — each reports its own result.`
           }
           confirmLabel={`Yes, scrap in ${env}`}
           cancelLabel="Never mind"

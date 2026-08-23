@@ -34,7 +34,7 @@ export interface ScrapJob {
   fatalError: string | null;
   phase: string | null;
   env: MxiEnv;
-  /** Populated once the certificate has been read, before the scrap begins. */
+  /** Populated once a certificate has been read, before that scrap begins. */
   certPreview: {
     orderNumber: string | null;
     serialNumber: string | null;
@@ -42,7 +42,17 @@ export interface ScrapJob {
     vendorName: string | null;
     confidence: string | null;
   } | null;
-  result: ScrapOutResult | null;
+  /**
+   * One entry per serial.
+   *
+   * A LIST even when only one serial was submitted: the in-house path
+   * accepts several at once, and a single-result field would silently show
+   * only the last one of a batch — hiding earlier failures behind a later
+   * success.
+   */
+  results: ScrapOutResult[];
+  /** How many serials were submitted, so progress can read "N of M" honestly. */
+  totalRequested: number;
   process: ChildProcess | null;
   cancelRequested: boolean;
 }
@@ -92,7 +102,7 @@ function handleEnvelope(job: ScrapJob, envelope: unknown): void {
       };
     }
   } else if (e.type === 'result') {
-    job.result = {
+    const result: ScrapOutResult = {
       status: e.status ?? 'failed',
       orderNumber: e.orderNumber ?? null,
       serialNumber: e.serialNumber ?? null,
@@ -103,6 +113,13 @@ function handleEnvelope(job: ScrapJob, envelope: unknown): void {
       locationUsed: e.locationUsed ?? null,
       errorMessage: e.errorMessage ?? null,
     };
+    // Keyed by serial so a re-emitted result replaces rather than
+    // duplicates. Falls back to appending when there's no serial to key on.
+    const idx = result.serialNumber
+      ? job.results.findIndex((r) => r.serialNumber === result.serialNumber)
+      : -1;
+    if (idx >= 0) job.results[idx] = result;
+    else job.results.push(result);
   } else if (e.type === 'fatal') {
     job.fatalError = e.message ?? 'Unknown fatal error';
   }
@@ -121,8 +138,8 @@ export interface StartScrapOptions {
   /** Vendor path: multer's temp path for the uploaded certificate. */
   certTempPath?: string;
   certFileName?: string;
-  /** In-house path: the serial to scrap. */
-  serialNumber?: string;
+  /** In-house path: one or more serials to scrap, processed in order. */
+  serialNumbers?: string[];
   performedBy: string;
 }
 
@@ -139,14 +156,38 @@ function stageCertificate(runDir: string, tempPath: string, fileName: string): s
   return staged;
 }
 
+/**
+ * Normalises a pasted list of serials: splits on newlines, commas, tabs, or
+ * semicolons, trims, drops blanks, and removes duplicates.
+ *
+ * De-duplication matters here specifically. Scrapping is irreversible and
+ * not idempotent, so the same serial appearing twice in a paste must not
+ * become two attempts — the second would try to scrap something already
+ * gone.
+ */
+export function parseSerialList(raw: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const piece of raw.split(/[\n\r,;\t]+/)) {
+    const serial = piece.trim();
+    if (!serial) continue;
+    const key = serial.toUpperCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(serial);
+  }
+  return out;
+}
+
 export function startScrapOutJob(options: StartScrapOptions, mxiCredential: MxiCredential): StartScrapResult {
   if (activeRunId) return { ok: false, conflictRunId: activeRunId };
 
   if (options.kind === 'vendor' && !options.certTempPath) {
     return { ok: false, error: 'A scrap certificate is required for a vendor scrap.' };
   }
-  if (options.kind === 'in_house' && !options.serialNumber?.trim()) {
-    return { ok: false, error: 'A serial number is required for an in-house scrap.' };
+  const serials = options.serialNumbers ?? [];
+  if (options.kind === 'in_house' && serials.length === 0) {
+    return { ok: false, error: 'At least one serial number is required for an in-house scrap.' };
   }
 
   const runId = nextRunId();
@@ -162,7 +203,8 @@ export function startScrapOutJob(options: StartScrapOptions, mxiCredential: MxiC
     phase: null,
     env: options.env,
     certPreview: null,
-    result: null,
+    results: [],
+    totalRequested: options.kind === 'vendor' ? 1 : serials.length,
     process: null,
     cancelRequested: false,
   };
@@ -175,7 +217,9 @@ export function startScrapOutJob(options: StartScrapOptions, mxiCredential: MxiC
     const staged = stageCertificate(runDir, options.certTempPath!, fileName);
     args.push('--cert-path', staged, '--cert-file-name', fileName);
   } else {
-    args.push('--serial', options.serialNumber!.trim());
+    // JSON rather than a delimited string: serials are free-form vendor
+    // text and could contain almost any separator character.
+    args.push('--serials', JSON.stringify(serials));
   }
 
   job.process = spawnRunner(

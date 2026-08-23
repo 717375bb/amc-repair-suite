@@ -60,9 +60,8 @@ export const navGroups: NavGroup[] = [
         key: 'scrapped-parts',
         path: '/scrapped-parts',
         label: 'Scrapped Parts',
-        description: 'Process and document parts scrapped from service',
+        description: 'Scrap at vendor from a certificate, or in-house by serial',
         icon: PackageX,
-        status: 'soon',
       },
       {
         key: 'order-write-ups',

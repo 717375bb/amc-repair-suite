@@ -37,7 +37,10 @@ export interface ScrapRunStatusResponse {
   phase: string | null
   env: MxiEnv
   certPreview: ScrapCertPreview | null
-  result: ScrapOutResult | null
+  /** One entry per serial — the in-house path accepts several at once. */
+  results: ScrapOutResult[]
+  /** How many serials were submitted, so progress reads "N of M" honestly. */
+  totalRequested: number
 }
 
 async function jsonRequest<T>(path: string, init?: RequestInit): Promise<T> {
@@ -87,13 +90,43 @@ export async function startVendorScrap(options: StartVendorScrapOptions): Promis
   return handle(response, '/api/scrap/start')
 }
 
-export async function startInHouseScrap(serialNumber: string, env: MxiEnv): Promise<{ runId: string; env: MxiEnv }> {
+/**
+ * `serialNumbers` is sent as raw pasted text — the server splits on
+ * newlines, commas, tabs, or semicolons and de-duplicates. Parsing there
+ * rather than here keeps one authority over what counts as a serial, and
+ * de-duplication is a safety property: scrapping is irreversible, so the
+ * same serial twice in one paste must not become two attempts.
+ */
+export async function startInHouseScrap(serialNumbers: string, env: MxiEnv): Promise<{ runId: string; env: MxiEnv }> {
   const form = new FormData()
   form.append('kind', 'in_house')
   form.append('env', env)
-  form.append('serialNumber', serialNumber)
+  form.append('serialNumbers', serialNumbers)
   const response = await fetch('/api/scrap/start', { method: 'POST', body: form, credentials: 'same-origin' })
   return handle(response, '/api/scrap/start')
+}
+
+/**
+ * Mirrors the server's parseSerialList so the UI can preview the count and
+ * warn about duplicates before anything irreversible starts. The SERVER's
+ * copy is authoritative — this one only informs.
+ */
+export function previewSerialList(raw: string): { serials: string[]; duplicatesRemoved: number } {
+  const seen = new Set<string>()
+  const serials: string[] = []
+  let duplicatesRemoved = 0
+  for (const piece of raw.split(/[\n\r,;\t]+/)) {
+    const serial = piece.trim()
+    if (!serial) continue
+    const key = serial.toUpperCase()
+    if (seen.has(key)) {
+      duplicatesRemoved++
+      continue
+    }
+    seen.add(key)
+    serials.push(serial)
+  }
+  return { serials, duplicatesRemoved }
 }
 
 export function getActiveScrapJob(): Promise<{ activeRunId: string | null }> {

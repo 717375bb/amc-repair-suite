@@ -4,6 +4,15 @@ All notable changes to this project, newest session first. Item numbers refer to
 
 ## 2026-08-23
 
+### Added (end of day) — multiple serials per in-house scrap; "soon" badge removed
+- **The Scrapped Parts tab is no longer marked "soon"** — the badge and its stale description were still there because an earlier `perl` substitution silently failed to match. Now labelled for what it does.
+- **In-house scrap accepts a pasted list of serials**, run one at a time in order. Newline, comma, tab, or semicolon separated, so a column pasted straight out of Excel works.
+  - **De-duplicated server-side**, not just in the UI. This is a safety property rather than tidiness: scrapping is irreversible and not idempotent, so the same serial appearing twice in a paste must never become two attempts — the second would try to destroy something already gone. The UI previews the count and says how many duplicates were ignored, but the server's own parse is authoritative.
+  - **One serial's failure doesn't stop the rest.** Each is attempted independently, records its own `scrap_outs` row, and reports its own result with its own steps and reason — a batch failure names the part and the cause rather than collapsing into one verdict.
+  - `serialAlreadyScrapped()` is re-checked **per serial inside the loop**, not once up front, since an earlier entry in the same batch can change that answer.
+  - Cancellation is honoured **between serials, never mid-part** — stopping halfway through one part's sequence would leave it partially processed, which is worse than finishing it.
+  - The job model holds a results LIST with a `totalRequested` count, so progress reads "N of M" honestly and a single failure among many can't be hidden behind a later success. The runner still accepts a single `--serial` so the one-off CLI invocation used for the first live test keeps working.
+
 ### Added (end of day) — per-action reply wording
 - **Four reply templates instead of one**, selected by the MXI action the row ACTUALLY took, so an email can never describe something different from what was written. A repair-worded reply on an order that got converted to an exchange would be worse than no reply at all. Wording supplied verbatim by the user (2026-08-23):
   - `repair` — "...is approved for ."

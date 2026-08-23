@@ -16,7 +16,7 @@ import { cancelJob, getActiveJob, getJob, getVendorList, startDiscoveryJob, star
 import { isKnownVendorId, listCraGroupsForKnownVendors } from './api/vendors.js';
 import { applyQuoteDisposition, cancelQuoteJob, getActiveQuoteJob, getQuoteJob, startQuoteIngestJob, startQuoteWriteJob } from './api/quoteWriter/quoteJobManager.js';
 import { isHumanSettableDisposition } from './quoteWriter/quoteDisposition.js';
-import { cancelScrapJob, getActiveScrapJob, getScrapJob, startScrapOutJob } from './api/scrapWriter/scrapJobManager.js';
+import { cancelScrapJob, getActiveScrapJob, getScrapJob, parseSerialList, startScrapOutJob } from './api/scrapWriter/scrapJobManager.js';
 import { cancelEsdJob, getActiveEsdJob, getEsdJob, startEsdCompareJob, startEsdWriteJob } from './api/esdFinder/esdFinderJobManager.js';
 import { MissingHeadersError, peekEsdFinderFile, validateHeadersOnly } from './api/esdFinder/ingestion.js';
 import {
@@ -803,8 +803,13 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
       res.status(400).json({ error: 'A scrap certificate PDF is required for a vendor scrap.' });
       return;
     }
-    if (kind === 'in_house' && !String(req.body?.serialNumber ?? '').trim()) {
-      res.status(400).json({ error: 'A serial number is required for an in-house scrap.' });
+    // Accepts a pasted list — newline, comma, tab, or semicolon separated.
+    // Parsed and de-duplicated server-side rather than trusting the client:
+    // scrapping is irreversible, so the same serial twice in one paste must
+    // not become two attempts.
+    const serialNumbers = kind === 'in_house' ? parseSerialList(String(req.body?.serialNumbers ?? req.body?.serialNumber ?? '')) : [];
+    if (kind === 'in_house' && serialNumbers.length === 0) {
+      res.status(400).json({ error: 'At least one serial number is required for an in-house scrap.' });
       return;
     }
 
@@ -816,7 +821,7 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
         env,
         certTempPath: req.file?.path,
         certFileName: req.file?.originalname,
-        serialNumber: req.body?.serialNumber,
+        serialNumbers,
         performedBy: session.username,
       },
       mxiCredential,
@@ -854,7 +859,8 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
       phase: job.phase,
       env: job.env,
       certPreview: job.certPreview,
-      result: job.result,
+      results: job.results,
+      totalRequested: job.totalRequested,
     });
   });
 
