@@ -29,6 +29,7 @@
     "quote:ingest": "tsx src/cli/quoteIngestCli.ts",
     "quote:write": "tsx src/cli/quoteWriteCli.ts",
     "dock:audit": "tsx src/cli/dockAuditCli.ts",
+    "scrap:price": "tsx src/cli/scrapPriceCli.ts",
     "rotate-encryption-key": "tsx src/security/rotateEncryptionKey.ts",
     "verify-gitignore": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-gitignore.ps1",
     "build": "tsc -b",
