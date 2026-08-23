@@ -29,6 +29,21 @@ export const SCRAP_PRICE_TYPE = 'SCRAP';
 /** Description typed into the new miscellaneous line, per the recording. */
 export const SCRAP_LINE_DESCRIPTION = 'scrap';
 
+/**
+ * Scrap fee used for a BER row.
+ *
+ * BER is a PSA-side commercial judgement made on an ORDINARY repair quote,
+ * so that quote's extracted amount is its repair cost — writing it as a
+ * scrap charge would put a large wrong number on a real order (on real
+ * data, $29,529.96 on one row). NREP is different: those quotes literally
+ * state a scrap fee, so their extracted price is already correct.
+ *
+ * Set to 196.00 by explicit user direction (2026-08-23), described as a
+ * default to adjust later — so it lives here as one named constant rather
+ * than being scattered, and changing it is a one-line edit.
+ */
+export const BER_DEFAULT_SCRAP_FEE = '196.00';
+
 async function pace(page: Page): Promise<void> {
   await page.waitForTimeout(CLICK_DELAY_MS);
 }

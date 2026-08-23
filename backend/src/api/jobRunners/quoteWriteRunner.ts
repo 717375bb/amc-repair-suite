@@ -10,7 +10,7 @@ import { createReadyMxiClient } from '../../mxiWriter/cliMxiClient.js';
 import { toMxiDateFormat } from '../../mxiWriter/esdFormatting.js';
 import { writePriceLineUpdate, type PriceLineUpdateResult } from '../../mxiWriter/writePriceLineUpdate.js';
 import { convertRepairToExchange } from '../../mxiWriter/convertToExchange.js';
-import { writeScrapPriceLines } from '../../mxiWriter/writeScrapPriceLines.js';
+import { writeScrapPriceLines, BER_DEFAULT_SCRAP_FEE } from '../../mxiWriter/writeScrapPriceLines.js';
 import { markOutlookMailRead } from '../../quoteWriter/outlookMarkRead.js';
 import { createOutlookReply, resolveReplyMode } from '../../quoteWriter/outlookReply.js';
 import {
@@ -58,11 +58,6 @@ const log = createLogger('quote');
 interface Envelope {
   type: 'phase' | 'summary' | 'order-result' | 'fatal' | 'done';
   [key: string]: unknown;
-}
-
-/** Formats a row's extracted price for a message, before priceString exists. */
-function priceStringFor(row: { unit_price: number | null }): string {
-  return row.unit_price === null ? '(none)' : row.unit_price.toFixed(2);
 }
 
 function emit(envelope: Envelope): void {
@@ -172,20 +167,6 @@ async function main(): Promise<void> {
         continue;
       }
 
-      // BER is a PSA-side commercial judgement made on an ordinary repair
-      // quote, so the extracted price is the REPAIR cost, not a scrap fee.
-      // Writing it as a scrap charge would put a large wrong number on a
-      // real order. NREP is different: those quotes literally state a scrap
-      // fee (the real P000BDTA quote reads "Scrap Fee $175.00"), so the
-      // extracted price IS the right figure there.
-      if (writeAction === 'scrap_price' && disposition === 'excluded_ber') {
-        skip(
-          `Marked BER, which needs scrap pricing — but the extracted price (${priceStringFor(row)}) is this quote's ` +
-            `REPAIR cost, not a scrap fee. Writing it would charge the wrong amount. Supply the real scrap fee ` +
-            `before this row can be written.`,
-        );
-        continue;
-      }
       if (row.document_kind !== 'quote') {
         skip(`Not a quote (${row.document_kind}).`);
         continue;
@@ -227,8 +208,15 @@ async function main(): Promise<void> {
       if (writeAction === 'scrap_price') {
         // NREP / BER — the part is being scrapped, so the money moves onto
         // a SCRAP line rather than being written as a repair price.
-        log.info({ orderNumber, env, scrapFee: priceString, disposition }, 'routing to scrap pricing');
-        const scrap = await writeScrapPriceLines(client, row.order_number!, priceString, password ?? '');
+        //
+        // The FEE differs by route, and this distinction matters: an NREP
+        // quote literally states a scrap fee, so its extracted price is
+        // already the right number. A BER row's extracted price is that
+        // quote's REPAIR cost, which would be a large wrong charge — so it
+        // uses the configured default instead.
+        const scrapFee = disposition === 'excluded_ber' ? BER_DEFAULT_SCRAP_FEE : priceString;
+        log.info({ orderNumber, env, scrapFee, disposition }, 'routing to scrap pricing');
+        const scrap = await writeScrapPriceLines(client, row.order_number!, scrapFee, password ?? '');
         result = {
           status: scrap.status,
           outcome: scrap.status === 'success' ? 'written' : 'failed',

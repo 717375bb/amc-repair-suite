@@ -360,10 +360,13 @@ export default function VendorQuotes() {
       // runner blocks them because the extracted price is that quote's
       // REPAIR cost, not a scrap fee, so there is no correct number to
       // write yet. Counting them would promise a write that can't happen.
+      // Action-aware, not just 'pending'. NREP and BER both route to scrap
+      // pricing and are genuinely writable; only an analyst-excluded row is
+      // not. BER uses a configured default fee rather than the quote's own
+      // repair cost -- see BER_DEFAULT_SCRAP_FEE in the backend.
       willWrite: q.filter((r) => {
         const disp = pendingDisposition[r.extractionId] ?? r.disposition
         if (resolveWriteAction(disp, r.suggestsExchange) === 'none') return false
-        if (disp === 'excluded_ber') return false
         return writeResultByExtraction.get(r.extractionId)?.status !== 'success'
       }),
       berCount: q.filter((r) => (pendingDisposition[r.extractionId] ?? r.disposition) === 'excluded_ber').length,
@@ -567,9 +570,11 @@ export default function VendorQuotes() {
 
           {berCount > 0 && (
             <div className="rounded-md border border-l-4 border-warning border-l-warning bg-warning-soft px-4 py-3 text-sm text-text">
-              <span className="font-semibold">{berCount} quote(s) marked BER need a scrap fee before they can be written.</span>{' '}
-              A BER call is made on an ordinary repair quote, so the extracted amount is that quote&apos;s repair cost — not a
-              scrap fee. Writing it would charge the wrong amount, so those rows are held back.
+              <span className="font-semibold">
+                {berCount} quote(s) marked BER will use the default {money(196, 'USD')} scrap fee.
+              </span>{' '}
+              A BER call is made on an ordinary repair quote, so that quote&apos;s own amount is its repair cost, not a scrap
+              fee — the default is used instead. Adjust it in MXI afterward if a different figure applies.
             </div>
           )}
 
