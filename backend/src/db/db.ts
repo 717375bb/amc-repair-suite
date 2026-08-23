@@ -180,6 +180,25 @@ CREATE TABLE IF NOT EXISTS quote_dispositions (
   created_at TEXT NOT NULL
 );
 
+-- Scrap-out runs (docs: the scrap tab). One row per attempt, append-only.
+CREATE TABLE IF NOT EXISTS scrap_outs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,              -- 'vendor' or 'in_house'
+  order_number TEXT,               -- vendor path only (from the certificate)
+  serial_number TEXT NOT NULL,
+  part_number TEXT,
+  vendor_name TEXT,
+  cert_file_name TEXT,             -- vendor path only
+  target_env TEXT NOT NULL,
+  status TEXT NOT NULL,
+  steps_taken TEXT,                -- JSON array; which intermittent steps actually fired
+  cert_attached INTEGER NOT NULL DEFAULT 0,
+  location_used TEXT,              -- in-house path only
+  error_message TEXT,
+  performed_by TEXT,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS quote_writes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   quote_extraction_id INTEGER NOT NULL REFERENCES quote_extractions(id),
@@ -1101,5 +1120,63 @@ export function quoteExtractionAlreadyWritten(db: Database.Database, quoteExtrac
   const row = db
     .prepare(`SELECT 1 FROM quote_writes WHERE quote_extraction_id = ? AND write_status = 'success' LIMIT 1`)
     .get(quoteExtractionId);
+  return !!row;
+}
+
+// ---------------------------------------------------------------------------
+// Scrap-out (the scrap tab) — vendor and in-house paths
+// ---------------------------------------------------------------------------
+
+export interface ScrapOutInsert {
+  kind: 'vendor' | 'in_house';
+  orderNumber: string | null;
+  serialNumber: string;
+  partNumber: string | null;
+  vendorName: string | null;
+  certFileName: string | null;
+  targetEnv: string;
+  status: 'success' | 'failed';
+  stepsTaken: string[];
+  certAttached: boolean;
+  locationUsed: string | null;
+  errorMessage: string | null;
+  performedBy: string | null;
+}
+
+/** Always an INSERT — scrap_outs is append-only, like every other audit table here. */
+export function insertScrapOut(db: Database.Database, params: ScrapOutInsert): number {
+  const stmt = db.prepare(`
+    INSERT INTO scrap_outs (
+      kind, order_number, serial_number, part_number, vendor_name, cert_file_name,
+      target_env, status, steps_taken, cert_attached, location_used, error_message,
+      performed_by, created_at
+    ) VALUES (
+      @kind, @orderNumber, @serialNumber, @partNumber, @vendorName, @certFileName,
+      @targetEnv, @status, @stepsTaken, @certAttached, @locationUsed, @errorMessage,
+      @performedBy, @createdAt
+    )
+  `);
+  const result = stmt.run({
+    ...params,
+    stepsTaken: JSON.stringify(params.stepsTaken),
+    certAttached: params.certAttached ? 1 : 0,
+    createdAt: new Date().toISOString(),
+  });
+  return Number(result.lastInsertRowid);
+}
+
+/**
+ * True if this serial already has a successful scrap-out recorded.
+ *
+ * Scrapping is irreversible and NOT idempotent — running it twice on the
+ * same part would attempt a second destruction of something already gone.
+ * Same structural guard as quoteExtractionAlreadyWritten().
+ */
+export function serialAlreadyScrapped(db: Database.Database, serialNumber: string, targetEnv: string): boolean {
+  const row = db
+    .prepare(
+      `SELECT 1 FROM scrap_outs WHERE serial_number = ? AND target_env = ? AND status = 'success' LIMIT 1`,
+    )
+    .get(serialNumber.trim().toUpperCase(), targetEnv);
   return !!row;
 }

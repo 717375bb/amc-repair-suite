@@ -9,7 +9,7 @@ import VendorQuotes from './pages/VendorQuotes'
 import OpenOrderTracking from './pages/OpenOrderTracking'
 import Discrepancies from './pages/Discrepancies'
 import BackshopRepairs from './pages/BackshopRepairs'
-import ScrappedParts from './pages/ScrappedParts'
+import ScrapOut from './pages/ScrapOut'
 import OrderWriteUps from './pages/OrderWriteUps'
 import EsdFinder from './pages/EsdFinder'
 import InvoicePriceWriter from './pages/InvoicePriceWriter'
@@ -32,7 +32,7 @@ function App() {
           <Route path="/repair-orders" element={<RepairOrders />} />
           <Route path="/open-orders" element={<OpenOrderTracking />} />
           <Route path="/backshop-repairs" element={<BackshopRepairs />} />
-          <Route path="/scrapped-parts" element={<ScrappedParts />} />
+          <Route path="/scrapped-parts" element={<ScrapOut />} />
           <Route path="/order-write-ups" element={<OrderWriteUps />} />
           <Route path="/esd-finder" element={<EsdFinder />} />
           <Route path="/invoice-price-writer" element={<InvoicePriceWriter />} />

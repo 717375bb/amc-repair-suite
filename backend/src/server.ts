@@ -16,6 +16,7 @@ import { cancelJob, getActiveJob, getJob, getVendorList, startDiscoveryJob, star
 import { isKnownVendorId, listCraGroupsForKnownVendors } from './api/vendors.js';
 import { applyQuoteDisposition, cancelQuoteJob, getActiveQuoteJob, getQuoteJob, startQuoteIngestJob, startQuoteWriteJob } from './api/quoteWriter/quoteJobManager.js';
 import { isHumanSettableDisposition } from './quoteWriter/quoteDisposition.js';
+import { cancelScrapJob, getActiveScrapJob, getScrapJob, startScrapOutJob } from './api/scrapWriter/scrapJobManager.js';
 import { cancelEsdJob, getActiveEsdJob, getEsdJob, startEsdCompareJob, startEsdWriteJob } from './api/esdFinder/esdFinderJobManager.js';
 import { MissingHeadersError, peekEsdFinderFile, validateHeadersOnly } from './api/esdFinder/ingestion.js';
 import {
@@ -772,6 +773,93 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
 
   app.post('/api/quotes/runs/:runId/cancel', requireSession, (req, res) => {
     const ok = cancelQuoteJob(req.params.runId);
+    if (!ok) {
+      res.status(400).json({ error: `Run "${req.params.runId}" is not cancellable (not found or already finished).` });
+      return;
+    }
+    res.json({ ok: true });
+  });
+
+  // -------------------------------------------------------------------
+  // Scrap-out tab — physically scraps a part in MXI.
+  //
+  // The most destructive action in this project: irreversible and NOT
+  // idempotent. `env` is required and never defaulted, and the runner
+  // re-validates everything (certificate authenticity, already-scrapped)
+  // against real data rather than trusting this request.
+  // -------------------------------------------------------------------
+  const scrapUpload = multer({ dest: path.join('data', 'scrap-uploads-tmp') });
+
+  app.post('/api/scrap/start', requireSession, scrapUpload.single('certificate'), (req, res) => {
+    const env = parseRequiredEnv(req, res);
+    if (!env) return;
+
+    const kind = req.body?.kind;
+    if (kind !== 'vendor' && kind !== 'in_house') {
+      res.status(400).json({ error: 'kind must be exactly "vendor" or "in_house".' });
+      return;
+    }
+    if (kind === 'vendor' && !req.file) {
+      res.status(400).json({ error: 'A scrap certificate PDF is required for a vendor scrap.' });
+      return;
+    }
+    if (kind === 'in_house' && !String(req.body?.serialNumber ?? '').trim()) {
+      res.status(400).json({ error: 'A serial number is required for an in-house scrap.' });
+      return;
+    }
+
+    const session = (req as AuthedRequest).session!;
+    const mxiCredential = getMxiCredentialForUser(authDb, session.userId);
+    const result = startScrapOutJob(
+      {
+        kind,
+        env,
+        certTempPath: req.file?.path,
+        certFileName: req.file?.originalname,
+        serialNumber: req.body?.serialNumber,
+        performedBy: session.username,
+      },
+      mxiCredential,
+    );
+
+    if (!result.ok) {
+      if (result.conflictRunId) {
+        res.status(409).json({ error: 'A scrap job is already running.', activeRunId: result.conflictRunId });
+      } else {
+        res.status(400).json({ error: result.error });
+      }
+      return;
+    }
+    res.status(202).json({ runId: result.runId, env });
+  });
+
+  app.get('/api/scrap/active-job', requireSession, (_req, res) => {
+    const job = getActiveScrapJob();
+    res.json({ activeRunId: job?.runId ?? null });
+  });
+
+  app.get('/api/scrap/runs/:runId', requireSession, (req, res) => {
+    const job = getScrapJob(req.params.runId);
+    if (!job) {
+      res.status(404).json({ error: `No scrap run found for runId "${req.params.runId}".` });
+      return;
+    }
+    res.json({
+      runId: job.runId,
+      kind: job.kind,
+      status: job.status,
+      startedAt: job.startedAt,
+      completedAt: job.completedAt,
+      fatalError: job.fatalError,
+      phase: job.phase,
+      env: job.env,
+      certPreview: job.certPreview,
+      result: job.result,
+    });
+  });
+
+  app.post('/api/scrap/runs/:runId/cancel', requireSession, (req, res) => {
+    const ok = cancelScrapJob(req.params.runId);
     if (!ok) {
       res.status(400).json({ error: `Run "${req.params.runId}" is not cancellable (not found or already finished).` });
       return;
