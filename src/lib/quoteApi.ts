@@ -31,6 +31,9 @@ export interface QuoteExtractionRow {
   /** Vendor-stated non-repairable (NREP) — read off their document, not a human decision. */
   vendorSaysNonRepairable: boolean
   nonRepairableEvidence: string | null
+  /** Vendor offered a replacement unit — converted to an exchange rather than priced. */
+  suggestsExchange: boolean
+  exchangeEvidence: string | null
   disposition: QuoteDisposition
   confidence: 'high' | 'medium' | 'low'
   reasoningNote: string

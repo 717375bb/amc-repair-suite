@@ -158,6 +158,10 @@ async function main(): Promise<void> {
         vendorSaysNonRepairable: extraction.vendorSaysNonRepairable,
         nonRepairableEvidence: extraction.nonRepairableEvidence,
         senderFirstName: extraction.senderFirstName,
+
+        suggestsExchange: extraction.suggestsExchange,
+
+        exchangeEvidence: extraction.exchangeEvidence,
         initialDisposition: disposition,
         confidence: extraction.confidence,
         reasoningNote: extraction.reasoningNote,
@@ -189,6 +193,8 @@ async function main(): Promise<void> {
           reviewReasons,
           vendorSaysNonRepairable: extraction.vendorSaysNonRepairable,
           nonRepairableEvidence: extraction.nonRepairableEvidence,
+          suggestsExchange: extraction.suggestsExchange,
+          exchangeEvidence: extraction.exchangeEvidence,
           disposition,
           confidence: extraction.confidence,
           reasoningNote: extraction.reasoningNote,

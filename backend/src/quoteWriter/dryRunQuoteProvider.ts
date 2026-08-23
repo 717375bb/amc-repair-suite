@@ -41,6 +41,8 @@ export class DryRunQuoteProvider implements QuoteExtractionProvider {
       // No PDF was read, so no vendor claim was seen. Never assert one.
       vendorSaysNonRepairable: false,
       nonRepairableEvidence: null,
+      suggestsExchange: false,
+      exchangeEvidence: null,
       senderFirstName: null,
       confidence: 'low',
       reasoningNote: 'Dry run — no PDF was read and no API call was made.',

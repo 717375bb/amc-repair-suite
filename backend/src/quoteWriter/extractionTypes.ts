@@ -97,6 +97,21 @@ export interface QuoteExtractionResult {
    */
   senderFirstName: string | null;
 
+  /**
+   * True when the vendor is proposing an EXCHANGE (supplying a replacement
+   * unit) rather than repairing the part we sent them.
+   *
+   * Per explicit user direction (2026-08-23): the wording varies, but
+   * generally contains "exchange" or "replacement part". This changes the
+   * entire MXI action — an exchange quote is handled via "Convert Repair To
+   * Exchange" rather than a normal price/ESD line — so it is deliberately
+   * its own extracted fact rather than something inferred downstream from
+   * free text.
+   */
+  suggestsExchange: boolean;
+  /** The vendor's own wording supporting suggestsExchange, verbatim. Null when false. */
+  exchangeEvidence: string | null;
+
   confidence: 'high' | 'medium' | 'low';
   /** 1-2 sentence audit note. Never customer-facing. */
   reasoningNote: string;

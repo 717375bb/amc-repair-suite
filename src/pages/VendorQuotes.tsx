@@ -620,6 +620,19 @@ export default function VendorQuotes() {
                       </td>
                       <td className="px-5 py-3">
                         <Badge tone={confidenceTone(r.confidence)}>{r.confidence}</Badge>
+                        {/* An exchange takes a completely different MXI path
+                            (Convert Repair To Exchange, not a price line), so
+                            it must be obvious before anyone hits Write. */}
+                        {r.suggestsExchange && (
+                          <div className="mt-1">
+                            <Badge tone="warning">EXCHANGE</Badge>
+                            {r.exchangeEvidence && (
+                              <p className="mt-0.5 max-w-[14rem] text-xs italic text-muted" title={r.exchangeEvidence}>
+                                “{r.exchangeEvidence}”
+                              </p>
+                            )}
+                          </div>
+                        )}
                       </td>
                       <td className="px-5 py-3">
                         <Badge tone={badge.tone}>{badge.label}</Badge>

@@ -8,7 +8,8 @@ import {
 } from '../../db/db.js';
 import { createReadyMxiClient } from '../../mxiWriter/cliMxiClient.js';
 import { toMxiDateFormat } from '../../mxiWriter/esdFormatting.js';
-import { writePriceLineUpdate } from '../../mxiWriter/writePriceLineUpdate.js';
+import { writePriceLineUpdate, type PriceLineUpdateResult } from '../../mxiWriter/writePriceLineUpdate.js';
+import { convertRepairToExchange } from '../../mxiWriter/convertToExchange.js';
 import { markOutlookMailRead } from '../../quoteWriter/outlookMarkRead.js';
 import { createOutlookReply, resolveReplyMode } from '../../quoteWriter/outlookReply.js';
 import {
@@ -34,8 +35,10 @@ const log = createLogger('quote');
  * the source email read.
  *
  * Reuses writePriceLineUpdate() rather than reimplementing the write: it is
- * already live-proven, and carries the serial-number cross-check, the
- * integer-cents price comparison, and the always-re-verify discipline.
+ * already live-proven, and carries the integer-cents price comparison and
+ * the always-re-verify discipline. A quote whose vendor offered an
+ * EXCHANGE instead routes to convertRepairToExchange() — a different MXI
+ * action that carries its own price, so the two never both run.
  *
  * FOUR structural guards, none of which depend on the caller behaving:
  *   1. Disposition is re-read from the DB, never trusted from the request.
@@ -93,6 +96,7 @@ interface WritableRow {
   part_number: string | null;
   sender_name: string | null;
   sender_first_name: string | null;
+  suggests_exchange: number;
 }
 
 async function main(): Promise<void> {
@@ -103,7 +107,8 @@ async function main(): Promise<void> {
   const rows = db
     .prepare(
       `SELECT id, order_number, serial_number, unit_price, resolved_esd, source_entry_id, document_kind,
-              quote_number, vendor_name, currency, part_number, sender_name, sender_first_name
+              quote_number, vendor_name, currency, part_number, sender_name, sender_first_name,
+              suggests_exchange
        FROM quote_extractions
        WHERE run_id = ? AND id IN (${placeholders})`,
     )
@@ -170,26 +175,59 @@ async function main(): Promise<void> {
       const missing: string[] = [];
       if (!row.order_number) missing.push('order number');
       if (row.unit_price === null) missing.push('price');
-      if (!row.serial_number) missing.push('serial number');
-      if (!row.resolved_esd) missing.push('ESD');
+      // Serial number is deliberately NOT required. It used to gate the
+      // write because writePriceLineUpdate cross-checked it, but that check
+      // was removed (2026-08-23) — PSA's BN system means our serial
+      // routinely differs from the vendor's. Requiring it here would keep
+      // enforcing a rule that no longer exists.
+      if (!row.resolved_esd && !row.suggests_exchange) missing.push('ESD');
       if (missing.length > 0) {
         skip(`Missing ${missing.join(', ')} — refusing to write a partial update.`);
         continue;
       }
 
       const priceString = row.unit_price!.toFixed(2);
-      const esdMxi = toMxiDateFormat(row.resolved_esd!);
+      // Exchange rows may legitimately have no ESD (the conversion form
+      // carries no promised-by date), so this is only computed when one exists.
+      const esdMxi = row.resolved_esd ? toMxiDateFormat(row.resolved_esd) : '';
 
       log.info({ orderNumber, env, price: priceString, esd: esdMxi }, 'attempting quote write');
 
-      const result = await writePriceLineUpdate(
-        client,
-        row.order_number!,
-        row.serial_number!,
-        priceString,
-        password ?? '',
-        esdMxi,
-      );
+      // EXCHANGE branch (per explicit user direction, 2026-08-23). A vendor
+      // offering a replacement unit is a different MXI action entirely:
+      // Convert Repair To Exchange carries its OWN exchange price, so this
+      // deliberately runs INSTEAD OF the price-line write, never alongside
+      // it — doing both would push the same money twice through two
+      // different mechanisms.
+      let result: PriceLineUpdateResult;
+      if (row.suggests_exchange) {
+        log.info({ orderNumber, env, price: priceString }, 'quote suggests exchange — converting rather than pricing');
+        const exchange = await convertRepairToExchange(
+          client,
+          row.order_number!,
+          priceString,
+          password ?? '',
+        );
+        // Mapped onto the same result shape so everything downstream —
+        // audit row, envelope, UI, reply — stays identical for both paths.
+        result = {
+          status: exchange.status,
+          outcome: exchange.status === 'success' ? 'written' : 'failed',
+          originalPrice: null,
+          serialNumberMxi: null,
+          issueDetail: exchange.issueDetail,
+          errorMessage: exchange.errorMessage ?? exchange.skipReason,
+        };
+      } else {
+        result = await writePriceLineUpdate(
+          client,
+          row.order_number!,
+          row.serial_number ?? '',
+          priceString,
+          password ?? '',
+          esdMxi,
+        );
+      }
 
       // Guard 4: mail is only ever marked read, or replied to, after a
       // verified success. A failed write never emails a vendor.

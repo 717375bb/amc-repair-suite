@@ -42,6 +42,10 @@ Check the EMAIL BODY for this as well as the PDF. This is not hypothetical: a re
 
 Be strict about this. It must reflect what the VENDOR said, not your own judgement about whether the price seems too high to be worth repairing — that commercial call belongs to PSA, never to you and never to the vendor. A quote that is merely expensive is NOT non-repairable. If the vendor is quoting a price to perform a repair, that is a normal repairable quote, however costly. If the document is ambiguous, set it false and explain the ambiguity in reasoningNote.
 
+EXCHANGE: set suggestsExchange to true when the vendor is offering to supply a REPLACEMENT unit instead of repairing the one we sent. Wording varies — common cues are "exchange", "exchange unit", "exchange price", "replacement part", "replacement unit", "outright replacement", or an offer to ship a serviceable unit in place of ours. Quote the vendor's own supporting words verbatim in exchangeEvidence.
+
+Distinguish this from a normal repair quote carefully: a vendor REPAIRING our part and quoting for replacement PARTS/components consumed during that repair (seals, bearings, a replacement circuit board inside the unit) is NOT an exchange — that is an ordinary repair. An exchange means WE GET A DIFFERENT UNIT BACK. If the document is ambiguous, set it false and explain the ambiguity in reasoningNote; a wrongly-flagged exchange converts a real order to the wrong type.
+
 SENDER FIRST NAME: read the sign-off at the bottom of the EMAIL BODY (e.g. "Kind regards, Brennan Rowland" -> "Brennan") and return just the first name in senderFirstName. Use the name the person actually signed with, not the From header, and not a company name. If the body has no legible human sign-off, return null rather than guessing — this is used to greet a real vendor by name, so a wrong or invented name is worse than none.
 
 CONFIDENCE: "high" only when the document is clearly legible and the key fields are unambiguous. Use "low" for scans you are partly guessing at, and say what was unclear in reasoningNote.
@@ -91,6 +95,15 @@ const inputSchema = {
       type: ['string', 'null'],
       description: "The vendor's own supporting words, verbatim. Null when vendorSaysNonRepairable is false.",
     },
+    suggestsExchange: {
+      type: 'boolean',
+      description:
+        'True ONLY if the vendor offers a REPLACEMENT unit instead of repairing ours. Replacement parts consumed inside a normal repair are NOT an exchange.',
+    },
+    exchangeEvidence: {
+      type: ['string', 'null'],
+      description: "The vendor's own supporting wording, verbatim. Null when suggestsExchange is false.",
+    },
     senderFirstName: {
       type: ['string', 'null'],
       description:
@@ -99,7 +112,7 @@ const inputSchema = {
     confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
     reasoningNote: { type: 'string' },
   },
-  required: ['documentKind', 'vendorSaysNonRepairable', 'confidence', 'reasoningNote'],
+  required: ['documentKind', 'vendorSaysNonRepairable', 'suggestsExchange', 'confidence', 'reasoningNote'],
 };
 
 function failureResult(reason: string): QuoteExtractionResult {
@@ -121,6 +134,8 @@ function failureResult(reason: string): QuoteExtractionResult {
     // regardless, and must never silently assert a scrap-relevant claim.
     vendorSaysNonRepairable: false,
     nonRepairableEvidence: null,
+    suggestsExchange: false,
+    exchangeEvidence: null,
     senderFirstName: null,
     confidence: 'low',
     reasoningNote: reason,
@@ -222,6 +237,8 @@ export class AnthropicQuoteProvider implements QuoteExtractionProvider {
           // boolean true must not become a scrap signal by coercion.
           vendorSaysNonRepairable: raw.vendorSaysNonRepairable === true,
           nonRepairableEvidence: raw.nonRepairableEvidence ?? null,
+          suggestsExchange: raw.suggestsExchange === true,
+          exchangeEvidence: raw.exchangeEvidence ?? null,
           senderFirstName: raw.senderFirstName ?? null,
           confidence: raw.confidence ?? 'low',
           reasoningNote: raw.reasoningNote ?? '(no reasoning note returned)',

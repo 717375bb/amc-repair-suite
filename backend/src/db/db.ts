@@ -155,6 +155,10 @@ CREATE TABLE IF NOT EXISTS quote_extractions (
   non_repairable_evidence TEXT,
   -- First name from the email's sign-off, for the approval reply greeting.
   sender_first_name TEXT,
+  -- Vendor is offering a replacement unit rather than repairing ours.
+  -- Routes the write to Convert Repair To Exchange instead of a price line.
+  suggests_exchange INTEGER NOT NULL DEFAULT 0,
+  exchange_evidence TEXT,
   -- The disposition this row STARTED at (auto-derived from the NREP flag).
   -- The effective disposition is this, overridden by the latest
   -- quote_dispositions row if one exists.
@@ -224,6 +228,8 @@ export function openDb(dbPath: string): Database.Database {
   ensureColumn(db, 'quote_extractions', 'non_repairable_evidence', 'TEXT');
   ensureColumn(db, 'quote_extractions', 'initial_disposition', "TEXT NOT NULL DEFAULT 'pending'");
   ensureColumn(db, 'quote_extractions', 'sender_first_name', 'TEXT');
+  ensureColumn(db, 'quote_extractions', 'suggests_exchange', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'quote_extractions', 'exchange_evidence', 'TEXT');
   ensureColumn(db, 'quote_writes', 'reply_status', 'TEXT');
   ensureColumn(db, 'quote_writes', 'reply_error', 'TEXT');
   return db;
@@ -946,6 +952,8 @@ export interface QuoteExtractionInsert {
   vendorSaysNonRepairable: boolean;
   nonRepairableEvidence: string | null;
   senderFirstName: string | null;
+  suggestsExchange: boolean;
+  exchangeEvidence: string | null;
   initialDisposition: string;
   confidence: string | null;
   reasoningNote: string | null;
@@ -960,20 +968,23 @@ export function insertQuoteExtraction(db: Database.Database, params: QuoteExtrac
       quote_number, vendor_name, part_number, serial_number, unit_price, currency,
       quote_date, promised_ship_date, lead_time_days, resolved_esd, esd_basis,
       needs_review, vendor_says_non_repairable, non_repairable_evidence,
-      sender_first_name, initial_disposition, confidence, reasoning_note, created_at
+      sender_first_name, suggests_exchange, exchange_evidence,
+      initial_disposition, confidence, reasoning_note, created_at
     ) VALUES (
       @runId, @sourceEntryId, @subject, @senderName, @senderEmail, @receivedTime,
       @fileName, @savedPath, @documentKind, @orderNumber, @orderNumberSource,
       @quoteNumber, @vendorName, @partNumber, @serialNumber, @unitPrice, @currency,
       @quoteDate, @promisedShipDate, @leadTimeDays, @resolvedEsd, @esdBasis,
       @needsReview, @vendorSaysNonRepairable, @nonRepairableEvidence,
-      @senderFirstName, @initialDisposition, @confidence, @reasoningNote, @createdAt
+      @senderFirstName, @suggestsExchange, @exchangeEvidence,
+      @initialDisposition, @confidence, @reasoningNote, @createdAt
     )
   `);
   const result = stmt.run({
     ...params,
     needsReview: params.needsReview ? 1 : 0,
     vendorSaysNonRepairable: params.vendorSaysNonRepairable ? 1 : 0,
+    suggestsExchange: params.suggestsExchange ? 1 : 0,
     createdAt: new Date().toISOString(),
   });
   return Number(result.lastInsertRowid);
