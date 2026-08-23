@@ -15,7 +15,26 @@ import path from 'node:path';
 
 export const TEMPLATE_NOT_CONFIGURED_MARKER = 'CLAUDE_TEMPLATE_NOT_CONFIGURED';
 
-const DEFAULT_TEMPLATE_PATH = path.join('templates', 'quote-approval-reply.html');
+/**
+ * Which wording a reply uses. Driven by the MXI action the row actually
+ * took, so the email can never describe something different from what was
+ * written — a repair reply on an order that got converted to an exchange
+ * would be worse than no reply at all.
+ *
+ * `ber` is deliberately its own kind rather than a variant of `scrap`: per
+ * the user's wording it quotes no price and no order number, and instead
+ * ASKS the vendor for a scrap-fee quote.
+ */
+export type ReplyTemplateKind = 'repair' | 'exchange' | 'scrap_nrep' | 'ber';
+
+const TEMPLATE_PATHS: Record<ReplyTemplateKind, string> = {
+  repair: path.join('templates', 'quote-approval-reply.html'),
+  exchange: path.join('templates', 'quote-approval-reply-exchange.html'),
+  scrap_nrep: path.join('templates', 'quote-approval-reply-scrap-nrep.html'),
+  ber: path.join('templates', 'quote-approval-reply-ber.html'),
+};
+
+const DEFAULT_TEMPLATE_PATH = TEMPLATE_PATHS.repair;
 
 export class ReplyTemplateNotConfiguredError extends Error {}
 
@@ -169,4 +188,54 @@ export function renderApprovalReply(template: string, fields: QuoteReplyFields):
   return template.replace(/\{\{(\w+)\}\}/g, (match, key: string) =>
     key in values ? escapeHtml(values[key]) : match,
   );
+}
+
+/**
+ * Loads templates on demand and caches each one, remembering per-kind
+ * failures separately.
+ *
+ * Deliberately NOT a single up-front load of all four: a template that
+ * hasn't been given real wording yet should only block the rows that
+ * actually need it, rather than disabling replies for an entire run. A
+ * batch of ordinary repair quotes must not go replyless because the BER
+ * wording is still a placeholder.
+ */
+export class ReplyTemplateSet {
+  private cache = new Map<ReplyTemplateKind, string>();
+  private errors = new Map<ReplyTemplateKind, string>();
+
+  /** Returns the rendered-ready template, or null with the reason recorded. */
+  get(kind: ReplyTemplateKind): { template: string | null; error: string | null } {
+    const cached = this.cache.get(kind);
+    if (cached) return { template: cached, error: null };
+    const priorError = this.errors.get(kind);
+    if (priorError) return { template: null, error: priorError };
+
+    try {
+      const template = loadApprovalTemplate(TEMPLATE_PATHS[kind]);
+      this.cache.set(kind, template);
+      return { template, error: null };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.errors.set(kind, message);
+      return { template: null, error: message };
+    }
+  }
+}
+
+/**
+ * Maps what actually happened in MXI onto the wording to use.
+ *
+ * Takes the resolved write action plus the disposition, because
+ * `scrap_price` covers two genuinely different messages: a vendor-stated
+ * NREP (which quotes the approved scrap amount) and a CRA's BER call
+ * (which asks the vendor for a scrap-fee quote instead).
+ */
+export function replyTemplateKindFor(
+  writeAction: 'exchange' | 'scrap_price' | 'price_line' | 'none',
+  disposition: string,
+): ReplyTemplateKind {
+  if (writeAction === 'exchange') return 'exchange';
+  if (writeAction === 'scrap_price') return disposition === 'excluded_ber' ? 'ber' : 'scrap_nrep';
+  return 'repair';
 }

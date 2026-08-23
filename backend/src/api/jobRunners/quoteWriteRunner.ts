@@ -16,8 +16,9 @@ import { createOutlookReply, resolveReplyMode } from '../../quoteWriter/outlookR
 import {
   firstNameFromDisplayName,
   formatPriceForEmail,
-  loadApprovalTemplate,
   renderApprovalReply,
+  replyTemplateKindFor,
+  ReplyTemplateSet,
 } from '../../quoteWriter/quoteReplyTemplate.js';
 import { resolveWriteAction, type QuoteDisposition } from '../../quoteWriter/quoteDisposition.js';
 import type { MxiEnv } from '../../mxiWriter/config.js';
@@ -128,22 +129,19 @@ async function main(): Promise<void> {
   const client = await createReadyMxiClient(env);
   const password = env === 'production' ? process.env.MXI_PROD_PASSWORD : process.env.MXI_STAGE_PASSWORD;
 
-  // Load the approval template ONCE, before any write. If it hasn't been
-  // given real wording yet, every row records reply_status='skipped' with
-  // the reason — the MXI writes still happen (they're the point), but no
-  // placeholder text can ever reach a vendor. Deliberately not a fatal
-  // error: refusing to write real prices because an email template isn't
-  // filled in would be the wrong tradeoff.
+  // A template that hasn't been given real wording records
+  // reply_status='skipped' with the reason — the MXI write still happens
+  // (that's the point), but no placeholder text can ever reach a vendor.
+  // Deliberately not fatal: refusing to write real prices because an email
+  // template isn't filled in would be the wrong tradeoff.
+  //
+  // Loaded lazily per wording-kind and cached. A template that hasn't been
+  // given real wording yet blocks only the rows that need it, rather than
+  // disabling replies for the whole run — a batch of ordinary repair quotes
+  // shouldn't go replyless because the BER wording is still a placeholder.
   const replyMode = resolveReplyMode();
-  let approvalTemplate: string | null = null;
-  let templateError: string | null = null;
-  try {
-    approvalTemplate = loadApprovalTemplate();
-    log.info({ replyMode }, 'approval reply template loaded');
-  } catch (err) {
-    templateError = err instanceof Error ? err.message : String(err);
-    log.warn({ error: templateError }, 'approval replies disabled — template not configured');
-  }
+  const templates = new ReplyTemplateSet();
+  log.info({ replyMode }, 'approval replies configured');
 
   let written = 0;
   let skipped = 0;
@@ -204,6 +202,11 @@ async function main(): Promise<void> {
       // deliberately runs INSTEAD OF the price-line write, never alongside
       // it — doing both would push the same money twice through two
       // different mechanisms.
+      // The amount actually committed to MXI. Differs from the extracted
+      // price on a BER row, which uses the configured default rather than
+      // the quote's repair cost -- the reply must quote what was really
+      // written, not what the PDF said.
+      let writtenAmount = priceString;
       let result: PriceLineUpdateResult;
       if (writeAction === 'scrap_price') {
         // NREP / BER — the part is being scrapped, so the money moves onto
@@ -215,6 +218,7 @@ async function main(): Promise<void> {
         // quote's REPAIR cost, which would be a large wrong charge — so it
         // uses the configured default instead.
         const scrapFee = disposition === 'excluded_ber' ? BER_DEFAULT_SCRAP_FEE : priceString;
+        writtenAmount = scrapFee;
         log.info({ orderNumber, env, scrapFee, disposition }, 'routing to scrap pricing');
         const scrap = await writeScrapPriceLines(client, row.order_number!, scrapFee, password ?? '');
         result = {
@@ -266,6 +270,13 @@ async function main(): Promise<void> {
         markedRead = mark.ok;
         markReadError = mark.error;
 
+        // Wording follows the action that ACTUALLY ran, not the row's
+        // original shape — an order converted to an exchange must not get
+        // a repair-worded reply. BER gets its own wording (it asks the
+        // vendor for a scrap-fee quote rather than approving an amount).
+        const templateKind = replyTemplateKindFor(writeAction, disposition);
+        const { template: approvalTemplate, error: templateError } = templates.get(templateKind);
+
         if (approvalTemplate) {
           // Greeting name: the sign-off the AI read from the body, falling
           // back to parsing the From display name. If NEITHER yields a
@@ -285,7 +296,7 @@ async function main(): Promise<void> {
               quoteNumber: row.quote_number,
               partNumber: row.part_number,
               serialNumber: row.serial_number,
-              price: formatPriceForEmail(priceString),
+              price: formatPriceForEmail(writtenAmount),
               currency: row.currency,
               esd: esdMxi,
               vendorName: row.vendor_name,

@@ -1,0 +1,19 @@
+<!--
+  REPLY — BER (Beyond Economical Repair).
+
+  Sent when the CRA judged the part BER. Wording supplied verbatim by the
+  user (2026-08-23).
+
+  NOTE: unlike the other three, this one quotes NO price and NO order
+  number — it ASKS the vendor to send a scrap-fee quote. That is
+  deliberate and matches the wording given. MXI still gets the configured
+  default scrap fee written provisionally (BER_DEFAULT_SCRAP_FEE), to be
+  adjusted once the vendor's real figure arrives.
+
+  Available placeholders (unused by this wording, but substituted if added):
+  {{senderFirstName}} {{orderNumber}} {{price}} {{esd}} {{quoteNumber}}
+  {{partNumber}} {{serialNumber}} {{currency}} {{vendorName}}
+-->
+<p>Hello {{senderFirstName}}!</p>
+
+<p>Thank you for sending over this quote! This part is BER, the repair exceeds cost of new. Please send over a quote for the scrap fee.</p>

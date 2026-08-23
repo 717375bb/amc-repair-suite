@@ -4,6 +4,17 @@ All notable changes to this project, newest session first. Item numbers refer to
 
 ## 2026-08-23
 
+### Added (end of day) — per-action reply wording
+- **Four reply templates instead of one**, selected by the MXI action the row ACTUALLY took, so an email can never describe something different from what was written. A repair-worded reply on an order that got converted to an exchange would be worse than no reply at all. Wording supplied verbatim by the user (2026-08-23):
+  - `repair` — "...is approved for ."
+  - `exchange` — "...is approved as an exchange for ."
+  - `scrap_nrep` — "...is approved as a scrap as NREP ."
+  - `ber` — "This part is BER, the repair exceeds cost of new. Please send over a quote for the scrap fee."
+  - **BER is its own kind, not a scrap variant.** Its wording quotes no price and no order number — it ASKS the vendor for a scrap-fee quote. MXI still gets `BER_DEFAULT_SCRAP_FEE` written provisionally, to be adjusted once the vendor's real figure arrives, which matches the user's "default to 96.00 and I can adjust later".
+  - Templates load **lazily per kind and cache separately**, so wording that hasn't been filled in yet blocks only the rows needing it — a batch of ordinary repair quotes no longer goes replyless because the BER wording is still a placeholder. Each file keeps its own not-configured guard.
+  - The reply now quotes the amount **actually committed to MXI** rather than the extracted price. They differ on a BER row, where the configured default is written instead of the quote's repair cost.
+  - Verified all five routes render cleanly (including exchange-over-NREP), with a check that no placeholder or marker leaks into the text.
+
 ### Fixed (end of day) — exchange now overrides NREP
 - **A quote that is BOTH vendor-stated NREP and an exchange offer now converts to an exchange, not scrap.** User-reported after testing real exchange quotes: "exchange overrides NREP scraps. When NREP is found but so is exchange, it should only exchange."
   - `resolveWriteAction()` had scrap winning, on my stated reasoning that "a part being scrapped has no unit to exchange". That was backwards. NREP and exchange are both the vendor's own statements in the SAME document, and a vendor saying "your unit is not repairable, here is a replacement" is describing an exchange — the exchange IS how the non-repairable unit gets resolved. Scrapping instead would charge the wrong thing and discard the replacement.
