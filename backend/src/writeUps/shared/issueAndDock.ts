@@ -206,14 +206,56 @@ export async function moveOutboundShipmentToDock(client: MxiClient, orderNumber:
       return { status: 'already_docked_externally', shipmentId: dockState.shipmentId, errorMessage: null };
     }
 
-    await page.locator('input[name="aShipmentLine"]').check();
+    // REAL BUG FOUND AND FIXED (user-reported, 2026-08-23): "a significant
+    // number of orders are being written up and issued, but the move to
+    // dock is not actually occurring, even though the UI says it is."
+    //
+    // The cause was that this function returned status:'success' purely
+    // because nothing threw — it never re-read the dock state afterward.
+    // Every other MXI write in this project independently re-verifies its
+    // real outcome (writeEsdAndNotes, writePriceLineUpdate, the
+    // authorization step in vendorCodeWriteUp); this one was the gap, and
+    // "no exception" is exactly the signal that has already proven
+    // untrustworthy against MXI elsewhere.
+    const lineCheckboxes = page.locator('input[name="aShipmentLine"]');
+    const lineCount = await lineCheckboxes.count();
+    if (lineCount === 0) {
+      return {
+        status: 'failed',
+        shipmentId: dockState.shipmentId,
+        errorMessage:
+          `Outbound shipment ${dockState.shipmentId ?? '(unknown)'} for ${orderNumber} showed no selectable ` +
+          `shipment line to move — nothing was clicked.`,
+      };
+    }
+    // .check() is strict-mode and throws on a multi-match; check each line
+    // explicitly rather than letting that surface as an opaque failure.
+    for (let i = 0; i < lineCount; i++) {
+      await lineCheckboxes.nth(i).check();
+    }
     await pace(page);
     await page.getByRole('link', { name: 'Move to Dock' }).click();
     await pace(page);
     await page.getByRole('link', { name: 'Close' }).click();
     await pace(page);
 
-    return { status: 'success', shipmentId: dockState.shipmentId, errorMessage: null };
+    // THE ACTUAL CHECK: re-read the real dock state from a fresh
+    // navigation. Only a page that now genuinely reports docked counts as
+    // success.
+    const verified = await readOutboundShipmentDockState(page, client.todoListUrl, orderNumber);
+    if (verified.status === 'already_docked_or_further') {
+      return { status: 'success', shipmentId: verified.shipmentId ?? dockState.shipmentId, errorMessage: null };
+    }
+
+    return {
+      status: 'failed',
+      shipmentId: dockState.shipmentId,
+      errorMessage:
+        `Move to Dock did not verify for ${orderNumber}: the click sequence completed without error, but an ` +
+        `independent re-read still reports "${verified.status}"` +
+        `${verified.shipmentId ? ` for shipment ${verified.shipmentId}` : ''}. ` +
+        `The part has NOT moved — treat this as not docked.`,
+    };
   } catch (err) {
     return { status: 'failed', shipmentId: null, errorMessage: err instanceof Error ? err.message : String(err) };
   }

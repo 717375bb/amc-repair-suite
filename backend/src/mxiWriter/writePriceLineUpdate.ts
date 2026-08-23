@@ -2,6 +2,7 @@ import { addDays, formatISO } from 'date-fns';
 import type { Page } from 'playwright';
 import type { MxiClient } from './mxiClient.js';
 import { toMxiDateFormat } from './esdFormatting.js';
+import { createLogger } from '../logging/logger.js';
 import {
   attemptCancelEdit,
   confirmEsdLineEdit,
@@ -22,8 +23,16 @@ import {
   type IssueControlResult,
 } from './priceLineSelectors.js';
 
+const log = createLogger('mxi');
+
 export type PriceLineOutcome =
   | 'written'
+  /**
+   * HISTORICAL ONLY — no longer produced. The serial cross-check was
+   * removed 2026-08-23 (see writePriceLineUpdate below). Kept in the union
+   * because real invoice_price_writes rows already carry this value and
+   * still need to read back meaningfully.
+   */
   | 'skipped_serial_mismatch'
   | 'skipped_order_not_found'
   | 'skipped_multi_line'
@@ -115,13 +124,17 @@ function pricesMatch(confirmed: string | null, expected: string): boolean {
 }
 
 /**
- * Invoice Price Writer's combined orchestrator, mirroring
- * writeEsdAndNotes()'s shape: navigate, read-before-write for the
- * serial-number cross-check (skip immediately, no mutation at all, on a
- * mismatch), then price/type/date/confirm/reauth-if-needed/reissue, then
- * independently re-verify the real outcome afterward — same "always
- * re-verify, never trust the attempt alone" discipline as every other MXI
- * write in this project.
+ * Shared price-line orchestrator for the Invoice Price Writer AND the
+ * Vendor Quote Writer, mirroring writeEsdAndNotes()'s shape: navigate,
+ * read-before-write for evidence, then price/type/date/confirm/
+ * reauth-if-needed/issue, then independently re-verify the real outcome
+ * afterward — same "always re-verify, never trust the attempt alone"
+ * discipline as every other MXI write in this project.
+ *
+ * NOTE: the serial-number cross-check that used to veto a write here was
+ * removed by explicit user direction (see inline comment below) — PSA's BN
+ * system means our serial routinely differs from the vendor's. The serial
+ * is still read and recorded; it just no longer blocks.
  *
  * Only called from an explicit, human-triggered batch action (the Invoice
  * Price Writer job runner, itself only started by a logged-in analyst
@@ -183,20 +196,30 @@ export async function writePriceLineUpdate(
     }
 
     // Read-before-write, evidence captured regardless of what happens next.
+    //
+    // REMOVED (per explicit user direction, 2026-08-23): this used to hard-
+    // skip the write when the MXI line's serial number didn't match the
+    // caller's. It read as a strong failsafe, but PSA's internal BN system
+    // means our serial legitimately and routinely differs from the
+    // vendor's, so the check rejected correct writes far more often than it
+    // caught real problems.
+    //
+    // The serial is still READ and still recorded on every row — the
+    // evidence is kept, only the veto is gone, so a genuine mismatch stays
+    // auditable after the fact. The order number remains the identifying
+    // key, and it comes from the quote/sheet itself; countOrderLines()
+    // above still refuses to guess on a multi-line order.
     const serialNumberMxi = await readLineSerialNumber(page);
     const originalPrice = await readUnitPrice(page);
 
-    const normalize = (value: string | null) => (value ?? '').trim().toUpperCase();
-    if (normalize(serialNumberMxi) !== normalize(sheetSerialNumber)) {
-      await attemptCancelEdit(page);
-      return {
-        status: 'skipped',
-        outcome: 'skipped_serial_mismatch',
-        originalPrice,
-        serialNumberMxi,
-        issueDetail: null,
-        errorMessage: `Serial number mismatch: sheet says "${sheetSerialNumber}", MXI shows "${serialNumberMxi ?? '(none found)'}" — refusing to write.`,
-      };
+    if (serialNumberMxi && sheetSerialNumber) {
+      const normalize = (value: string) => value.trim().toUpperCase();
+      if (normalize(serialNumberMxi) !== normalize(sheetSerialNumber)) {
+        log.info(
+          { orderNumber, serialNumberMxi, callerSerialNumber: sheetSerialNumber },
+          'serial numbers differ (expected under the BN system) — proceeding, check disabled by design',
+        );
+      }
     }
 
     const promiseBy = promiseByDate ?? tomorrowInMxiFormat();

@@ -2,6 +2,17 @@
 
 All notable changes to this project, newest session first. Item numbers refer to the numbered work list agreed with the user (e.g. `[#4a]`).
 
+## 2026-08-23
+
+### Fixed
+- **Move to Dock reported success without ever checking it happened.** User-reported: "a significant number of orders are being written up and issued, but the move to dock is not actually occurring, even though the UI says it is." `moveOutboundShipmentToDock()` returned `status:'success'` purely because nothing threw — it never re-read the dock state afterward. Every other MXI write in this project independently re-verifies its real outcome; this one was the gap, and "no exception" is precisely the signal that has already proven untrustworthy against MXI elsewhere (see the YES-timeout fix on 2026-08-21).
+  - Now re-reads the real dock state from a fresh navigation after the click sequence, and reports success **only** when the shipment genuinely shows docked. A completed-but-unverified move is now an explicit failure naming the state it actually found, instead of a false success.
+  - Also handles the shipment-line checkbox properly: `.check()` is strict-mode and throws on a multi-match, so each line is now checked explicitly rather than that surfacing as an opaque error. Zero selectable lines is its own named failure.
+  - **Scale of the existing backlog: 788 rows are recorded `success` under the old, weaker rule**, so an unknown subset name orders whose part never moved. New read-only `npm run dock:audit -- [--limit N]` re-checks those against real MXI and prints the ones still sitting at USSTG. Clicks nothing and writes nothing — deciding what to do about a stuck order stays a human call. Bounded by `--limit` (default 25) because each order costs several real page navigations.
+
+### Changed
+- **Serial-number cross-check removed from the price-line writer, per explicit user direction.** It read as a strong failsafe, but PSA's internal BN system means our serial routinely and legitimately differs from the vendor's, so it rejected correct writes far more often than it caught real problems. The serial is still read and still recorded on every row — only the veto is gone, so a genuine mismatch stays auditable after the fact. Order number remains the identifying key, and the multi-line guard is untouched. Affects both the Invoice Price Writer and the Vendor Quote Writer, which share this function. `skipped_serial_mismatch` is kept in the outcome union, marked historical-only, because real rows already carry that value.
+
 ## 2026-08-21
 
 ### Added
