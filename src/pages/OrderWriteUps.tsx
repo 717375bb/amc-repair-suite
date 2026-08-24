@@ -204,7 +204,7 @@ function LogRow({ event }: { event: RunLogEvent }) {
           <Icon size={16} className={`mt-0.5 shrink-0 ${className}`} />
           <div>
             <p className="text-sm font-medium text-text">
-              {event.vendorDisplayName} — {event.description} (PN: {event.partNumber}, SN: {event.serialNumber})
+              {event.vendorId.toUpperCase()} - {event.vendorDisplayName} — {event.description} (PN: {event.partNumber}, SN: {event.serialNumber})
             </p>
             <p className="mt-0.5 text-sm text-muted">{event.summary}</p>
           </div>
