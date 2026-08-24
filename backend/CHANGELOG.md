@@ -2,6 +2,27 @@
 
 All notable changes to this project, newest session first. Item numbers refer to the numbered work list agreed with the user (e.g. `[#4a]`).
 
+## 2026-08-24
+
+### Fixed — lines with no work package and no assigned task are no longer skipped
+User-reported: "The MXI writer is still skipping items with no work package and no assigned tasks. These processes are now included in the script and should not be skipped anymore. This goes for Aero Repair as well." Four separate skips were found; all four are gone.
+
+- **Two one-time proof gates in Aero Repair were stopping every affected line.** `isWorkPackageCreationProven` and `isAdHocContinuationProven` each let the real mutation happen (work package created, Ad-Hoc task created — both independently re-verified) and then **stopped**, waiting on a manual continuation CLI to be run once per environment. The work-package proof file had never been written, so that gate fired on **every** no-work-package line. Both gates, both proof modules, both continuation CLIs, and their npm scripts are removed. Creation and continuation now happen in one pass, and both stay auditable (`workPackageWasCreated` / `unassignedTaskWasAssigned` carry through to every outcome and get their own `write_up_actions` rows).
+- **Aero Repair's discovery marked no-assigned-task lines as exceptions**, so they were never even offered as selectable targets — the execute-side fix alone would never have reached them. Now selectable, with the same wording the no-work-package case already used: "No task yet — one will be created automatically."
+- **Two vestigial stops in the no-assigned-task branch.** `no_tasks_assigned` (zero non-PC Task-Definition candidates) and `multiple_candidate_tasks` (more than one) were left over from the pre-pivot design, when the task was created *from* the selected candidate. Since the pivot to Ad-Hoc creation, the task's name comes from the line's own Removal Information Task Name/ID read back at the grid — this panel is no longer read at all, so both branches were gating on a list nothing consumes. The vendor-code engine, written after the pivot, never had either check. Aero Repair now matches it. The one real stop that remains is genuinely-missing Removal Information, the only case where a name cannot be composed without fabricating one.
+- **The vendor-code engine dropped no-work-package rows silently.** `findCandidateLinesForVendorCodeOnce` only ever collected rows carrying a real `"Repair ..."` link, so a genuine USSTG inventory row with a blank Work Package column vanished — not flagged, not counted, absent from every report. A vendor whose open rows were all in that state resolved to `no_candidate_lines` (**15 real occurrences in the two weeks before this fix**). Aero Repair had solved this months ago; the mechanism was simply never generalized. It is now shared outright (`shared/createWorkPackage.ts`) rather than reimplemented, and the vendor-code path creates the work package, re-reads the grid to confirm the exact composed name, and continues — the same independent re-verification Aero Repair already used.
+
+### Fixed — Create Work Package had never once worked
+Found while removing the gates above, **before** any of this ran against MXI.
+
+- `createWorkPackageForLine` located its row with `getByRole('row', { name: rowText, exact: true })`, where `rowText` came from `Element.textContent`. MXI puts inline `<script>`/comment bodies inside its grid rows, so that text reads `"BOOSTER PUMP PRESSURED98C08-607INTERCHG1280PSA (PSA Airlines) DCA/USSTG <!-- function onClick_iButtonSpecialHandling1() ..."`, while an accessible **name** is built from rendered text and excludes all of it. The locator resolved to **0 rows** and the function threw on its very first `.check()`, every time.
+- **Independently corroborated**: `write_up_actions` has never recorded a single `work_package_created` row, in any environment, ever. The path had never completed once. It went unnoticed precisely *because* the proof gate stopped every such line immediately afterwards — the gate masked the failure it existed to guard against.
+- Fixed by locating the row through its own `input[name="aInventory"]` value — a unique per-inventory `{AES}` token, exact and structural, independent of how MXI renders text.
+- **Verified against real captured production DOM** (`data/diagnostics/grid-wait-21844-*.html`, vendor 21844) replayed in a real browser: the row resolves to exactly 1, both the inventory checkbox and the vendor radio check *and read back* checked, `"Create Work Package"` resolves to exactly 1 link (no strict-mode violation), and the composed name comes out `Repair BOOSTER PUMP PRESSURE (PN: D98C08-607, SN: 1280)`. Aero Repair's per-serial variant passes on the same row, and both negative controls (wrong serial, wrong part number) correctly return null rather than falling back to another row.
+
+### Fixed — quote ingest could send an empty message count
+`maxMessages` is allowed to sit empty while being typed into, but `handleRun` passed it straight through, so clicking Run before the field blurred sent `""` where a number was required. Pre-existing in uncommitted work and breaking `npm run build`; now falls back to the same default `onBlur` applies.
+
 ## 2026-08-23
 
 ### Fixed (end of day) — "could not move to dock" was a false negative, not a failed move

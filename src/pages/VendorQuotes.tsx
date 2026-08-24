@@ -170,7 +170,7 @@ export default function VendorQuotes() {
   const [run, setRun] = useState<QuoteRunStatusResponse | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [activeJobRunId, setActiveJobRunId] = useState<string | null>(null)
-  const [maxMessages, setMaxMessages] = useState(10)
+  const [maxMessages, setMaxMessages] = useState<number | "">(1);
   const [unreadOnly, setUnreadOnly] = useState(true)
   const [showCancelConfirm, setShowCancelConfirm] = useState(false)
   const [cancelling, setCancelling] = useState(false)
@@ -252,7 +252,13 @@ export default function VendorQuotes() {
     setLoadError(null)
     setRun(null)
     try {
-      const { runId: newRunId } = await startQuoteIngest({ maxMessages, unreadOnly })
+      // The field is allowed to sit empty while being typed into, so it can
+      // still be "" here if Run is clicked before it blurs. Falls back to
+      // the same default onBlur applies, rather than sending "".
+      const { runId: newRunId } = await startQuoteIngest({
+        maxMessages: maxMessages === '' ? 1 : maxMessages,
+        unreadOnly,
+      })
       setRunId(newRunId)
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
@@ -425,18 +431,40 @@ export default function VendorQuotes() {
           description="Reads vendor quote PDFs from your configured Quotes folder and extracts price, part, and ESD. Nothing is written to MXI or to your mailbox."
         />
         <div className="flex flex-wrap items-end gap-4 px-5 py-4">
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-medium uppercase tracking-wide text-muted">Most recent</span>
-            <input
-              type="number"
-              min={1}
-              max={100}
-              value={maxMessages}
-              disabled={isRunning}
-              onChange={(e) => setMaxMessages(Math.min(100, Math.max(1, Number(e.target.value) || 1)))}
-              className="w-28 rounded-md border border-border bg-bg px-3 py-2 text-sm text-text focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
-            />
-          </label>
+      <label className="flex flex-col gap-1">
+        <span className="text-xs font-medium uppercase tracking-wide text-muted">
+          Most recent
+        </span>
+
+        <input
+          type="number"
+          min={0}
+          max={100}
+          value={maxMessages}
+          disabled={isRunning}
+          onChange={(e) => {
+            const value = e.target.value;
+
+            if (value === "") {
+            setMaxMessages("");
+            return;
+          }
+
+          setMaxMessages(Number(value));
+        }}
+        onBlur={() => {
+          if (maxMessages === "") {
+            setMaxMessages(1);
+            return;
+          }
+
+          setMaxMessages(
+            Math.min(100, Math.max(0, maxMessages))
+          );
+        }}
+        className="w-28 rounded-md border border-border bg-bg px-3 py-2 text-sm text-text focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
+      />
+    </label>
 
           <label className="flex items-center gap-2 pb-2">
             <input

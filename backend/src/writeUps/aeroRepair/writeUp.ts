@@ -11,8 +11,6 @@ import {
 import { completeCreateOrderOnly, composeDoNotShipNote, verifyExternalReferenceCommitted, ZERO_USAGE_DO_NOT_SHIP_REASON } from '../shared/createOrderOnly.js';
 import { buildWheelsBrakesChargeToAccount } from './chargeToAccount.js';
 import { isNoTasksAssignedException } from './noTaskException.js';
-import { isAdHocContinuationProven } from './adHocContinuationProof.js';
-import { isWorkPackageCreationProven } from './workPackageCreationProof.js';
 import { captureEmptyReadEvidence, captureUnassignedTaskPositiveDetection } from './emptyReadCapture.js';
 import { waitForUnassignedTasksSectionResolved, waitForWorkPackageDetailsResolved } from './gridWait.js';
 import { detectUnassignedTaskState } from '../shared/unassignedTasks.js';
@@ -51,7 +49,6 @@ import {
   readAssignedTasksAreaText,
   readChargeToAccount,
   readCurrentLocationCode,
-  readTaskDefinitionCandidates,
   selectAuthFlow,
   selectConditions,
   selectExternalVendorWorkPackage,
@@ -89,31 +86,21 @@ export interface AeroRepairWriteUpFields {
 
 type AeroRepairWriteUpOutcomeVariant =
   | { status: 'filled'; fields: AeroRepairWriteUpFields }
-  | { status: 'no_tasks_assigned'; partNumber: string }
-  | { status: 'multiple_candidate_tasks'; partNumber: string; candidateNames: string[] }
-  | {
-      status: 'ad_hoc_pending_manual_continuation';
-      partNumber: string;
-      serialNumber: string;
-      taskName: string;
-    }
   /**
-   * Addition 1 (Create Work Package) — mirrors ad_hoc_pending_manual_continuation
-   * above exactly: a real work package WAS created and independently
-   * re-verified (name matches exactly), but per workPackageCreationProof.ts's
-   * one-time gate, this specific new write path pauses here — once per env —
-   * until a human manually confirms the rest of the flow (task-paste,
-   * Schedule Work Package, ...) completes correctly from a freshly-created
-   * work package. Never a guess at whether the creation itself is safe to
-   * build on — a real mutation already happened and was verified; only
-   * CONTINUING past it automatically is gated.
+   * REMOVED 2026-08-24, per explicit user direction that lines with no
+   * work package and no assigned tasks must stop being skipped:
+   *   - 'no_tasks_assigned' / 'multiple_candidate_tasks' — both counted
+   *     Task-Definition candidates that the post-pivot Ad-Hoc creation
+   *     path no longer reads (see the no-assigned-task branch below).
+   *   - 'ad_hoc_pending_manual_continuation' /
+   *     'work_package_created_pending_manual_continuation' — the two
+   *     one-time proof gates. Each STOPPED the line after a real,
+   *     verified mutation had already happened, waiting on a manual
+   *     continuation CLI.
+   * Deleted outright rather than left unreachable, matching this
+   * project's own precedent for dead RunSummary counters: an unused
+   * variant is an invitation to reintroduce the same skip later.
    */
-  | {
-      status: 'work_package_created_pending_manual_continuation';
-      partNumber: string;
-      serialNumber: string;
-      workPackageName: string;
-    }
   | { status: 'unrecognized_station'; partNumber: string; stationCode: string }
   /**
    * CLAUDE_CODE_PROMPT (email-maintenance-records button, 2026-08-14) —
@@ -228,23 +215,29 @@ export async function runAeroRepairWriteUp(
 
     // Addition 1 (Create Work Package) — a real work package was just
     // created and independently re-verified (findFirstRepairLineForPart's
-    // own guarantee). Per workPackageCreationProof.ts's one-time gate, do
-    // not continue automatically into the rest of the flow (task-paste,
-    // Schedule Work Package, ...) until a human has manually confirmed it
-    // for real, once, in this env — same discipline already trusted here
-    // for the Ad-Hoc-continuation gap (isAdHocContinuationProven).
-    if (workPackageCreated) {
-      const workPackageCreationProven = await isWorkPackageCreationProven(client.config.env);
-      if (!workPackageCreationProven) {
-        return {
-          status: 'work_package_created_pending_manual_continuation',
-          partNumber,
-          serialNumber,
-          workPackageName: createdWorkPackageName!,
-        };
-      }
-    }
+    // own guarantee: a FRESH grid re-read confirming the exact composed
+    // name, which throws rather than continuing if it can't be matched).
+    //
+    // ONE-TIME PROOF GATE REMOVED (2026-08-24), per explicit user
+    // direction: "These processes are now included in the script and
+    // should not be skipped anymore." The gate returned
+    // 'work_package_created_pending_manual_continuation' and stopped the
+    // line until a human ran aeroRepairContinueWorkPackageCli once per
+    // env. Its proof file was never written, so it fired on EVERY
+    // no-work-package line — exactly the skip being reported. Creation
+    // itself was always real and verified; only the CONTINUATION was
+    // gated. The line now flows straight on into task-paste / Schedule
+    // Work Package / Authorization / Issue / Dock like any ordinary line.
+    // Still auditable: workPackageWasCreated carries through to every
+    // outcome and processLine.ts writes its own distinct
+    // 'work_package_created' row.
     const workPackageWasCreated = workPackageCreated;
+    if (workPackageWasCreated) {
+      log.info(
+        { partNumber, serialNumber, workPackageName: createdWorkPackageName },
+        '[work-package] created and verified — continuing the write-up in the same pass',
+      );
+    }
 
     // Real bug found and fixed this session: this check previously ran
     // AFTER navigateToUnassignedTasksView, reading the "Unassigned Tasks"
@@ -290,37 +283,30 @@ export async function runAeroRepairWriteUp(
     const assignedTasksText = await readAssignedTasksAreaText(page);
     if (isNoTasksAssignedException(assignedTasksText)) {
       await openCreateNewTask(page);
-      const allCandidates = await readTaskDefinitionCandidates(page);
-      // PC (Parts Card) is a real, always-offered template — never itself
-      // the repair task — excluded before counting, per the finding above.
-      const candidates = allCandidates.filter((c) => c.taskClass !== 'PC');
 
-      if (candidates.length === 0) {
-        await cancelCreateNewTask(page);
-        return { status: 'no_tasks_assigned', partNumber, workPackageWasCreated };
-      }
-
-      if (candidates.length > 1) {
-        // Now the genuine rare-anomaly case, not the routine one: after
-        // excluding the always-present PC template, more than one
-        // repair-relevant candidate remains — real ambiguity, flag for a
-        // human rather than guess, same "refuse to guess" discipline
-        // already used by selectVendorRadioForRouting and
-        // findFirstRepairLineForPart elsewhere in this module.
-        await cancelCreateNewTask(page);
-        return {
-          status: 'multiple_candidate_tasks',
-          partNumber,
-          candidateNames: candidates.map((c) => c.name),
-          workPackageWasCreated,
-        };
-      }
-
-      // Exactly one real repair-relevant candidate (the Task-Definition
-      // panel's own 0/1/2+ counting above is unchanged — still the real
-      // gate on whether this line is unambiguous enough to auto-create a
-      // task at all). Create an Ad-Hoc task, then continue the flow
-      // normally.
+      // TASK-DEFINITION CANDIDATE COUNTING REMOVED (2026-08-24), per
+      // explicit user direction that no-assigned-task lines must stop
+      // being skipped.
+      //
+      // These two stops ('no_tasks_assigned' when zero non-PC candidates
+      // remained, 'multiple_candidate_tasks' when more than one did) were
+      // left over from the PRE-PIVOT design, when the task was created
+      // FROM the selected Task-Definition candidate — so which candidate,
+      // and whether there was exactly one, genuinely decided the outcome.
+      //
+      // The DESIGN PIVOT documented below changed that: creation now goes
+      // through Ad-Hoc, and the task's name comes from this line's own
+      // Removal Information Task Name/ID captured back at the grid — NOT
+      // from this panel at all. Once that changed, counting these
+      // candidates stopped deciding anything; both branches were gating on
+      // a list the code no longer reads. The vendor-code engine
+      // (shared/vendorCodeWriteUp.ts), written after the pivot, never had
+      // either check — it goes straight from "no assigned task" to Ad-Hoc
+      // creation. Aero Repair now matches it.
+      //
+      // The one real stop that remains is genuinely-missing Removal
+      // Information (no_removal_task_info_found, below) — the only case
+      // where a name cannot be composed without fabricating one.
       //
       // DESIGN PIVOT: the Task-Definition-based creation path
       // (select the candidate's own aTaskDefinition radio -> OK -> a
@@ -376,28 +362,19 @@ export async function runAeroRepairWriteUp(
       // pace() and clicking blindly into whatever page actually loaded.
       await waitForWorkPackageDetailsResolved(page);
 
-      // ONE-TIME PAUSE GATE: everything from here through Auth Flow,
-      // Issue Order, and Move to Dock — starting from a freshly-created
-      // Ad-Hoc task — has never been exercised end-to-end in one unbroken
-      // run (the closest real attempt failed one step later, at
-      // navigateToUnassignedTasksView, before the fix above existed; the
-      // fix itself was only confirmed via an isolated mechanism test, not
-      // a full live run). Per explicit instruction: pause here, once,
-      // until a real manual continuation proves the rest of the flow
-      // works — independently verified, same discipline as every other
-      // first-time proof in this project — then never pause again.
-      // Scoped per-env (isAdHocContinuationProven) so proving this in
-      // stage can't silently unlock unattended production use.
-      const proven = await isAdHocContinuationProven(client.config.env);
-      if (!proven) {
-        return {
-          status: 'ad_hoc_pending_manual_continuation',
-          partNumber,
-          serialNumber,
-          taskName,
-          workPackageWasCreated,
-        };
-      }
+      // ONE-TIME PAUSE GATE REMOVED (2026-08-24), same explicit user
+      // direction as the work-package gate above. It was proven for
+      // production on 2026-07-25 (P000BC0F / 5013640 / JUN19-4064), so
+      // production already continued past it — but it still stopped every
+      // stage line, and it was the second of the two "included in the
+      // script but skipped anyway" cases reported. The task creation
+      // itself was never in doubt; only the continuation past it was
+      // gated. taskName stays in the log below so a freshly-created
+      // Ad-Hoc task is still visible in the audit trail.
+      log.info(
+        { partNumber, serialNumber, taskName },
+        '[ad-hoc-task] created — continuing the write-up in the same pass',
+      );
     }
 
     await navigateToUnassignedTasksView(page);

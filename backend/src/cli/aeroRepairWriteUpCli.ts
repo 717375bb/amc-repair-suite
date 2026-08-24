@@ -67,10 +67,6 @@ async function main(): Promise<void> {
     let dbOutcome:
       | 'pending_issue'
       | 'filled'
-      | 'no_tasks_assigned'
-      | 'multiple_candidate_tasks'
-      | 'ad_hoc_pending_manual_continuation'
-      | 'work_package_created_pending_manual_continuation'
       | 'unrecognized_station'
       | 'zero_usage'
       | 'unassigned_task_multiple_present'
@@ -145,56 +141,6 @@ async function main(): Promise<void> {
             'Reject-issue command',
           );
         }
-        break;
-      }
-      case 'no_tasks_assigned': {
-        dbOutcome = 'no_tasks_assigned';
-        log.info(
-          { partNumber },
-          'No-tasks-assigned exception detected (0 real candidate tasks found). Nothing was filled.',
-        );
-        break;
-      }
-      case 'multiple_candidate_tasks': {
-        dbOutcome = 'multiple_candidate_tasks';
-        log.info(
-          { partNumber, candidateCount: outcome.candidateNames.length },
-          'Real candidate tasks found — flagging for human review, not guessing among them',
-        );
-        outcome.candidateNames.forEach((name) => log.info({ candidateName: name }, 'Candidate task'));
-        break;
-      }
-      case 'ad_hoc_pending_manual_continuation': {
-        dbOutcome = 'ad_hoc_pending_manual_continuation';
-        log.info('');
-        log.info('=== AD-HOC TASK CREATED — PAUSED, pending one-time manual proof. ===');
-        log.info({ partNumber, serialNumber: outcome.serialNumber }, 'Part / Serial');
-        log.info({ taskName: outcome.taskName }, 'Ad-Hoc task created');
-        log.info('The rest of the flow (Auth Flow, Issue Order, Move to Dock) has not been');
-        log.info('exercised end-to-end yet starting from a freshly-created Ad-Hoc task.');
-        log.info('Run this to manually continue and prove it for real:');
-        const envFlag = env === 'production' ? ' --env production' : '';
-        log.info(
-          { command: `npm run aero-repair:continue-ad-hoc -- ${partNumber} ${outcome.serialNumber}${envFlag}` },
-          'Continue-ad-hoc command',
-        );
-        break;
-      }
-      case 'work_package_created_pending_manual_continuation': {
-        dbOutcome = 'work_package_created_pending_manual_continuation';
-        log.info('');
-        log.info('=== WORK PACKAGE CREATED — PAUSED, pending one-time manual proof. ===');
-        log.info({ partNumber, serialNumber: outcome.serialNumber }, 'Part / Serial');
-        log.info({ workPackageName: outcome.workPackageName }, 'Work package created');
-        log.info('The rest of the flow (task-paste, Schedule Work Package, Authorization,');
-        log.info('Issue Order, Move to Dock) has not been exercised end-to-end yet starting');
-        log.info('from a freshly-created work package.');
-        log.info('Run this to manually continue and prove it for real:');
-        const envFlag = env === 'production' ? ' --env production' : '';
-        log.info(
-          { command: `npm run aero-repair:continue-work-package -- ${partNumber} ${outcome.serialNumber}${envFlag}` },
-          'Continue-work-package command',
-        );
         break;
       }
       case 'unrecognized_station': {

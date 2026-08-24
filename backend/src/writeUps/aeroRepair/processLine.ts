@@ -32,16 +32,12 @@ export type ProcessLineResult =
       unassignedTaskWasAssigned?: boolean;
     }
   | { status: 'no_longer_eligible' }
-  | { status: 'no_tasks_assigned'; stationCode: string }
-  | { status: 'multiple_candidate_tasks'; stationCode: string; candidateNames: string[] }
-  | { status: 'ad_hoc_pending_manual_continuation'; serialNumber: string; taskName: string }
   /**
-   * Addition 1 (Create Work Package) — mirrors ad_hoc_pending_manual_continuation
-   * above: a real work package was created and independently re-verified,
-   * but per workPackageCreationProof.ts's one-time gate, the rest of the
-   * flow pauses here until a human manually confirms it, once per env.
+   * The four variants removed here on 2026-08-24 mirror the same removal
+   * in writeUp.ts's AeroRepairWriteUpOutcomeVariant — see that docstring.
+   * Nothing upstream can produce them any more: a missing work package or
+   * a missing assigned task is now created and the line carries on.
    */
-  | { status: 'work_package_created_pending_manual_continuation'; serialNumber: string; workPackageName: string }
   | { status: 'unrecognized_station'; stationCode: string }
   /**
    * CLAUDE_CODE_PROMPT (email-maintenance-records button, 2026-08-14) —
@@ -225,98 +221,11 @@ async function processLineInner(
     });
   }
 
-  if (writeUpOutcome.status === 'work_package_created_pending_manual_continuation') {
-    // A real mutation happened (the work package was genuinely created and
-    // independently re-verified) — same treatment as
-    // ad_hoc_pending_manual_continuation below: a real write_up_actions
-    // row, not just an xlsx log entry.
-    insertWriteUpAction(db, {
-      vendor: 'aeroRepair',
-      partNumber,
-      targetEnv: env,
-      outcome: 'work_package_created_pending_manual_continuation',
-      stationCode: null,
-      routedLocation: null,
-      filledFieldsJson: JSON.stringify(
-        { serialNumber: writeUpOutcome.serialNumber, workPackageName: writeUpOutcome.workPackageName },
-        null,
-        2,
-      ),
-      errorMessage: null,
-      orderNumber: null,
-    });
-    return {
-      status: 'work_package_created_pending_manual_continuation',
-      serialNumber: writeUpOutcome.serialNumber,
-      workPackageName: writeUpOutcome.workPackageName,
-    };
-  }
-
-  if (writeUpOutcome.status === 'no_tasks_assigned') {
-    // REAL GAP FOUND AND FIXED: same as no_longer_eligible above — this
-    // outcome (60 real occurrences) was previously xlsx-only.
-    insertWriteUpAction(db, {
-      vendor: 'aeroRepair',
-      partNumber,
-      targetEnv: env,
-      outcome: 'no_tasks_assigned',
-      stationCode: null,
-      routedLocation: null,
-      filledFieldsJson: JSON.stringify({ serialNumber }, null, 2),
-      errorMessage: null,
-      orderNumber: null,
-    });
-    return { status: 'no_tasks_assigned', stationCode: '(unknown)' };
-  }
-  if (writeUpOutcome.status === 'multiple_candidate_tasks') {
-    // REAL GAP FOUND AND FIXED: same as above — previously xlsx-only.
-    insertWriteUpAction(db, {
-      vendor: 'aeroRepair',
-      partNumber,
-      targetEnv: env,
-      outcome: 'multiple_candidate_tasks',
-      stationCode: null,
-      routedLocation: null,
-      filledFieldsJson: JSON.stringify(
-        { serialNumber, candidateNames: writeUpOutcome.candidateNames },
-        null,
-        2,
-      ),
-      errorMessage: null,
-      orderNumber: null,
-    });
-    return {
-      status: 'multiple_candidate_tasks',
-      stationCode: '(unknown)',
-      candidateNames: writeUpOutcome.candidateNames,
-    };
-  }
-  if (writeUpOutcome.status === 'ad_hoc_pending_manual_continuation') {
-    // A real mutation happened (the Ad-Hoc task was genuinely created) —
-    // unlike no_tasks_assigned/multiple_candidate_tasks (both read-only),
-    // this gets a real write_up_actions row, same as every other real
-    // write this module makes.
-    insertWriteUpAction(db, {
-      vendor: 'aeroRepair',
-      partNumber,
-      targetEnv: env,
-      outcome: 'ad_hoc_pending_manual_continuation',
-      stationCode: null,
-      routedLocation: null,
-      filledFieldsJson: JSON.stringify(
-        { serialNumber: writeUpOutcome.serialNumber, taskName: writeUpOutcome.taskName },
-        null,
-        2,
-      ),
-      errorMessage: null,
-      orderNumber: null,
-    });
-    return {
-      status: 'ad_hoc_pending_manual_continuation',
-      serialNumber: writeUpOutcome.serialNumber,
-      taskName: writeUpOutcome.taskName,
-    };
-  }
+  // The four blocks that stood here (work_package_created_pending_manual_continuation,
+  // no_tasks_assigned, multiple_candidate_tasks, ad_hoc_pending_manual_continuation)
+  // were removed 2026-08-24 along with the outcomes themselves — see
+  // writeUp.ts's AeroRepairWriteUpOutcomeVariant for why. The
+  // work_package_created audit row above is unaffected and still fires.
   if (writeUpOutcome.status === 'unrecognized_station') {
     insertWriteUpAction(db, {
       vendor: 'aeroRepair',
@@ -581,64 +490,6 @@ export async function logProcessLineResult(
       issueType: 'No Longer Eligible (claimed by another process)',
       details: `Fresh re-check immediately before processing found this line no longer eligible — an order now exists for it, or it is no longer present in the open-inventory grid.`,
       suggestedAction: 'No action needed — this is expected on a shared production system. Another process or user has already claimed this line.',
-    });
-  } else if (result.status === 'no_tasks_assigned') {
-    log.info('SKIPPED: no tasks assigned (re-discovered live, not just from the earlier scan).');
-    exceptions.push({
-      partNumber: target.partNumber,
-      serialNumber: target.serialNumber,
-      station: result.stationCode,
-      dateFound,
-      issueType: 'No Task Assigned',
-      details: `Line has no assigned tasks on the default Assigned Tasks tab (found live during batch execution, not just discovery).`,
-      suggestedAction:
-        'Manually assign a task to this work package before a write-up can be created, or confirm no repair is needed.',
-    });
-  } else if (result.status === 'multiple_candidate_tasks') {
-    log.info(
-      { candidateCount: result.candidateNames.length, candidateNames: result.candidateNames },
-      'SKIPPED: candidate tasks found, flagging for human review (not guessing among them)',
-    );
-    exceptions.push({
-      partNumber: target.partNumber,
-      serialNumber: target.serialNumber,
-      station: result.stationCode,
-      dateFound,
-      issueType: 'Multiple Candidate Tasks',
-      details: `Line has ${result.candidateNames.length} real candidate task definitions, not yet formally assigned: ${result.candidateNames.join('; ')}`,
-      suggestedAction: 'Manually determine which task (if any) applies and assign it before a write-up can be created — automation refuses to guess among multiple candidates.',
-    });
-  } else if (result.status === 'ad_hoc_pending_manual_continuation') {
-    const envFlag = env === 'production' ? ' --env production' : '';
-    const continueCommand = `npm run aero-repair:continue-ad-hoc -- ${target.partNumber} ${result.serialNumber}${envFlag}`;
-    log.info(
-      { taskName: result.taskName, continueCommand },
-      'PAUSED: Ad-Hoc task created, pending one-time manual proof',
-    );
-    exceptions.push({
-      partNumber: target.partNumber,
-      serialNumber: target.serialNumber,
-      station: '(unknown)',
-      dateFound,
-      issueType: 'Ad-Hoc Task Created - Pending Manual Continuation',
-      details: `Created Ad-Hoc task "${result.taskName}" but paused before Auth Flow/Issue Order/Move to Dock — this specific recovery path's continuation has not yet been proven end-to-end. A real task was created; nothing further was submitted.`,
-      suggestedAction: `Run \`${continueCommand}\` to manually continue this one order and prove the path for real. Once that succeeds, subsequent single-candidate cases will run fully automatically.`,
-    });
-  } else if (result.status === 'work_package_created_pending_manual_continuation') {
-    const envFlag = env === 'production' ? ' --env production' : '';
-    const continueCommand = `npm run aero-repair:continue-work-package -- ${target.partNumber} ${result.serialNumber}${envFlag}`;
-    log.info(
-      { workPackageName: result.workPackageName, continueCommand },
-      'PAUSED: Work Package created, pending one-time manual proof',
-    );
-    exceptions.push({
-      partNumber: target.partNumber,
-      serialNumber: target.serialNumber,
-      station: '(unknown)',
-      dateFound,
-      issueType: 'Work Package Created - Pending Manual Continuation',
-      details: `Created work package "${result.workPackageName}" but paused before continuing (task-paste, Schedule Work Package, ...) — this new Create Work Package path's continuation has not yet been proven end-to-end. A real work package was created; nothing further was submitted.`,
-      suggestedAction: `Run \`${continueCommand}\` to manually continue this one order and prove the path for real. Once that succeeds, subsequent Create Work Package cases will run fully automatically.`,
     });
   } else if (result.status === 'unrecognized_station') {
     log.info({ stationCode: result.stationCode }, 'SKIPPED: unrecognized station');

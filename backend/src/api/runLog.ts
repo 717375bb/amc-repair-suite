@@ -120,11 +120,16 @@ export function discoveredLineToLogEvent(
         routedTo: line.routingLocation ?? undefined,
       };
     case 'no-task-exception':
+      // No longer a blocking exception (2026-08-24), for the same reason
+      // 'no-work-package' below stopped being one: the write-up now
+      // creates the missing Ad-Hoc task itself and carries straight on.
+      // Leaving this as an exception meant these lines were never even
+      // offered as selectable targets, so the execute-side fix alone
+      // would never have reached them.
       return {
         ...base,
-        status: 'exception',
-        summary: 'No task on this line yet. Needs manual review.',
-        exceptionType: 'no_task_assigned',
+        status: 'completed', // discovery-time "found, selectable" — not an exception
+        summary: 'No task yet — one will be created automatically.',
       };
     case 'unrecognized-station-exception':
       return {
@@ -174,34 +179,6 @@ export function aeroRepairResultToLogEvent(
     }
     case 'no_longer_eligible':
       return { ...base, status: 'skipped', summary: 'Already handled by someone else — skipped.', exceptionType: 'no_longer_eligible' };
-    case 'no_tasks_assigned':
-      return { ...base, status: 'exception', summary: 'No task on this line yet. Needs manual review.', exceptionType: 'no_task_assigned' };
-    case 'multiple_candidate_tasks':
-      return {
-        ...base,
-        status: 'exception',
-        summary: 'Multiple possible tasks found on this line — needs manual review to pick the right one.',
-        exceptionType: 'multiple_candidate_tasks',
-        detail: `Candidates: ${result.candidateNames.join('; ')}`,
-      };
-    case 'ad_hoc_pending_manual_continuation':
-      return {
-        ...base,
-        serialNumber: result.serialNumber,
-        status: 'exception',
-        summary: 'A task was created, but this line needs a one-time manual confirmation before continuing. Needs manual review.',
-        exceptionType: 'ad_hoc_pending_manual_continuation',
-        detail: `Ad-Hoc task created: "${result.taskName}"`,
-      };
-    case 'work_package_created_pending_manual_continuation':
-      return {
-        ...base,
-        serialNumber: result.serialNumber,
-        status: 'exception',
-        summary: 'A work package was created, but this line needs a one-time manual confirmation before continuing. Needs manual review.',
-        exceptionType: 'work_package_created_pending_manual_continuation',
-        detail: `Work package created: "${result.workPackageName}"`,
-      };
     case 'unrecognized_station':
       return { ...base, status: 'exception', summary: "This line's station isn't in the routing table yet. Needs manual review.", exceptionType: 'unrecognized_station' };
     case 'zero_usage':
@@ -256,8 +233,18 @@ export function aeroRepairResultToLogEvent(
  * that one was assigned has to stay visible in the run log, or an
  * assignment made on the user's behalf would be invisible.
  */
-function withAssignedTaskPrefix(summary: string, fields: { unassignedTaskWasAssigned: boolean }): string {
-  return fields.unassignedTaskWasAssigned ? `Task assigned to work package, then ${summary.charAt(0).toLowerCase()}${summary.slice(1)}` : summary;
+function withAssignedTaskPrefix(
+  summary: string,
+  fields: { unassignedTaskWasAssigned: boolean; workPackageWasCreated: boolean },
+): string {
+  // Both can be true on the same line: a row with no work package gets one
+  // created, and the freshly-created package can then need its task
+  // assigned. Prefixes compose in the order the steps actually happened.
+  const steps: string[] = [];
+  if (fields.workPackageWasCreated) steps.push('Work package created');
+  if (fields.unassignedTaskWasAssigned) steps.push('task assigned to work package');
+  if (steps.length === 0) return summary;
+  return `${steps.join(', ')}, then ${summary.charAt(0).toLowerCase()}${summary.slice(1)}`;
 }
 
 /** Vendor-code family's own execute-time per-line outcome, per runVendorCodeWriteUp()'s real VendorCodeWriteUpOutcome union. */

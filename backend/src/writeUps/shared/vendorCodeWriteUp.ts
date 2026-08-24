@@ -52,6 +52,7 @@ import { completeCreateOrderOnly, composeAwaitingRmaNote, composeDoNotShipNote, 
 import { closePartDetailsReceivingNotes, openPartDetailsReceivingNotes, readPartDetailsReceivingNotes } from './partDetailsReceivingNotes.js';
 import { isRmaVendor } from './rmaVendors.js';
 import { captureVendorCodeGridDiagnostics } from './vendorCodeGridDiagnostics.js';
+import { createWorkPackageForLine, findNoWorkPackageRowsOnGrid } from './createWorkPackage.js';
 import { extractRemovalTaskInfo, readPreferredVendorIndicator, type PreferredVendorIndicatorState } from './removalTaskInfo.js';
 import { createLogger } from '../../logging/logger.js';
 
@@ -233,6 +234,24 @@ export interface VendorCodeCandidateLine {
   /** The Removal Information Task ID paired with removalTaskName — see its docstring. */
   removalTaskId: string | null;
   /**
+   * True for a real USSTG inventory row that has NO work package yet (no
+   * "Repair ..." link at all). Such a row used to be dropped silently by
+   * findCandidateLinesForVendorCodeOnce, so the vendor resolved to "0
+   * eligible candidates" — 15 real `no_candidate_lines` outcomes in the
+   * two weeks before this was fixed. It is now surfaced as a genuine
+   * candidate; runVendorCodeWriteUp creates the work package for real,
+   * re-reads the grid to confirm it, and then continues normally. The
+   * other fields on such a candidate are necessarily placeholders until
+   * that happens: there is no repair link to derive linkText from, and
+   * Removal Information is only readable from the repair link's own row
+   * cells, so both are filled in from the post-creation re-read.
+   */
+  needsWorkPackage?: boolean;
+  /** Only set when needsWorkPackage — the unique aInventory token createWorkPackageForLine locates the row by. */
+  noWorkPackageInventoryToken?: string;
+  /** Only set when needsWorkPackage — the Work Package name's description part. */
+  noWorkPackagePartDescription?: string;
+  /**
    * Preferred-vendor check (Addition 3) — read from the SAME row, at the
    * SAME time as removalTaskName/removalTaskId above, while still on the
    * grid (the checkbox this reads does not exist once the line is opened).
@@ -278,6 +297,50 @@ async function findCandidateLinesForVendorCodeOnce(
       preferredVendorState,
     });
   }
+
+  // REAL SKIP FOUND AND FIXED (2026-08-24), per explicit user direction:
+  // "The MXI writer is still skipping items with no work package."
+  //
+  // Only rows carrying a real "Repair ..." link were ever collected above,
+  // so a genuine USSTG inventory row with a blank Work Package column was
+  // dropped here without a trace — not flagged, not counted, absent from
+  // every report. For a vendor whose open rows were ALL in that state, the
+  // whole vendor resolved to `no_candidate_lines` (15 real occurrences in
+  // the two weeks before this fix).
+  //
+  // Aero Repair already handled exactly this (batchDiscovery.ts's
+  // findNoWorkPackageLinesForPart, then partDetails.ts creating the work
+  // package for real); the mechanism was simply never generalized to this
+  // vendor-code family. It is now shared outright — see
+  // shared/createWorkPackage.ts, whose header docstring cites the real
+  // captured vendor-code grid that confirms the row shape.
+  const noWorkPackageRows = await findNoWorkPackageRowsOnGrid(page);
+  for (const row of noWorkPackageRows) {
+    candidates.push({
+      partNumber: row.partNumber,
+      serialNumber: row.serialNumber,
+      // No repair link exists yet by definition. Both of these are filled
+      // in from the post-creation grid re-read, never guessed.
+      linkText: '',
+      isBnLine: false,
+      removalTaskName: null,
+      removalTaskId: null,
+      // The preferred-vendor checkbox lives on the repair link's own row
+      // cells, so it cannot be read yet. 'not_found' is the honest value;
+      // it is re-read after creation, before any decision uses it.
+      preferredVendorState: 'not_found',
+      needsWorkPackage: true,
+      noWorkPackageInventoryToken: row.inventoryToken,
+      noWorkPackagePartDescription: row.partDescription,
+    });
+  }
+  if (noWorkPackageRows.length > 0) {
+    log.info(
+      { vendorCode, count: noWorkPackageRows.length },
+      '[work-package] found real inventory row(s) with no work package — will create before writing up',
+    );
+  }
+
   return candidates;
 }
 
@@ -401,6 +464,13 @@ export interface VendorCodeWriteUpFields {
    * in the outcome record.
    */
   unassignedTaskWasAssigned: boolean;
+  /**
+   * True when this line had no work package and one was created
+   * automatically in the same pass. Same reasoning as
+   * unassignedTaskWasAssigned above: the line no longer stops for it, so
+   * without this the creation would be invisible in the outcome record.
+   */
+  workPackageWasCreated: boolean;
 }
 
 export type VendorCodeWriteUpOutcome =
@@ -507,6 +577,8 @@ export async function runVendorCodeWriteUp(
 ): Promise<VendorCodeWriteUpOutcome> {
   let knownPartNumber: string | null = null;
   let knownSerialNumber: string | null = preferredSerialNumber ?? null;
+  /** True once this line's missing work package was created and verified in this same pass. */
+  let workPackageWasCreated = false;
 
   try {
     const page: Page = await client.getAuthenticatedPage();
@@ -531,6 +603,46 @@ export async function runVendorCodeWriteUp(
     }
     knownPartNumber = candidate.partNumber;
     knownSerialNumber = candidate.serialNumber;
+
+    // No work package on this line yet — create one for real, then carry
+    // on as an ordinary line. Mirrors Aero Repair's own proven sequence
+    // (partDetails.ts's findFirstRepairLineForPart) step for step,
+    // including its independent re-verification: a FRESH grid read must
+    // show a repair line whose name matches the composed string EXACTLY
+    // before anything else happens. Never trusts the creation click.
+    if (candidate.needsWorkPackage) {
+      const { workPackageName } = await createWorkPackageForLine(
+        page,
+        candidate.partNumber,
+        candidate.serialNumber,
+        candidate.noWorkPackageInventoryToken!,
+        candidate.noWorkPackagePartDescription!,
+      );
+
+      const reread = await findCandidateLinesForVendorCodeOnce(page, client.todoListUrl, vendorCode);
+      const verified = reread.find(
+        (c) => !c.needsWorkPackage && c.serialNumber === candidate!.serialNumber && c.partNumber === candidate!.partNumber,
+      );
+      if (!verified || verified.linkText !== workPackageName) {
+        throw new Error(
+          `work_package_creation_not_confirmed: after creating a work package for ${candidate.partNumber}/` +
+            `${candidate.serialNumber} (vendor ${vendorCode}), independent re-verification did not find a repair ` +
+            `line whose name exactly matches "${workPackageName}" (found instead: ` +
+            `${verified?.linkText ?? '(no matching line at all)'}).`,
+        );
+      }
+
+      // Swap in the fully-populated candidate from the re-read: it now has
+      // the real linkText, isBnLine, Removal Information, and
+      // preferred-vendor state, none of which were readable before the
+      // work package existed.
+      candidate = verified;
+      workPackageWasCreated = true;
+      log.info(
+        { vendorCode, partNumber: candidate.partNumber, serialNumber: candidate.serialNumber, workPackageName },
+        '[work-package] created and verified — continuing the write-up in the same pass',
+      );
+    }
 
     // CLAUDE_CODE_PROMPT (Addition 3, preferred-vendor check) — read-only,
     // checked BEFORE any navigation/write for this candidate (the checkbox
@@ -993,6 +1105,7 @@ export async function runVendorCodeWriteUp(
         generatedOrderNumber,
         authFlow: '(not requested — RMA vendor)',
         unassignedTaskWasAssigned,
+        workPackageWasCreated,
       };
       return { status: 'order_created_awaiting_rma', fields: rmaFields, externalReferenceNote: note };
     }
@@ -1032,6 +1145,7 @@ export async function runVendorCodeWriteUp(
         generatedOrderNumber,
         authFlow: '(not requested — CREATE_ORDER_ONLY)',
         unassignedTaskWasAssigned,
+        workPackageWasCreated,
       };
       return {
         status: 'order_created_do_not_ship',
@@ -1109,6 +1223,7 @@ export async function runVendorCodeWriteUp(
       generatedOrderNumber,
       authFlow: resolved.authFlow,
       unassignedTaskWasAssigned,
+      workPackageWasCreated,
     };
 
     // Structural dispatch per VENDOR_MODULE_REFACTOR_SPEC.md section 3.2 —
