@@ -375,7 +375,7 @@ export async function updateNoteToReceiver(
   await page.getByRole('link', { name: 'Details', exact: true }).click();
   await pace(page);
   const previousNote = await readNoteFieldText(page);
-  const combinedText = previousNote ? `${previousNote}\n\n${newEntryText}` : newEntryText;
+  const combinedText = previousNote ? `${newEntryText}\n\n${previousNote}` : newEntryText;
 
   await page.locator('#idButtonEditPODetails').click();
   await pace(page);

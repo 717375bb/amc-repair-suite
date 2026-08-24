@@ -184,6 +184,8 @@ export async function createWorkPackageForLine(
   // the same way a real user's next action would.
   await nameField.press('Tab');
   await pace(page);
+  await page.getByText('OK', { exact: true }).click();
+  await pace(page);
 
   return { workPackageName };
 }

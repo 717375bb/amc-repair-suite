@@ -123,4 +123,5 @@ export const AERO_REPAIR_PART_NUMBERS: readonly string[] = Object.freeze([
   '90001200-1',
   '90001201-1',
   '90001201-2',
+  '90001200-1WT',
 ]);

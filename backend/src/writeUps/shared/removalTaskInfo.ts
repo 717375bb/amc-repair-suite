@@ -31,17 +31,37 @@ export interface RemovalTaskInfo {
  * almost every real line per explicit user statement, but never assumed
  * universal.
  */
-export async function extractRemovalTaskInfo(repairLinkLocator: Locator): Promise<RemovalTaskInfo> {
+export async function extractRemovalTaskInfo(
+  repairLinkLocator: Locator
+): Promise<RemovalTaskInfo> {
   return repairLinkLocator.evaluate((linkEl) => {
     const tr = linkEl.closest('tr');
-    if (!tr) return { name: null, id: null };
-    const nameCell = tr.querySelector('td.longString a[href*="TaskDetails.jsp"]');
-    if (!nameCell) return { name: null, id: null };
+
+    const defaultName =
+      'No removal reason given. Please inspect and test for damage';
+
+    if (!tr) {
+      return { name: defaultName, id: '' };
+    }
+
+    const nameCell = tr.querySelector(
+      'td.longString a[href*="TaskDetails.jsp"]'
+    );
+
+    if (!nameCell) {
+      return { name: defaultName, id: '' };
+    }
+
     const idCell = nameCell.closest('td')?.nextElementSibling;
     const idLink = idCell?.querySelector('a[href*="TaskDetails.jsp"]');
+
     const name = (nameCell.textContent ?? '').trim();
     const id = (idLink?.textContent ?? '').trim();
-    return { name: name || null, id: id || null };
+
+    return {
+      name: name || defaultName,
+      id: id || '',
+    };
   });
 }
 
