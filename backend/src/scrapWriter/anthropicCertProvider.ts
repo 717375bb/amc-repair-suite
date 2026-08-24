@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import Anthropic from '@anthropic-ai/sdk';
+import { describeError } from '../quoteWriter/connectionErrorDetail.js';
 import { createLogger } from '../logging/logger.js';
 import type { ScrapCertExtraction, ScrapCertInput, ScrapCertProvider } from './certExtractionTypes.js';
 
@@ -112,7 +113,7 @@ export class AnthropicScrapCertProvider implements ScrapCertProvider {
           reasoningNote: raw.reasoningNote ?? '',
         };
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = describeError(err);
         log.warn({ attempt, fileName: input.fileName, error: message }, 'scrap cert extraction attempt failed');
         if (attempt >= MAX_ATTEMPTS) return failureResult(`Extraction failed after ${MAX_ATTEMPTS} attempts: ${message}`);
       }

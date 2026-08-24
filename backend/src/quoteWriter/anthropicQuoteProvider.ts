@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import Anthropic from '@anthropic-ai/sdk';
+import { describeError } from './connectionErrorDetail.js';
 import { createLogger } from '../logging/logger.js';
 import type {
   QuoteExtractionInput,
@@ -24,7 +25,7 @@ const MAX_ATTEMPTS = 2;
 const SYSTEM_PROMPT = `You are reading a PDF attached to an email sent to PSA Airlines' component repair team by an outside repair vendor. Extract the quote details exactly as stated. Never estimate, infer, or "helpfully" fill in a value that is not really there — a null is always better than a guess, because these values get written into a real maintenance system.
 
 FIRST decide what the document actually is:
-- "quote": a repair quotation / estimate / price proposal for repairing a specific part.
+- "quote": a repair quotation / estimate / price proposal for repairing a specific part. If the pdf contains "WQP" it is also considered a quote, even if it is not explicitly labeled as such. If it is a quote, extract the order number, price, turnaround, and any other fields you can find.
 - "shop_finding_report": a teardown or shop findings report. These frequently arrive in the SAME email as a real quote — it is not the quote itself, even if it mentions money.
 - "other_not_a_quote": anything else (receiving discrepancy notices, packing slips, invoices for already-completed work, correspondence).
 
@@ -168,7 +169,7 @@ export class AnthropicQuoteProvider implements QuoteExtractionProvider {
       pdfBase64 = (await readFile(input.pdfPath)).toString('base64');
     } catch (err) {
       return failureResult(
-        `Could not read PDF from disk: ${err instanceof Error ? err.message : String(err)}`,
+        `Could not read PDF from disk: ${describeError(err)}`,
       );
     }
 
@@ -244,7 +245,7 @@ export class AnthropicQuoteProvider implements QuoteExtractionProvider {
           reasoningNote: raw.reasoningNote ?? '(no reasoning note returned)',
         };
       } catch (err) {
-        lastError = err instanceof Error ? err.message : String(err);
+        lastError = describeError(err);
         log.warn({ attempt, fileName: input.fileName, error: lastError }, 'quote extraction attempt failed');
       }
     }

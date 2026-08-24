@@ -4,6 +4,16 @@ All notable changes to this project, newest session first. Item numbers refer to
 
 ## 2026-08-24
 
+### Added — API reachability diagnostic; connection errors now name their real cause
+The same five quote PDFs failed on the corporate network (2026-08-24 14:33 and 15:04) and then succeeded ten minutes later **on a phone hotspot**. An earlier note in this session read that success as evidence *against* a network block; that was wrong, and the reason it was wrong is that it assumed the network was unchanged across the three runs. Same bytes succeeding on a different network is evidence *for* a block on the first one. Corrected here rather than left standing.
+
+- **`describeError()` (`quoteWriter/connectionErrorDetail.ts`)** unwraps the `err.cause` chain the Anthropic SDK hides. Every one of those 10 recorded failures says only `"Connection error."` — the SDK's `APIConnectionError` message — so the audit trail could not tell a DNS failure from a TCP reset from a TLS/certificate rejection, three causes with three completely different fixes. Node puts the real error in `err.cause`, often nested twice (undici wraps its own socket errors); this walks that chain and appends `code`/`syscall`/`hostname`. Now wired into all three AI providers (quote, scrap cert, ESD inference). Verified against synthetic versions of each real failure mode, plus a cyclic cause, a non-Error cause, and no cause at all.
+- **`npm run diag:api-reachability`** checks four layers in order — proxy env vars (Node's fetch ignores them, which is a cause in itself), DNS resolution, a direct TLS handshake **including who signed the certificate**, then two API probes shaped like the two real callers: a small Haiku text call (the ESD path) and a real base64 PDF upload to Sonnet (the quote path), using the largest PDF on disk as the worst case.
+  - The point is to separate the two hypotheses that the timing evidence alone cannot. **Both probes failing** means a host/domain-level block, which affects ESD inference identically. **Only the PDF probe failing** is the one result that genuinely means "quotes are blocked but ESD is not." The TLS issuer line settles a third: a non-public CA means requests are being decrypted and policy-checked in transit.
+  - Read-only, `max_tokens: 16`, no DB/mailbox/MXI access, `maxRetries: 0` so the first real error is reported rather than a retried summary. Safe to run anywhere, repeatedly.
+  - **Baseline captured on the hotspot**: DNS resolves, TLS issuer is `Google Trust Services / CN=WE1` (a genuine public CA — no interception), text probe 873ms, PDF probe 2444ms with a 132 KB base64 body. Both shapes work. **The corporate-network run has not been done yet** — that is the comparison that answers the question.
+- **Still unresolved either way**: ESD inference has not run since 2026-08-19, so the two paths have never been exercised on the same network at the same time. Quote runs 19 and 20 (08-23, both clean) are of unknown network provenance.
+
 ### Fixed — lines with no work package and no assigned task are no longer skipped
 User-reported: "The MXI writer is still skipping items with no work package and no assigned tasks. These processes are now included in the script and should not be skipped anymore. This goes for Aero Repair as well." Four separate skips were found; all four are gone.
 

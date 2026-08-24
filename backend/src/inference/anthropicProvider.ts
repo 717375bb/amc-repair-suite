@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { describeError } from '../quoteWriter/connectionErrorDetail.js';
 import { PARTS_PENDING_MAX_DAYS, PARTS_PENDING_MIN_DAYS } from './constants.js';
 import type { EsdInferenceInput, EsdInferenceProvider, EsdInferenceResult } from './types.js';
 
@@ -75,7 +76,7 @@ export class AnthropicEsdProvider implements EsdInferenceProvider {
       try {
         return await this.attemptInfer(input);
       } catch (secondError) {
-        const message = secondError instanceof Error ? secondError.message : String(secondError);
+        const message = describeError(secondError);
         return {
           classification: 'none',
           extractedBaseDate: null,
