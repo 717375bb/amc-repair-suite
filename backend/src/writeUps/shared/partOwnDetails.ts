@@ -87,7 +87,7 @@ const USAGE_TABLE_WAIT_POLL_MS = 250;
  * as a substring so the `aInventory`/`aReturnToPage` query tokens, which
  * differ per line, are irrelevant.
  */
-const PART_DETAILS_URL_MARKER = 'InventoryDetails.jsp';
+export const PART_DETAILS_URL_MARKER = 'InventoryDetails.jsp';
 const NUMBER_PATTERN_SOURCE = '^-?\\d+(\\.\\d+)?$';
 
 interface UsageTableProbeResult {

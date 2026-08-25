@@ -4,6 +4,18 @@ All notable changes to this project, newest session first. Item numbers refer to
 
 ## 2026-08-25
 
+### Fixed — in-house scrap only worked on the first serial in a batch
+User-reported: running several serials scraps the first successfully and fails every one after it, always with `Could not read a base station from this item's current location ("not found")`, and **the same serial succeeds when it is first in the list**. Nothing was wrong with the parts — state was carrying between iterations, and the read was landing on the wrong page.
+
+- **Neither location-picker popup was ever closed.** `schedulePopup` and `transferPopup` were each opened via `page.waitForEvent('popup')`, used, and abandoned — so a multi-serial run accumulated **two orphaned MXI pages per part**, each still holding whatever server-side transaction state MXI attaches to a picker. Both are now tracked in outer scope and closed in a `finally`, so they are released on every exit path including the several early returns between them that previously abandoned an open popup.
+- **Every serial now starts from a clean browser context.** `page.goto()` resets the main page but does nothing about extra pages left open by the previous serial. The reset loop closes anything that is not the client's own page — directly addressing "there's simply an issue with it moving into the next part."
+- **The location read now confirms which page it is on.** The old wait polled the whole body for a bare `XXX/YYY` token and then **swallowed its own timeout**. That failed two ways: it was satisfied by any page carrying a location-shaped token — including the search-results grid — and when it genuinely timed out it fell through silently and reported `"not found"`, which reads like the item has no location rather than "we were never on the item's page". Replaced with the same positive page-identity check proven for the usage-table read: the URL must be the inventory details page, `document.readyState` must be `complete`, and the page must show **this** serial (which also rules out landing on a different item). Failing that now names the URL actually landed on.
+- **The location is now anchored on the page's own `Location:` label**, with the bare pattern kept only as a fallback. This is not cosmetic: verification showed that on a search-results grid the old pattern parses `PNS/STORE` — **another item's location** — which would have produced confident candidates for the wrong site. Failing visibly is much better than transferring a real part to the wrong shop.
+
+**Verified** against real page text (taken verbatim from the live `diag:usage-table` probe) served in a browser: a real details page is recognised and parses `DAY/USSTG` → `["DAY/REPAIR2/SHOP2", "DAY/REPAIR1/SHOP1", "DAY/REPAIR"]`; a search-results grid carrying both the serial and other items' locations is correctly **rejected** (the old wait accepted it and would have read `PNS/STORE`); and the stray-page reset takes a context from 3 pages back to 1.
+
+The other scrap paths (`writeVendorScrap`, `writeScrapPriceLines`, `convertToExchange`) were checked for the same popup pattern and have none.
+
 ### Root-caused by live probe: the table was there and all-zero; the read was early
 `npm run diag:usage-table -- 0t1y4 --env production` settled it. On `820CE02Y01 / 403` — one of the eight failing lines — the probe reported `#idTableCurrentUsage present: true` with real rows, `CYCLES 0 0 0` and `HOURS 0 0 0`, at `DAY/USSTG`. The page was fine and the correct record; the writer was reading it too early. Those values classify as `present_all_zero`, which on a USSTG line routes to `order_created_do_not_ship` — exactly what these same parts did on 2026-08-24.
 
