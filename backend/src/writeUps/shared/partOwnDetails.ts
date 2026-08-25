@@ -79,6 +79,15 @@ export function extractCleanPartDescription(
 const USAGE_TABLE_SELECTOR = '#idTableCurrentUsage';
 const USAGE_TABLE_WAIT_TIMEOUT_MS = 30_000;
 const USAGE_TABLE_WAIT_POLL_MS = 250;
+/**
+ * The part-details page's own URL. Confirmed against every captured
+ * usage-table read in data/diagnostics — 479 successful reads and all 44
+ * genuine BN "table absent" reads are on
+ * `/maintenix/web/inventory/InventoryDetails.jsp?aInventory=...`. Matched
+ * as a substring so the `aInventory`/`aReturnToPage` query tokens, which
+ * differ per line, are irrelevant.
+ */
+const PART_DETAILS_URL_MARKER = 'InventoryDetails.jsp';
 const NUMBER_PATTERN_SOURCE = '^-?\\d+(\\.\\d+)?$';
 
 interface UsageTableProbeResult {
@@ -149,11 +158,15 @@ async function probeUsageTable(page: Page): Promise<UsageTableProbeResult> {
  * genuinely non-empty real inventory record, and the caller wrote a
  * header-only Usage Parm block into the note.
  *
- * Waits for a DEFINITIVE end state: either the table element is confirmed
- * ABSENT (the real, pre-existing BN-override case — no Usage Parm table
- * exists at all for these lines; resolves immediately, no waiting needed),
- * or at least one structurally-valid data row has rendered. 30s timeout,
- * matching this project's standard for genuine render-latency waits.
+ * Waits for a DEFINITIVE end state: either at least one structurally-valid
+ * data row has rendered, or the table element is confirmed ABSENT — and
+ * "confirmed" now means two things that used to be assumed. We must be
+ * positively on the part-details page (see PART_DETAILS_URL_MARKER), and
+ * the table must be missing on two consecutive polls. Before 2026-08-25 a
+ * missing table element returned instantly as a confirmed-absent table
+ * from wherever the browser happened to be, which is the bug documented
+ * inside the loop below. 30s timeout, matching this project's standard for
+ * genuine render-latency waits.
  *
  * Does NOT throw on timeout itself — returns `timedOut: true` with
  * whatever the last probe saw instead, so the caller (readPartOwnDetails)
@@ -165,28 +178,77 @@ async function probeUsageTable(page: Page): Promise<UsageTableProbeResult> {
  */
 async function waitForUsageTableResolved(
   page: Page,
-): Promise<{ result: UsageTableProbeResult; timedOut: boolean }> {
+): Promise<{ result: UsageTableProbeResult; timedOut: boolean; reachedDetailsPage: boolean; lastUrl: string }> {
   const start = Date.now();
   const deadline = start + USAGE_TABLE_WAIT_TIMEOUT_MS;
   let last: UsageTableProbeResult = { tableFound: false, tableHtml: null, tableInnerText: null, rows: [] };
+  let reachedDetailsPage = false;
+  // "Absent" must be observed twice in a row before it is believed, so a
+  // page caught mid-render can never be recorded as a confirmed-empty one.
+  let consecutiveConfirmedAbsent = 0;
+  let lastUrl = page.url();
 
   while (Date.now() < deadline) {
+    lastUrl = page.url();
+    const onDetailsPage = lastUrl.includes(PART_DETAILS_URL_MARKER);
+    if (onDetailsPage) reachedDetailsPage = true;
+
     last = await probeUsageTable(page);
-    if (!last.tableFound || last.rows.length > 0) {
+
+    // Real data rows are self-evidently definitive wherever we are.
+    if (last.rows.length > 0) {
       log.debug(
-        { durationMs: Date.now() - start, tableFound: last.tableFound, rowCount: last.rows.length },
+        { durationMs: Date.now() - start, rowCount: last.rows.length },
         '[grid-wait] usage-table resolved',
       );
-      return { result: last, timedOut: false };
+      return { result: last, timedOut: false, reachedDetailsPage: true, lastUrl };
     }
+
+    // REAL BUG FOUND AND FIXED (2026-08-25) — this branch used to be
+    // `if (!last.tableFound || last.rows.length > 0) return ...`, so a
+    // MISSING table element returned IMMEDIATELY as a confirmed-absent
+    // table, having waited zero milliseconds. That is only correct for a
+    // BN-override line (which genuinely has no Usage Parm table); for
+    // every other line it silently converted "the details page has not
+    // finished loading" into "this part has no times and cycles".
+    //
+    // The preceding guard could not catch it either: readPartOwnDetails'
+    // waitForBodyTextIncludes(serialNumber) is satisfied by the GRID page,
+    // which shows the serial too — so a click that had not yet navigated
+    // sailed straight through to a probe of the wrong page.
+    //
+    // Reported live: on 2026-08-25 every non-BN vendor-code line came back
+    // "Expected to find times and cycles but no table was there" while the
+    // table was definitely present. Each of those 8 lines took ~14s end to
+    // end, not the 30s+ a real timeout costs, which is what pinned it to
+    // this instant-return path rather than to the row-parsing timeout.
+    //
+    // Absent is now only believed once we are positively confirmed to be
+    // ON the part-details page. That URL marker is evidence-backed, not
+    // assumed: all 523 captured usage-table reads in data/diagnostics —
+    // the 479 successful ones AND all 44 genuine BN "table absent" ones —
+    // are on InventoryDetails.jsp.
+    if (onDetailsPage && !last.tableFound) {
+      consecutiveConfirmedAbsent++;
+      if (consecutiveConfirmedAbsent >= 2) {
+        log.debug(
+          { durationMs: Date.now() - start, url: lastUrl },
+          '[grid-wait] usage-table confirmed absent on the part-details page (BN-override case)',
+        );
+        return { result: last, timedOut: false, reachedDetailsPage, lastUrl };
+      }
+    } else {
+      consecutiveConfirmedAbsent = 0;
+    }
+
     await page.waitForTimeout(USAGE_TABLE_WAIT_POLL_MS);
   }
 
   log.debug(
-    { timeoutMs: USAGE_TABLE_WAIT_TIMEOUT_MS },
-    '[grid-wait] usage-table did NOT resolve (table element found but 0 structurally-valid data rows) — refusing to treat this as a genuine empty/absent table',
+    { timeoutMs: USAGE_TABLE_WAIT_TIMEOUT_MS, reachedDetailsPage, url: lastUrl, tableFound: last.tableFound },
+    '[grid-wait] usage-table did NOT resolve — refusing to treat this as a genuine empty/absent table',
   );
-  return { result: last, timedOut: true };
+  return { result: last, timedOut: true, reachedDetailsPage, lastUrl };
 }
 
 /**
@@ -230,15 +292,18 @@ export async function readPartOwnDetails(
   partNumber: string,
   serialNumber: string,
 ): Promise<PartOwnDetails> {
-  await waitForBodyTextIncludes(page, serialNumber, `Part own details for ${partNumber}/${serialNumber}`);
-  const rawText = await page.locator('body').innerText();
-
-  const descriptionLine = rawText
-    .split('\n')
-    .map((line) => line.trim())
-    .find((line) => line.includes(partNumber) && line.includes(serialNumber));
-
-  const { result: usageTableResult, timedOut } = await waitForUsageTableResolved(page);
+  // ORDER MATTERS, and it changed on 2026-08-25. The usage-table wait runs
+  // FIRST because it is the only step that positively establishes we are
+  // on the part-details page at all (it polls the URL — see its loop).
+  // Everything read below depends on that: `rawText` feeds
+  // partDescription, and the previous ordering read it after a
+  // waitForBodyTextIncludes(serialNumber) that the GRID also satisfies, so
+  // on a slow navigation the description could be parsed off the grid.
+  //
+  // Doing it in this order also keeps ONE 30s budget for the whole read
+  // rather than two stacked ones.
+  const { result: usageTableResult, timedOut, reachedDetailsPage, lastUrl } =
+    await waitForUsageTableResolved(page);
 
   // CLAUDE_CODE_PROMPT_USAGE_TABLE_BUG.md, required change 1 — evidence
   // capture on EVERY usage-table read, success AND failure alike — so this
@@ -247,10 +312,10 @@ export async function readPartOwnDetails(
     partNumber,
     serialNumber,
     resolvedBy: timedOut
-      ? 'waitForUsageTableResolved — TIMED OUT (table found but 0 data rows after 30s)'
-      : usageTableResult.tableFound
+      ? `waitForUsageTableResolved — TIMED OUT after ${USAGE_TABLE_WAIT_TIMEOUT_MS}ms (reachedDetailsPage=${reachedDetailsPage}, tableFound=${usageTableResult.tableFound}, url=${lastUrl})`
+      : usageTableResult.rows.length > 0
         ? 'waitForUsageTableResolved — >=1 structurally-valid data row found'
-        : 'waitForUsageTableResolved — table element confirmed absent (BN-override case)',
+        : `waitForUsageTableResolved — table element confirmed absent on ${PART_DETAILS_URL_MARKER} (BN-override case)`,
     rowSelectorDescription:
       `document.querySelector('${USAGE_TABLE_SELECTOR}') -> tbody -> querySelectorAll('tr') -> ` +
       'rows with a non-numeric label cell + >=3 numeric value cells (td or th)',
@@ -258,15 +323,39 @@ export async function readPartOwnDetails(
     tableHtml: usageTableResult.tableHtml,
     tableInnerText: usageTableResult.tableInnerText,
     parsedRows: usageTableResult.rows,
+    // A failed read always leaves evidence, gate or no gate.
+    force: timedOut,
   });
 
   if (timedOut) {
+    // Two genuinely different failures, kept distinct so a recurrence
+    // names its own cause instead of needing another investigation. The
+    // 2026-08-25 report ("the table is there, definitely") was hard to
+    // diagnose precisely because both collapsed into one vague outcome.
+    if (!reachedDetailsPage) {
+      throw new Error(
+        `part_details_page_not_reached: never landed on ${PART_DETAILS_URL_MARKER} for ` +
+          `${partNumber}/${serialNumber} within ${USAGE_TABLE_WAIT_TIMEOUT_MS}ms — last URL was "${lastUrl}". ` +
+          `The usage table was never actually looked for on the right page, so its absence proves nothing ` +
+          `about whether this part has times and cycles.`,
+      );
+    }
     throw new Error(
       `usage_table_rows_empty: Usage table (#idTableCurrentUsage) for ${partNumber}/${serialNumber} did not ` +
         `resolve to a definitive state (table element found but 0 structurally-valid data rows) within ` +
-        `${USAGE_TABLE_WAIT_TIMEOUT_MS}ms — refusing to treat this as a genuine empty/absent table.`,
+        `${USAGE_TABLE_WAIT_TIMEOUT_MS}ms on "${lastUrl}" — refusing to treat this as a genuine empty/absent table.`,
     );
   }
+
+  // Only now is the page confirmed to be the part-details page, so the
+  // description is guaranteed to be parsed off it rather than off the grid.
+  await waitForBodyTextIncludes(page, serialNumber, `Part own details for ${partNumber}/${serialNumber}`);
+  const rawText = await page.locator('body').innerText();
+
+  const descriptionLine = rawText
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line.includes(partNumber) && line.includes(serialNumber));
 
   return {
     partDescription: extractCleanPartDescription(descriptionLine, partNumber, serialNumber),

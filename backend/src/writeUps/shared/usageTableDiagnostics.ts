@@ -36,9 +36,18 @@ export async function captureUsageTableDiagnostics(
     tableHtml: string | null;
     tableInnerText: string | null;
     parsedRows: UsageParmRowLike[];
+    /**
+     * Bypasses the DIAGNOSTICS_CAPTURE gate. Set on a FAILED read only.
+     * The 2026-08-25 "the table is there, definitely" report was slow to
+     * diagnose precisely because captures were gated off and the eight
+     * failures left no evidence behind at all. Failures are rare and are
+     * exactly the case worth the disk, so they now always capture; routine
+     * successful reads stay opt-in as before.
+     */
+    force?: boolean;
   },
 ): Promise<void> {
-  if (process.env.DIAGNOSTICS_CAPTURE !== 'true') {
+  if (!context.force && process.env.DIAGNOSTICS_CAPTURE !== 'true') {
     return;
   }
   try {

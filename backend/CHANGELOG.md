@@ -2,6 +2,20 @@
 
 All notable changes to this project, newest session first. Item numbers refer to the numbered work list agreed with the user (e.g. `[#4a]`).
 
+## 2026-08-25
+
+### Fixed — "Expected to find times and cycles but no table was there" on every non-BN line
+User-reported: the shared vendor-code write-up returned this for all non-BN parts, and "the table is there, definitely." It was. The read was giving a confident wrong answer.
+
+- **Root cause**: `waitForUsageTableResolved`'s exit condition was `if (!last.tableFound || last.rows.length > 0) return`. A **missing** `#idTableCurrentUsage` element returned **immediately** as a *confirmed-absent* table, having waited zero milliseconds. That is only correct for a BN-override line, which genuinely has no Usage Parm table. For every other line it silently converted "the details page hasn't finished loading" into "this part has no times and cycles."
+- **The upstream guard couldn't catch it either.** `readPartOwnDetails` waited on `waitForBodyTextIncludes(serialNumber)` — but the **grid** we just clicked from shows the same serial, so that wait passes while the browser is still on the old page. A click that hadn't navigated yet sailed straight through to a probe of the wrong page. This is the same failure the function's own docstring already described for a different symptom in August: a wait satisfied by something that renders earlier than the thing being read.
+- **Pinned to that path by timing, not by guesswork**: each of the 8 failing lines took **~14s end to end**, not the 30s+ a real row-parsing timeout costs. The instant-return branch was the only way to be that fast.
+- **Corroborating evidence**: `usage_table_absent_unexpected` had **never once occurred** before this run in the whole audit history. In the same 3-minute window the only vendor-code line that succeeded was `903-1341 / BN 397158` — a BN line, which skips the table entirely — and Aero Repair read the table fine through the same shared function at 11:47:56. So this was never a global MXI change.
+- **The fix**: "absent" is now only believed once we are positively confirmed to be **on the part-details page**, and the table has been missing on **two consecutive polls**. The URL marker is evidence-backed rather than assumed — all 523 captured usage-table reads in `data/diagnostics` are on `InventoryDetails.jsp`, the 479 successful ones and all 44 genuine BN table-absent ones alike.
+- **Read order changed too**: the usage-table wait now runs **first**, because it is the only step that positively establishes which page we are on. `rawText` (which feeds `partDescription`) is read after it, so a slow navigation can no longer have the description parsed off the grid. This also keeps **one** 30s budget for the whole read instead of two stacked ones.
+- **The failure is now self-diagnosing.** Two genuinely different causes had been collapsing into one vague outcome; they are now separate errors — `part_details_page_not_reached` (names the URL actually landed on, and states plainly that the table's absence proves nothing) versus `usage_table_rows_empty` (table present, rows didn't parse). A failed read also **always** writes a diagnostic capture now, bypassing the `DIAGNOSTICS_CAPTURE` gate: the eight failures today left no evidence behind at all precisely because that gate was off, which is what made this slow to diagnose. Successful reads stay opt-in.
+- **Verified** by replaying the real shipped `readPartOwnDetails` in a real browser against four served pages: details page + real table → 2 rows in 101ms; details page + genuinely no table (BN) → absent in 362ms, unchanged behaviour; **still on the grid (the reported bug)** → now refuses with `part_details_page_not_reached` instead of inventing "absent"; and a details page that arrives 3s late → waits and reads the real rows, where the old code returned "absent" instantly. The forced capture was confirmed written, with the URL and `reachedDetailsPage=false` in its header.
+
 ## 2026-08-24
 
 ### Added — API reachability diagnostic; connection errors now name their real cause
