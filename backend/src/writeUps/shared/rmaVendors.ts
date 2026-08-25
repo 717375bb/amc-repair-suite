@@ -21,7 +21,7 @@ import type { VendorConfig } from './vendorConfig.js';
  * keys (case-insensitive via getVendorConfig's existing normalization, but
  * stored upper-case here to match VENDOR_REGISTRY's own convention).
  */
-export const RMA_VENDOR_IDS: ReadonlySet<string> = new Set<string>(['8719', '58657', '75521']);
+export const RMA_VENDOR_IDS: ReadonlySet<string> = new Set<string>(['8719', '58657', '75521', 'VC00664']);
 
 export function isRmaVendor(config: VendorConfig): boolean {
   return config.search.kind === 'vendorCode' && RMA_VENDOR_IDS.has(config.search.vendorCode.toUpperCase());

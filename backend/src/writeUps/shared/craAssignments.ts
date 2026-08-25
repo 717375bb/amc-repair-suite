@@ -163,6 +163,7 @@ export const CRA_VENDOR_ASSIGNMENTS: readonly CraVendorAssignment[] = [
   { vendorCode: '59875', vendorName: 'EATON INDUSTRIAL CORPORATION', craCode: '238784', craName: 'Matthew Fascenda' },
   { vendorCode: 'VC00879', vendorName: 'FIRSTMARK AEROSPACE CORPORATION', craCode: '238784', craName: 'Matthew Fascenda' },
   { vendorCode: '1DH10', vendorName: 'HRD AERO SYSTEMS INC', craCode: '238784', craName: 'Matthew Fascenda' },
+  { vendorCode: 'VC00664', vendorName: 'HR SMITH GROUP', craCode: '238784', craName: 'Matthew Fascenda' },
   { vendorCode: '58657', vendorName: 'LEACH - CA', craCode: '238784', craName: 'Matthew Fascenda' },
   { vendorCode: 'VC01014', vendorName: 'LEADING EDGE AEROSPACE', craCode: '238784', craName: 'Matthew Fascenda' },
   { vendorCode: 'VC01197', vendorName: 'LIEBHERR AEROSPACE - NORTH MAPLE RD', craCode: '238784', craName: 'Matthew Fascenda' },
