@@ -106,13 +106,27 @@ export async function readCurrentLocationCode(page: Page, linkText: string): Pro
  * "<CODE>/..." shape.
  */
 export function transformReturnToLocation(currentLocation: string): string {
-  const match = currentLocation.trim().match(/^([A-Z0-9]+)\//);
+  const match: RegExpMatchArray | null = currentLocation.trim().match(/^([A-Z0-9]+)\//);
   if (!match) {
     throw new Error(
       `Could not extract a station code from return-to-location value "${currentLocation}" — expected a "<CODE>/..." shape.`,
     );
   }
-  return `${match[1]}/DOCK`;
+  let location = match[1].toString();
+  switch (location){
+    case 'NQA':
+    case 'QRO':
+    case 'CKB':
+    case 'TUC':
+    case 'PHL':
+      location = "CLT";
+      break;
+    case 'SAV':
+    case 'PNS':
+      location = 'GSP';
+      break;
+  }
+  return `${location}/DOCK`;
 }
 
 /** `Schedule Work Package` link on the To Do List / order-line view. */

@@ -743,6 +743,7 @@ export async function runVendorCodeWriteUp(
     // almost every real line — genuinely missing data (both null) is now
     // the real "flag as error" case, not "no task currently assigned."
     const assignedTasksText = await readAssignedTasksAreaText(page);
+    await closeUnassignedTasksView(page);
     if (isNoTasksAssignedException(assignedTasksText)) {
       // CLAUDE_CODE_PROMPT (vendor 7A9Y2 "shipset" case, Delta 6) — a
       // missing assigned task is NOT a blocker for this case: no abort, no
@@ -797,6 +798,7 @@ export async function runVendorCodeWriteUp(
       await navigateToUnassignedTasksView(page);
       await waitForUnassignedTasksSectionResolved(page);
       const unassignedTasksText = await readUnassignedTasksAreaText(page);
+      await closeUnassignedTasksView(page);
       if (isUnassignedTaskPresent(unassignedTasksText)) {
         // Rows whose task type is administrative (PC / PC-PC / FORECAST /
         // REPL) were never a real block and are filtered out here.
@@ -816,7 +818,7 @@ export async function runVendorCodeWriteUp(
           // Genuine ambiguity. Still stops rather than guessing which task
           // to attach to a real work package — matching Aero Repair, which
           // has always drawn the line here too.
-          await closeUnassignedTasksView(page);
+          //await closeUnassignedTasksView(page);
           return {
             status: 'unassigned_task_present',
             partNumber: candidate.partNumber,
@@ -832,6 +834,8 @@ export async function runVendorCodeWriteUp(
             { vendorCode, partNumber: candidate.partNumber, serialNumber: candidate.serialNumber, task: filtered[0].rowText },
             '[unassigned-task] assigning the single genuine candidate and continuing',
           );
+          await navigateToUnassignedTasksView(page);
+          await waitForUnassignedTasksSectionResolved(page);
           await assignUnassignedTask(page, filtered[0].index);
           await closeUnassignedTasksView(page);
 
@@ -856,10 +860,10 @@ export async function runVendorCodeWriteUp(
           unassignedTaskWasAssigned = true;
           // Falls through into the normal write-up, in the SAME pass.
         } else {
-          await closeUnassignedTasksView(page);
+          //await closeUnassignedTasksView(page);
         }
       } else {
-        await closeUnassignedTasksView(page);
+        //await closeUnassignedTasksView(page);
       }
     }
     // else: isBnFlow && a real task already exists — no detour, no Ad-Hoc
@@ -879,7 +883,7 @@ export async function runVendorCodeWriteUp(
     // normal terminal state would otherwise have been.
     let effectiveTerminalState: TerminalState = resolved.terminalState;
     let doNotShipReason: string | null = null;
-
+    let receivingNotes:string | null;
     let notesText: string;
     if (shipset) {
       // CLAUDE_CODE_PROMPT (vendor 7A9Y2 "shipset" case, Deltas 3 & 4) —
@@ -956,7 +960,7 @@ export async function runVendorCodeWriteUp(
       // below (CLAUDE_CODE_PROMPT, new vendor batch, 2026-08-14).
       if (config.hasPartDetailsStep) {
         await openPartDetailsReceivingNotes(page, candidate.linkText, candidate.partNumber);
-        const receivingNotes = await readPartDetailsReceivingNotes(page);
+        receivingNotes = await readPartDetailsReceivingNotes(page);
         log.info(
           { vendorConfigId: config.id, partNumber: candidate.partNumber, serialNumber: candidate.serialNumber, receivingNotes: receivingNotes ?? null },
           '[vendor-config] part-level receiving notes',
@@ -1041,6 +1045,9 @@ export async function runVendorCodeWriteUp(
       // module entirely and is untouched by this. See
       // chargeToAccount.ts's buildDefaultRepairChargeToAccount for the
       // "default to CR7 if no CR-prefix is present at all" rule.
+      // @ts-ignore
+      if ((receivingNotes?? '').toUpperCase().includes('PARKERCPH')){config.form.chargeToAccountSuffix = 'PARKERCPH'}
+
       chargeToAccountAfter =
         config.form.chargeToAccountSuffix === WARRANTY_TERMINAL_STATE_CHARGE_TO_ACCOUNT_SUFFIX
           ? buildDefaultRepairChargeToAccount(chargeToAccountBefore)
