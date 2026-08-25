@@ -179,3 +179,28 @@ export function startExecute(runId: string, selectedLineIds: string[], env: MxiE
 export function cancelRun(runId: string): Promise<{ ok: true }> {
   return request(`/api/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
 }
+
+export interface MaintenanceRecordsDraftResponse {
+  ok: true
+  subject: string
+  recipients: string[]
+  /** Whether Outlook resolved the DL to a real recipient in the draft. */
+  resolved: boolean
+  mode: 'draft' | 'send'
+}
+
+/**
+ * Drafts the zero-times-and-cycles notification into the analyst's own
+ * Outlook Drafts, via the backend's Outlook COM path.
+ *
+ * Replaces a `mailto:` link, which needed a registered mail handler on the
+ * machine and did nothing at all when there wasn't one. Recipient and
+ * subject are fixed server-side — the client cannot choose them.
+ */
+export function draftMaintenanceRecordsEmail(input: {
+  partNumber: string
+  serialNumber: string
+  usageRows: UsageParmRow[]
+}): Promise<MaintenanceRecordsDraftResponse> {
+  return request('/api/writeups/maintenance-records-draft', { method: 'POST', body: JSON.stringify(input) })
+}

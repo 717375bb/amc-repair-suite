@@ -4,6 +4,21 @@ All notable changes to this project, newest session first. Item numbers refer to
 
 ## 2026-08-25
 
+### Added — zero times-and-cycles drafts now land in Outlook Drafts
+The draft wording already existed but was delivered by a `mailto:` link, which needs a registered mail handler on the machine and did nothing at all when there wasn't one. It now goes through the same Outlook COM path this project already uses for the quote replies.
+
+- **`POST /api/writeups/maintenance-records-draft`** composes the message and saves it to the analyst's own Drafts. **Recipient and subject are fixed server-side** (`DL_PSA_MaintenanceRecords@psaairlines.com`, `Times and Cycles`) — the client cannot choose who this goes to.
+- **One draft per part**, per explicit user choice — the per-line button on each zero-usage exception stays.
+- **The part identity moved into the BODY.** It previously lived only in the subject (`Zero Times & Cycles — PN x / SN y`); with the subject now fixed at "Times and Cycles" for every message, that would have left the records team unable to tell which part was meant. A `PN: … SN: …` line now sits above the usage table.
+- **Draft only.** `MAINTENANCE_RECORDS_MODE` exists and defaults to `draft`; anything other than the exact string `send` also resolves to `draft`, same strictness and same reasoning as `QUOTE_REPLY_MODE` and `MXI_ENV`. Nothing sets it to `send` today — the path exists so it can be switched on deliberately later, per the user's "draft now, add a send toggle later". An internal DL is still a real email that cannot be unsent.
+- **`scripts/create-outlook-mail.ps1` is a separate file from `create-outlook-reply.ps1`**, deliberately. That script replies to an existing thread and can reach external vendors; this one composes a fresh internal message. Keeping them apart leaves the ability to mail an outside party isolated in one small, obvious file.
+- **Plain text, not HTML** — the body carries a tab-separated Usage Parm table, and converting to HTML would collapse the tabs and lose the column alignment.
+- **The failure is visible now.** A `mailto:` that went nowhere looked identical to one that worked; a drafting failure now reports itself in the row and points at the Copy button as the manual fallback. The body is passed to PowerShell as a UTF-8 temp file rather than a command-line argument, since it contains tabs, newlines and a table.
+
+**Verified end to end against real Outlook**, then cleaned up after itself: the draft landed in `Drafts`, `unsent: true`, subject exactly `Times and Cycles`, recipient resolved to `DL_PSA_MaintenanceRecords`, body carrying both the `PN:` line and the Usage Parm table — and the test draft was deleted, leaving nothing in the mailbox.
+
+**10 more unit tests** (30 total): the exact recipient and subject, the full composed body, a REGRESSION test that the part is named in the body, the tab-separated table shape, non-standard usage parameters (`ADGDeployments`), and a safety test that `Send`, `SEND`, `send `, `true`, `1`, `yes` and `''` all resolve to `draft`. The frontend's "Copy draft" fallback was separately verified to produce **byte-identical** text to the backend, by executing the shipped UI source rather than a copy of it.
+
 ### Fixed — the work package rename silently never happened, and was reported as done anyway
 User-reported: "It all worked, only thing it didn't do was change the name of the work package from Repair to Scrap." The flow's own audit trail said it had.
 
