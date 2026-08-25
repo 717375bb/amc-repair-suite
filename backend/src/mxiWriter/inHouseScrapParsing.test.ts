@@ -2,7 +2,12 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { looksLikeDetailsTab, parseCurrentLocation } from './inHouseScrapParsing.js';
+import {
+  looksLikeDetailsTab,
+  parseCurrentLocation,
+  pickWorkPackageNameFieldIndex,
+  toScrapWorkPackageName,
+} from './inHouseScrapParsing.js';
 import { repairLocationCandidates } from './scrapFlowHelpers.js';
 
 /**
@@ -112,5 +117,68 @@ describe('looksLikeDetailsTab', () => {
     // This is precisely what the flow used to do next, and why it blamed
     // the part instead of the tab.
     assert.deepEqual(repairLocationCandidates(parseCurrentLocation(openTab)), []);
+  });
+});
+
+/**
+ * The real work-package name for the reported serial, verbatim from the
+ * production capture (`inhouse-scrap-L903140-*.txt`). Note MXI's own "(1)"
+ * duplicate marker — that has to survive the rename.
+ */
+const REAL_WP_NAME = 'Repair (1) LIFEVEST - CREW CRJ (PN: D21344-195, SN: L903140)';
+
+describe('toScrapWorkPackageName', () => {
+  it('renames the real captured work package', () => {
+    assert.equal(
+      toScrapWorkPackageName(REAL_WP_NAME),
+      'Scrap (1) LIFEVEST - CREW CRJ (PN: D21344-195, SN: L903140)',
+    );
+  });
+
+  it('preserves MXI\'s "(1)" duplicate marker', () => {
+    assert.ok(toScrapWorkPackageName(REAL_WP_NAME).includes('(1)'));
+  });
+
+  it('is idempotent — a re-run never yields "Scrap Scrap"', () => {
+    const once = toScrapWorkPackageName(REAL_WP_NAME);
+    assert.equal(toScrapWorkPackageName(once), once);
+    assert.ok(!/Scrap\s+Scrap/i.test(toScrapWorkPackageName(once)));
+  });
+
+  it('handles a name with no leading verb at all', () => {
+    assert.equal(toScrapWorkPackageName('WIDGET (PN: X, SN: Y)'), 'Scrap WIDGET (PN: X, SN: Y)');
+  });
+});
+
+describe('pickWorkPackageNameFieldIndex', () => {
+  it('finds the field holding the current name', () => {
+    const values = ['', 'SOME-CODE', REAL_WP_NAME, 'a description'];
+    assert.equal(pickWorkPackageNameFieldIndex(values, REAL_WP_NAME), 2);
+  });
+
+  it('tolerates whitespace differences between the link text and the field', () => {
+    const values = ['', '  Repair (1)   LIFEVEST - CREW CRJ (PN: D21344-195, SN: L903140) '];
+    assert.equal(pickWorkPackageNameFieldIndex(values, REAL_WP_NAME), 1);
+  });
+
+  it('falls back to shape when the current name is not known exactly', () => {
+    const values = ['CR7REPAIR', 'Repair WIDGET (PN: A, SN: B)', 'notes here'];
+    assert.equal(pickWorkPackageNameFieldIndex(values, 'something else entirely'), 1);
+  });
+
+  it('does not grab an unrelated populated field', () => {
+    // "CR7REPAIR" starts with no verb and has no (PN: — must not match.
+    assert.equal(pickWorkPackageNameFieldIndex(['CR7REPAIR', 'scrap as NREP'], 'unknown'), -1);
+  });
+
+  it('REGRESSION: returns -1 rather than a wrong guess when nothing matches', () => {
+    // -1 must make the caller FAIL. The bug was skipping the rename
+    // silently and still reporting it as done.
+    assert.equal(pickWorkPackageNameFieldIndex(['', '', ''], REAL_WP_NAME), -1);
+  });
+
+  it('matches an already-renamed package, so a retry still finds the field', () => {
+    const renamed = toScrapWorkPackageName(REAL_WP_NAME);
+    assert.equal(pickWorkPackageNameFieldIndex(['', renamed], renamed), 1);
   });
 });

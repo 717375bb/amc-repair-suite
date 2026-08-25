@@ -4,6 +4,26 @@ All notable changes to this project, newest session first. Item numbers refer to
 
 ## 2026-08-25
 
+### Fixed — the work package rename silently never happened, and was reported as done anyway
+User-reported: "It all worked, only thing it didn't do was change the name of the work package from Repair to Scrap." The flow's own audit trail said it had.
+
+- **The cause**: the rename targeted `#idInput10` — a generated, positional id copied from the discovery recording — written as `if (count > 0) { fill }`. When that id did not match, the fill was **skipped silently**, `OK` was clicked anyway, and `renamed work package to "Scrap …"` was pushed into `stepsTaken` **unconditionally**. Everything downstream (schedule, transfer) then succeeded, so the run looked clean while the package was still called `Repair …`.
+- **The field is now identified by its CONTENT** — it is the input already holding the package's current name — which survives id changes. `#idInput10` is still tried first (it *is* correct when it matches, and it came from the real recording) but is no longer trusted blindly.
+- **Every stage is verified now**: the field must be found, the typed value must read back before `OK` is clicked, and the committed page must actually show the new name. A rename that cannot be confirmed **fails** instead of being reported as done — and if the value does not read back, `OK` is never clicked at all, so the old name is not re-committed under a success message.
+- **The name is built by stripping either leading verb**, so a re-run cannot produce "Scrap Scrap …", and MXI's own duplicate marker survives: the real package `Repair (1) LIFEVEST - CREW CRJ (PN: D21344-195, SN: L903140)` becomes `Scrap (1) LIFEVEST - CREW CRJ (PN: D21344-195, SN: L903140)`. Dropping the `(1)` would stop the renamed package matching the one MXI actually created.
+
+**Unit tests extended to 20** (`npm test`), all against the real captured names:
+
+- `toScrapWorkPackageName` — the real captured package renames correctly, the `(1)` marker survives, applying it twice is idempotent, and a name with no leading verb still works.
+- `pickWorkPackageNameFieldIndex` — finds the field holding the current name, tolerates whitespace differences between the link text and the field, falls back to shape when the exact name is unknown, refuses to grab an unrelated populated field (`CR7REPAIR`), and **returns -1 rather than guessing** when nothing matches, which is what forces the caller to fail.
+
+**End-to-end behaviour verified in a browser** against a realistic Edit Work Package form, with the name field's id varied to simulate MXI generating a different one:
+
+| | field is `#idInput10` | field id differs |
+|---|---|---|
+| old code | renamed | **not renamed, reported as renamed** — the bug |
+| new code | renamed | renamed |
+
 ### Root-caused — MXI remembers the active tab, so the location was read off the wrong one
 Second report of `Could not read a base station from this item's current location ("not found")`. This time it is root-caused from real evidence rather than reasoned at, and covered by unit tests.
 

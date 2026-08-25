@@ -2,7 +2,12 @@ import type { Page } from 'playwright';
 import type { MxiClient } from './mxiClient.js';
 import { clickIfPresent, enterPasswordIfPrompted, pace, repairLocationCandidates } from './scrapFlowHelpers.js';
 import { PART_DETAILS_URL_MARKER } from '../writeUps/shared/partOwnDetails.js';
-import { looksLikeDetailsTab, parseCurrentLocation } from './inHouseScrapParsing.js';
+import {
+  looksLikeDetailsTab,
+  parseCurrentLocation,
+  pickWorkPackageNameFieldIndex,
+  toScrapWorkPackageName,
+} from './inHouseScrapParsing.js';
 import { createLogger } from '../logging/logger.js';
 
 /**
@@ -524,19 +529,114 @@ export async function writeInHouseScrap(
     await page.getByRole('link', { name: 'Edit Work Package' }).click();
     await pace(page);
 
-    const nameField = page.locator('#idInput10');
-    if ((await nameField.count()) > 0) {
-      // .fill() replaces the whole value in one DOM-level set. The
-      // recording pressed ArrowLeft eleven times first, which is what a
-      // human does to clear a masked field; this project has already
-      // established (see selectors.ts's updateEsdField) that .fill() is
-      // both correct and safer than simulated keystrokes here.
-      await nameField.first().fill(`Scrap ${partDescription}`);
-      await pace(page);
+    // REAL BUG FOUND AND FIXED (2026-08-25): the rename silently did not
+    // happen, while the flow still reported that it had.
+    //
+    // It targeted `#idInput10` — a generated, positional id copied from the
+    // discovery recording — as `if (count > 0) { fill }`. When that id did
+    // not match, the fill was skipped, OK was clicked anyway, and
+    // `renamed work package to "Scrap ..."` went into stepsTaken
+    // regardless. The scrap completed with the package still called
+    // "Repair ...", which is exactly what was reported: "It all worked,
+    // only thing it didn't do was change the name."
+    //
+    // Now the field is identified by its CONTENT (it is the input already
+    // holding the package's current name), which survives id changes, and
+    // every stage is verified: the field must be found, the typed value
+    // must read back, and the committed page must actually show the new
+    // name. A rename that cannot be confirmed FAILS rather than being
+    // reported as done.
+    const newWorkPackageName = toScrapWorkPackageName(wpText);
+
+    const textInputs = page.locator('input[type="text" i], input:not([type])');
+    const inputCount = await textInputs.count();
+    const values: string[] = [];
+    for (let i = 0; i < inputCount; i++) {
+      values.push(await textInputs.nth(i).inputValue().catch(() => ''));
     }
+    // `#idInput10` stays the first choice — it IS right when it matches,
+    // and it came from the real recording — but it is no longer trusted
+    // blindly.
+    const byRecordedId = page.locator('#idInput10');
+    const recordedIdValue =
+      (await byRecordedId.count()) > 0 ? await byRecordedId.first().inputValue().catch(() => null) : null;
+    const useRecordedId =
+      recordedIdValue !== null &&
+      pickWorkPackageNameFieldIndex([recordedIdValue], wpText) === 0;
+
+    const fieldIndex = useRecordedId ? -1 : pickWorkPackageNameFieldIndex(values, wpText);
+    const nameField = useRecordedId ? byRecordedId.first() : fieldIndex >= 0 ? textInputs.nth(fieldIndex) : null;
+
+    if (!nameField) {
+      log.warn(
+        { serialNumber, url: page.url(), inputCount, values: values.slice(0, 20), currentName: wpText },
+        '[in-house scrap] could not identify the work package name field',
+      );
+      return {
+        status: 'failed',
+        stepsTaken,
+        locationUsed,
+        partDescription,
+        errorMessage:
+          `Could not find the work package name field on the Edit Work Package page for serial ${serialNumber} ` +
+          `(url "${page.url()}", ${inputCount} text input(s) present). The rename was NOT made and nothing else ` +
+          `was changed.`,
+      };
+    }
+
+    // .fill() replaces the whole value in one DOM-level set. The recording
+    // pressed ArrowLeft eleven times first, which is what a human does to
+    // clear a field; this project already established (see selectors.ts's
+    // updateEsdField) that .fill() is both correct and safer here.
+    await nameField.fill(newWorkPackageName);
+    await pace(page);
+
+    const typedBack = await nameField.inputValue();
+    if (typedBack.replace(/\s+/g, ' ').trim() !== newWorkPackageName.replace(/\s+/g, ' ').trim()) {
+      // Do NOT click OK on a field that did not take the value — that
+      // would commit the old name and report a rename that never happened.
+      return {
+        status: 'failed',
+        stepsTaken,
+        locationUsed,
+        partDescription,
+        errorMessage:
+          `Typed the new work package name for serial ${serialNumber} but the field read back as "${typedBack}" ` +
+          `instead of "${newWorkPackageName}". Nothing was submitted and nothing was changed.`,
+      };
+    }
+
     await page.getByRole('link', { name: 'OK' }).click();
     await pace(page);
-    stepsTaken.push(`renamed work package to "Scrap ${partDescription}"`);
+
+    // Independent confirmation that the rename actually committed — the
+    // same discipline writeEsdAndNotes uses. A click is not evidence.
+    let renameConfirmed = false;
+    try {
+      await page.waitForFunction(
+        (expected) => (document.body?.innerText ?? '').replace(/\s+/g, ' ').includes(expected),
+        newWorkPackageName.replace(/\s+/g, ' ').trim(),
+        { timeout: TAB_NAV_TIMEOUT_MS, polling: 250 },
+      );
+      renameConfirmed = true;
+    } catch {
+      /* reported below */
+    }
+
+    if (!renameConfirmed) {
+      return {
+        status: 'failed',
+        stepsTaken,
+        locationUsed,
+        partDescription,
+        errorMessage:
+          `Submitted the rename to "${newWorkPackageName}" for serial ${serialNumber}, but the page never showed ` +
+          `that name afterwards (url "${page.url()}"). The work package may still be named "${wpText}" — check it ` +
+          `by hand before scheduling or transferring this part.`,
+      };
+    }
+
+    stepsTaken.push(`renamed work package to "${newWorkPackageName}"`);
 
     // --- Schedule to the repair shop ---
     await page.getByRole('link', { name: 'Schedule Work Package' }).click();

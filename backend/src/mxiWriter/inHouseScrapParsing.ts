@@ -56,3 +56,48 @@ export function parseCurrentLocation(bodyText: string): string {
 export function looksLikeDetailsTab(bodyText: string): boolean {
   return LABELLED_LOCATION.test(bodyText);
 }
+
+/**
+ * Builds the Scrap name for a work package currently named something else.
+ *
+ * Strips EITHER leading verb so a re-run cannot produce "Scrap Scrap ...".
+ * Everything after it is preserved verbatim, including MXI's own duplicate
+ * marker: a real package seen live is
+ * `Repair (1) LIFEVEST - CREW CRJ (PN: D21344-195, SN: L903140)`, and the
+ * "(1)" has to survive or the renamed package stops matching the one MXI
+ * actually created.
+ */
+export function toScrapWorkPackageName(currentWorkPackageName: string): string {
+  const description = currentWorkPackageName.replace(/^(Repair|Scrap)\s+/i, '').trim();
+  return `Scrap ${description}`;
+}
+
+/**
+ * Picks which text input on the Edit Work Package page is the NAME field,
+ * given every input's current value.
+ *
+ * REAL BUG THIS EXISTS FOR (2026-08-25): the rename targeted `#idInput10`
+ * — a generated, positional id taken from the discovery recording — and
+ * was written as `if (count > 0) { fill }`. When that id did not match,
+ * the fill was skipped silently, OK was clicked anyway, and the flow still
+ * pushed `renamed work package to "Scrap ..."` into its own audit trail.
+ * The scrap completed with the package still called "Repair ...".
+ *
+ * Identifying the field by its CONTENT is stable across id changes: the
+ * name field is the one already holding the package's current name.
+ *
+ * Returns the index into `values`, or -1 if no field can be identified —
+ * which the caller must treat as a failure, never as "skip the rename".
+ */
+export function pickWorkPackageNameFieldIndex(values: string[], currentName: string): number {
+  const norm = (s: string): string => s.replace(/\s+/g, ' ').trim();
+  const target = norm(currentName);
+
+  const exact = values.findIndex((v) => norm(v) === target && target.length > 0);
+  if (exact >= 0) return exact;
+
+  // Fall back to shape rather than to position: a work-package name starts
+  // with the verb and carries the "(PN: ..., SN: ...)" segment. Requiring
+  // both keeps it from grabbing some other populated field on the form.
+  return values.findIndex((v) => /^(Repair|Scrap)\s+/i.test(norm(v)) && /\(PN:/i.test(v));
+}
