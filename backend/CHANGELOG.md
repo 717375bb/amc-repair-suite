@@ -4,6 +4,18 @@ All notable changes to this project, newest session first. Item numbers refer to
 
 ## 2026-08-25
 
+### Still occurring — first diagnosis was wrong; instrumented to settle it
+The user re-ran and got the same result on the same 8 lines. **The first fix was not the cause**, and that is now established rather than assumed.
+
+- **The re-run disproves the slow-navigation theory.** Per-line time went from ~14s to ~33s, so the new waiting is definitely running (the fix shipped at 12:16 UTC, the run was 12:31). But **no forced capture was written**, which only happens when `timedOut === false` — meaning the writer *did* reach `InventoryDetails.jsp` and `#idTableCurrentUsage` genuinely was not in the DOM. The element is really missing from the page being read; the open question is now **which page that is**.
+- **The previous fix is still correct and stays.** It closed a real hole — a missing table element returning instantly as "confirmed absent" from wherever the browser happened to be — it just was not this symptom's cause. The extra ~19s per line it now spends is real navigation wait that used to be skipped entirely.
+- **A second blind spot, and the reason this needed another round trip**: when the table element was missing, the diagnostic capture recorded `(no table element found)` for both its content fields and nothing else. The one case that most needs the surrounding page recorded none of it. `describeMissingTable()` now dumps, on any absent verdict: whether a "Current Usage" heading exists at all, the text and outerHTML around it, **every `<table>` id on the page**, and the first 6000 characters of page text — which is the only way to tell "this part genuinely has no usage" apart from "we opened a different inventory record than we meant to".
+- **Captures now fire on every absent verdict**, not just on a timeout. That verdict is rare (44 in the entire history before this) and is exactly the one that was disputed, so it can no longer be reached without the page being recorded.
+- **`usage_table_absent_unexpected` now persists its serial number.** It was logged but never written to `filled_fields_json`, so the audit DB could not answer the first question the outcome raises — was this actually a BN line, which legitimately has no usage table?
+- **New `npm run diag:usage-table -- <vendorCode> [serialNumber] [--env production]`** reproduces one line's part-details open exactly as the write-up does and dumps the page (text, HTML, screenshot) in about a minute, instead of needing a full batch run to produce evidence. Read-only with respect to MXI data: it ticks the row's inventory checkbox and vendor radio, which is what opening part details requires, and clicks Close afterwards — nothing is filled, submitted, authorized, issued or docked.
+
+**What is known vs. not**: known — the writer reaches the part-details page and the usage table element is absent there; Aero Repair reads the same table fine through the same shared function minutes later; `D98C08-607` had a real table captured on 2026-08-18 and reports absent now. Not yet known — whether the page being read is the intended inventory record. `openPartOwnDetails` clicks the serial-number link **page-wide rather than scoped to the row it just ticked**, which on a vendor-code grid (many parts, many rows) is a materially weaker match than on Aero Repair's single-part grid. That is the leading hypothesis and the probe above is built to confirm or kill it.
+
 ### Fixed — "Expected to find times and cycles but no table was there" on every non-BN line
 User-reported: the shared vendor-code write-up returned this for all non-BN parts, and "the table is there, definitely." It was. The read was giving a confident wrong answer.
 

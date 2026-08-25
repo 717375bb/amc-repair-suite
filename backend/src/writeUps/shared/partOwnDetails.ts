@@ -323,8 +323,12 @@ export async function readPartOwnDetails(
     tableHtml: usageTableResult.tableHtml,
     tableInnerText: usageTableResult.tableInnerText,
     parsedRows: usageTableResult.rows,
-    // A failed read always leaves evidence, gate or no gate.
-    force: timedOut,
+    // Always leave evidence for the two cases that are hard to explain
+    // afterwards: a failed read, and ANY conclusion that the table is
+    // absent. The latter is rare (44 in the whole history before today)
+    // and is exactly the verdict that was disputed on 2026-08-25, so it
+    // must never again be reached without the page being recorded.
+    force: timedOut || !usageTableResult.tableFound,
   });
 
   if (timedOut) {
