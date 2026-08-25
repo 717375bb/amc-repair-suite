@@ -5,6 +5,7 @@
   "type": "module",
   "description": "Phase 1 ESD inference engine for PSA Airlines component repair open orders.",
   "scripts": {
+    "diag:inhouse-scrap": "tsx src/cli/inHouseScrapProbeCli.ts",
     "diag:usage-table": "tsx src/cli/usageTableProbeCli.ts",
     "diag:api-reachability": "tsx src/cli/apiReachabilityCli.ts",
     "cli": "tsx src/cli/cli.ts",

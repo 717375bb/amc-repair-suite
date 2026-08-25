@@ -290,8 +290,52 @@ export async function writeInHouseScrap(
     await clickIfPresent(page, page.getByRole('link', { name: 'Open', exact: true }));
     await clickIfPresent(page, page.getByRole('link', { name: 'Open Work Packages' }));
 
+    // A CLOSED page is its own distinct failure and must be reported as
+    // one. Reported live (2026-08-25): "it's completely shutting down the
+    // MXI page after clicking the Open Work Package role and saying
+    // there's no work package". Those are two different things, and
+    // everything below reads the page — on a closed page each of those
+    // reads throws something opaque, which is how a shut-down browser ends
+    // up disguised as "no work package".
+    if (page.isClosed()) {
+      return {
+        status: 'failed',
+        stepsTaken,
+        locationUsed,
+        partDescription,
+        errorMessage:
+          `The MXI page closed while opening the work packages for serial ${serialNumber}. This is a browser/session ` +
+          `failure, NOT a missing work package — nothing was read and nothing was changed.`,
+      };
+    }
+
     const checkBox = page.locator('input[name="aCheck"]');
     if ((await checkBox.count()) === 0) {
+      // Evidence first — a disputed "no work package" verdict was
+      // previously unfalsifiable after the fact. Best-effort throughout;
+      // capture must never replace the real result.
+      try {
+        const seen = await page.evaluate(() => ({
+          url: window.location.href,
+          checkboxNames: Array.from(document.querySelectorAll('input[type="CHECKBOX" i]'))
+            .map((i) => i.getAttribute('name') || '(no name)')
+            .slice(0, 30),
+          pnLinks: Array.from(document.querySelectorAll('a'))
+            .map((a) => (a.textContent ?? '').replace(/\s+/g, ' ').trim())
+            .filter((t) => /\(PN:/i.test(t))
+            .slice(0, 10),
+          mentionsWorkPackage: (document.body?.innerText ?? '').includes('Work Package'),
+        }));
+        log.warn(
+          { serialNumber, ...seen, pagesInContext: page.context().pages().length },
+          '[in-house scrap] no aCheck checkbox found — recording what the page actually showed',
+        );
+      } catch (probeErr) {
+        log.warn(
+          { serialNumber, error: probeErr instanceof Error ? probeErr.message : String(probeErr) },
+          '[in-house scrap] could not even read the page while reporting a missing work package',
+        );
+      }
       // Per user direction a missing work package should be created. That
       // is a genuinely different flow (the existing Create Work Package
       // path) and has not been proven from this entry point, so it stops
