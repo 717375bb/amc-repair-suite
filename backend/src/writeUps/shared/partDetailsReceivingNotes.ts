@@ -40,13 +40,14 @@ export async function openPartDetailsReceivingNotes(page: Page, linkText: string
   await pace(page);
 }
 
-const RECEIVING_NOTES_SELECTOR = '#idContentRow_IdGrpReceivingNotes > td';
+//const RECEIVING_NOTES_SELECTOR = '#idContentRow_IdGrpReceivingNotes > td';
 
 /** Null if the box genuinely isn't present on this part's Details view — never guessed/fabricated. */
 export async function readPartDetailsReceivingNotes(page: Page): Promise<string | null> {
-  const locator = page.locator(RECEIVING_NOTES_SELECTOR);
-  if ((await locator.count()) === 0) return null;
-  return (await locator.first().innerText()).trim();
+  return (await page.locator('#idCellPartNote').innerText()).trim();
+  //const locator = page.locator(RECEIVING_NOTES_SELECTOR);
+  //if ((await locator.count()) === 0) return null;
+  //return (await locator.first().innerText()).trim();
 }
 
 /** Real from the recording: a single "OK" (not "Close") dismisses this specific view. */
