@@ -4,6 +4,26 @@ All notable changes to this project, newest session first. Item numbers refer to
 
 ## 2026-08-25
 
+### Root-caused by live probe: the table was there and all-zero; the read was early
+`npm run diag:usage-table -- 0t1y4 --env production` settled it. On `820CE02Y01 / 403` — one of the eight failing lines — the probe reported `#idTableCurrentUsage present: true` with real rows, `CYCLES 0 0 0` and `HOURS 0 0 0`, at `DAY/USSTG`. The page was fine and the correct record; the writer was reading it too early. Those values classify as `present_all_zero`, which on a USSTG line routes to `order_created_do_not_ship` — exactly what these same parts did on 2026-08-24.
+
+Three distinct defects, found in order:
+
+1. **A missing table element returned instantly as a confirmed-absent table** (fixed earlier the same day). Genuinely wrong, but not this symptom's cause.
+2. **The URL check alone was too weak — a bug introduced by that first fix.** `page.url()` flips the moment a navigation COMMITS, while a server-rendered JSP body arrives much later. The two confirmation polls, 250ms apart, both landed inside that gap, so the writer declared "absent" roughly **500ms after the URL changed** on a page taking seconds to render. Absent now additionally requires `document.readyState === 'complete'` (nothing further is coming for a server-rendered page) **and** the page to actually contain the requested part number and serial — which simultaneously proves real content rendered and rules out having landed on a different inventory record. A genuine BN line satisfies all of this on arrival, so its fast path is preserved.
+3. **Probing mid-navigation threw instead of re-polling.** `page.evaluate` against a page that is navigating raises "Execution context was destroyed", and that propagated out as a hard failure. This one was **already in the audit trail** — it quarantined a real Aero Repair line (`5013640`) at 11:56:55 the same morning. A destroyed context is not a fault here; it is the ordinary consequence of the very navigation being waited for, so it is now treated as "not ready yet" and the next poll looks again. Any other error is still re-thrown.
+
+**Verified** by replaying the real shipped `readPartOwnDetails` in a browser against a served page that reproduces the actual race — URL commits immediately, body arrives late — using the live table markup from the probe above:
+
+| case | result |
+|---|---|
+| body arrives 6s after URL commits | `rows=2 CYCLES=0/0/0 HOURS=0/0/0` (6.6s) |
+| body arrives 15s after URL commits | `rows=2 CYCLES=0/0/0 HOURS=0/0/0` (15.5s) |
+| body arrives immediately (control) | `rows=2` (425ms) |
+| genuine BN line, truly no table (control) | `rows=0, tableFound=false` (622ms — still fast, not stalled) |
+
+Before this change, all three race cases threw or returned a false "absent".
+
 ### Still occurring — first diagnosis was wrong; instrumented to settle it
 The user re-ran and got the same result on the same 8 lines. **The first fix was not the cause**, and that is now established rather than assumed.
 

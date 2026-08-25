@@ -95,6 +95,19 @@ interface UsageTableProbeResult {
   tableHtml: string | null;
   tableInnerText: string | null;
   rows: UsageParmRow[];
+  /**
+   * `document.readyState === 'complete'`. The part-details page is a
+   * server-rendered JSP, so once the document is complete no further
+   * content is coming — which is what makes a missing table believable
+   * rather than merely not-yet-arrived.
+   */
+  documentComplete: boolean;
+  /**
+   * The page's own text contains BOTH the requested part number and serial.
+   * Proves two things at once: the document has rendered real content, and
+   * it is the record we asked for rather than a different one.
+   */
+  identityMatches: boolean;
 }
 
 /**
@@ -115,11 +128,45 @@ interface UsageTableProbeResult {
  * shows (CYCLES, HOURS, or something else entirely, e.g. ADGDeployments,
  * ADGHours, IDGDisconectTime) is captured identically.
  */
-async function probeUsageTable(page: Page): Promise<UsageTableProbeResult> {
+const NOT_READY: UsageTableProbeResult = {
+  tableFound: false,
+  tableHtml: null,
+  tableInnerText: null,
+  rows: [],
+  documentComplete: false,
+  identityMatches: false,
+};
+
+async function probeUsageTable(page: Page, partNumber: string, serialNumber: string): Promise<UsageTableProbeResult> {
+  try {
+    return await probeUsageTableOnce(page, partNumber, serialNumber);
+  } catch (err) {
+    // REAL BUG FOUND AND FIXED (2026-08-25): probing a page mid-navigation
+    // throws "Execution context was destroyed, most likely because of a
+    // navigation", and that propagated all the way out as a hard failure.
+    // It is already in the audit trail — it quarantined a real Aero Repair
+    // line (5013640) at 11:56:55 the same morning.
+    //
+    // A destroyed context is not an error condition here, it is the
+    // ordinary consequence of the very navigation this loop is waiting
+    // for. Treated as "not ready yet" so the next poll simply looks again.
+    // Anything else is re-thrown — a genuine fault must not be swallowed.
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes('Execution context was destroyed') || message.includes('navigating and changing the content')) {
+      return NOT_READY;
+    }
+    throw err;
+  }
+}
+
+async function probeUsageTableOnce(page: Page, partNumber: string, serialNumber: string): Promise<UsageTableProbeResult> {
   return page.evaluate(
-    ({ selector, numberPatternSource }: { selector: string; numberPatternSource: string }) => {
+    ({ selector, numberPatternSource, pn, sn }: { selector: string; numberPatternSource: string; pn: string; sn: string }) => {
+      const bodyText = document.body?.innerText ?? '';
+      const documentComplete = document.readyState === 'complete';
+      const identityMatches = bodyText.includes(pn) && bodyText.includes(sn);
       const table = document.querySelector(selector);
-      if (!table) return { tableFound: false, tableHtml: null, tableInnerText: null, rows: [] };
+      if (!table) return { tableFound: false, tableHtml: null, tableInnerText: null, rows: [], documentComplete, identityMatches };
 
       const numberPattern = new RegExp(numberPatternSource);
       const tbody = table.querySelector('tbody') ?? table;
@@ -141,9 +188,11 @@ async function probeUsageTable(page: Page): Promise<UsageTableProbeResult> {
         tableHtml: (table as HTMLElement).outerHTML,
         tableInnerText: (table as HTMLElement).innerText,
         rows,
+        documentComplete,
+        identityMatches,
       };
     },
-    { selector: USAGE_TABLE_SELECTOR, numberPatternSource: NUMBER_PATTERN_SOURCE },
+    { selector: USAGE_TABLE_SELECTOR, numberPatternSource: NUMBER_PATTERN_SOURCE, pn: partNumber, sn: serialNumber },
   );
 }
 
@@ -178,10 +227,15 @@ async function probeUsageTable(page: Page): Promise<UsageTableProbeResult> {
  */
 async function waitForUsageTableResolved(
   page: Page,
+  partNumber: string,
+  serialNumber: string,
 ): Promise<{ result: UsageTableProbeResult; timedOut: boolean; reachedDetailsPage: boolean; lastUrl: string }> {
   const start = Date.now();
   const deadline = start + USAGE_TABLE_WAIT_TIMEOUT_MS;
-  let last: UsageTableProbeResult = { tableFound: false, tableHtml: null, tableInnerText: null, rows: [] };
+  let last: UsageTableProbeResult = {
+    tableFound: false, tableHtml: null, tableInnerText: null, rows: [],
+    documentComplete: false, identityMatches: false,
+  };
   let reachedDetailsPage = false;
   // "Absent" must be observed twice in a row before it is believed, so a
   // page caught mid-render can never be recorded as a confirmed-empty one.
@@ -193,7 +247,7 @@ async function waitForUsageTableResolved(
     const onDetailsPage = lastUrl.includes(PART_DETAILS_URL_MARKER);
     if (onDetailsPage) reachedDetailsPage = true;
 
-    last = await probeUsageTable(page);
+    last = await probeUsageTable(page, partNumber, serialNumber);
 
     // Real data rows are self-evidently definitive wherever we are.
     if (last.rows.length > 0) {
@@ -228,12 +282,32 @@ async function waitForUsageTableResolved(
     // assumed: all 523 captured usage-table reads in data/diagnostics —
     // the 479 successful ones AND all 44 genuine BN "table absent" ones —
     // are on InventoryDetails.jsp.
-    if (onDetailsPage && !last.tableFound) {
+    // SECOND REAL BUG, introduced by the first pass at this fix and caught
+    // by a live read-only probe on 2026-08-25 (`npm run diag:usage-table`).
+    // The probe showed `#idTableCurrentUsage` PRESENT on the very line the
+    // writer had just called absent, with real rows (CYCLES/HOURS, all
+    // zero) — so the page was fine and the read was early.
+    //
+    // The URL alone is not enough: `page.url()` flips the moment a
+    // navigation COMMITS, while the server-rendered page body arrives much
+    // later. Two polls 250ms apart both landed inside that gap, so the
+    // writer declared "absent" ~500ms after the URL changed on a page that
+    // takes many seconds to render.
+    //
+    // Absent now additionally requires the document to be COMPLETE (a
+    // server-rendered JSP has nothing further coming once it is) and the
+    // page to actually show the requested part number and serial — which
+    // also rules out having landed on a different inventory record. A
+    // genuine BN line satisfies all of this immediately on arrival, so its
+    // fast path is preserved.
+    const absentIsBelievable =
+      onDetailsPage && !last.tableFound && last.documentComplete && last.identityMatches;
+    if (absentIsBelievable) {
       consecutiveConfirmedAbsent++;
       if (consecutiveConfirmedAbsent >= 2) {
         log.debug(
           { durationMs: Date.now() - start, url: lastUrl },
-          '[grid-wait] usage-table confirmed absent on the part-details page (BN-override case)',
+          '[grid-wait] usage-table confirmed absent on a fully-rendered part-details page (BN-override case)',
         );
         return { result: last, timedOut: false, reachedDetailsPage, lastUrl };
       }
@@ -245,7 +319,7 @@ async function waitForUsageTableResolved(
   }
 
   log.debug(
-    { timeoutMs: USAGE_TABLE_WAIT_TIMEOUT_MS, reachedDetailsPage, url: lastUrl, tableFound: last.tableFound },
+    { timeoutMs: USAGE_TABLE_WAIT_TIMEOUT_MS, reachedDetailsPage, url: lastUrl, tableFound: last.tableFound, documentComplete: last.documentComplete, identityMatches: last.identityMatches },
     '[grid-wait] usage-table did NOT resolve — refusing to treat this as a genuine empty/absent table',
   );
   return { result: last, timedOut: true, reachedDetailsPage, lastUrl };
@@ -303,7 +377,7 @@ export async function readPartOwnDetails(
   // Doing it in this order also keeps ONE 30s budget for the whole read
   // rather than two stacked ones.
   const { result: usageTableResult, timedOut, reachedDetailsPage, lastUrl } =
-    await waitForUsageTableResolved(page);
+    await waitForUsageTableResolved(page, partNumber, serialNumber);
 
   // CLAUDE_CODE_PROMPT_USAGE_TABLE_BUG.md, required change 1 — evidence
   // capture on EVERY usage-table read, success AND failure alike — so this
