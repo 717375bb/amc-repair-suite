@@ -121,10 +121,6 @@ export function transformReturnToLocation(currentLocation: string): string {
     case 'PHL':
       location = "CLT";
       break;
-    case 'SAV':
-    case 'PNS':
-      location = 'GSP';
-      break;
   }
   return `${location}/DOCK`;
 }
