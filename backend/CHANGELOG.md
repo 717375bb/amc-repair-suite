@@ -2,6 +2,154 @@
 
 All notable changes to this project, newest session first. Item numbers refer to the numbered work list agreed with the user (e.g. `[#4a]`).
 
+## 2026-08-25
+
+### Added — zero times-and-cycles drafts now land in Outlook Drafts
+The draft wording already existed but was delivered by a `mailto:` link, which needs a registered mail handler on the machine and did nothing at all when there wasn't one. It now goes through the same Outlook COM path this project already uses for the quote replies.
+
+- **`POST /api/writeups/maintenance-records-draft`** composes the message and saves it to the analyst's own Drafts. **Recipient and subject are fixed server-side** (`DL_PSA_MaintenanceRecords@psaairlines.com`, `Times and Cycles`) — the client cannot choose who this goes to.
+- **One draft per part**, per explicit user choice — the per-line button on each zero-usage exception stays.
+- **The part identity moved into the BODY.** It previously lived only in the subject (`Zero Times & Cycles — PN x / SN y`); with the subject now fixed at "Times and Cycles" for every message, that would have left the records team unable to tell which part was meant. A `PN: … SN: …` line now sits above the usage table.
+- **Draft only.** `MAINTENANCE_RECORDS_MODE` exists and defaults to `draft`; anything other than the exact string `send` also resolves to `draft`, same strictness and same reasoning as `QUOTE_REPLY_MODE` and `MXI_ENV`. Nothing sets it to `send` today — the path exists so it can be switched on deliberately later, per the user's "draft now, add a send toggle later". An internal DL is still a real email that cannot be unsent.
+- **`scripts/create-outlook-mail.ps1` is a separate file from `create-outlook-reply.ps1`**, deliberately. That script replies to an existing thread and can reach external vendors; this one composes a fresh internal message. Keeping them apart leaves the ability to mail an outside party isolated in one small, obvious file.
+- **Plain text, not HTML** — the body carries a tab-separated Usage Parm table, and converting to HTML would collapse the tabs and lose the column alignment.
+- **The failure is visible now.** A `mailto:` that went nowhere looked identical to one that worked; a drafting failure now reports itself in the row and points at the Copy button as the manual fallback. The body is passed to PowerShell as a UTF-8 temp file rather than a command-line argument, since it contains tabs, newlines and a table.
+
+**Verified end to end against real Outlook**, then cleaned up after itself: the draft landed in `Drafts`, `unsent: true`, subject exactly `Times and Cycles`, recipient resolved to `DL_PSA_MaintenanceRecords`, body carrying both the `PN:` line and the Usage Parm table — and the test draft was deleted, leaving nothing in the mailbox.
+
+**10 more unit tests** (30 total): the exact recipient and subject, the full composed body, a REGRESSION test that the part is named in the body, the tab-separated table shape, non-standard usage parameters (`ADGDeployments`), and a safety test that `Send`, `SEND`, `send `, `true`, `1`, `yes` and `''` all resolve to `draft`. The frontend's "Copy draft" fallback was separately verified to produce **byte-identical** text to the backend, by executing the shipped UI source rather than a copy of it.
+
+### Fixed — the work package rename silently never happened, and was reported as done anyway
+User-reported: "It all worked, only thing it didn't do was change the name of the work package from Repair to Scrap." The flow's own audit trail said it had.
+
+- **The cause**: the rename targeted `#idInput10` — a generated, positional id copied from the discovery recording — written as `if (count > 0) { fill }`. When that id did not match, the fill was **skipped silently**, `OK` was clicked anyway, and `renamed work package to "Scrap …"` was pushed into `stepsTaken` **unconditionally**. Everything downstream (schedule, transfer) then succeeded, so the run looked clean while the package was still called `Repair …`.
+- **The field is now identified by its CONTENT** — it is the input already holding the package's current name — which survives id changes. `#idInput10` is still tried first (it *is* correct when it matches, and it came from the real recording) but is no longer trusted blindly.
+- **Every stage is verified now**: the field must be found, the typed value must read back before `OK` is clicked, and the committed page must actually show the new name. A rename that cannot be confirmed **fails** instead of being reported as done — and if the value does not read back, `OK` is never clicked at all, so the old name is not re-committed under a success message.
+- **The name is built by stripping either leading verb**, so a re-run cannot produce "Scrap Scrap …", and MXI's own duplicate marker survives: the real package `Repair (1) LIFEVEST - CREW CRJ (PN: D21344-195, SN: L903140)` becomes `Scrap (1) LIFEVEST - CREW CRJ (PN: D21344-195, SN: L903140)`. Dropping the `(1)` would stop the renamed package matching the one MXI actually created.
+
+**Unit tests extended to 20** (`npm test`), all against the real captured names:
+
+- `toScrapWorkPackageName` — the real captured package renames correctly, the `(1)` marker survives, applying it twice is idempotent, and a name with no leading verb still works.
+- `pickWorkPackageNameFieldIndex` — finds the field holding the current name, tolerates whitespace differences between the link text and the field, falls back to shape when the exact name is unknown, refuses to grab an unrelated populated field (`CR7REPAIR`), and **returns -1 rather than guessing** when nothing matches, which is what forces the caller to fail.
+
+**End-to-end behaviour verified in a browser** against a realistic Edit Work Package form, with the name field's id varied to simulate MXI generating a different one:
+
+| | field is `#idInput10` | field id differs |
+|---|---|---|
+| old code | renamed | **not renamed, reported as renamed** — the bug |
+| new code | renamed | renamed |
+
+### Root-caused — MXI remembers the active tab, so the location was read off the wrong one
+Second report of `Could not read a base station from this item's current location ("not found")`. This time it is root-caused from real evidence rather than reasoned at, and covered by unit tests.
+
+- **The cause**: MXI remembers the **active tab per session**. This flow itself ends on `aTab=Open.OpenChecks` while reading an item's work packages, so the *next* time an item is opened MXI restores that tab — and the Details content, the only place the item's location is stated, is never rendered at all.
+- **Proven from the real capture of the exact serial**: `data/diagnostics/inhouse-scrap-L903140-*.txt`, taken on `aTab=Open.OpenChecks`, contains **no `Location:` label and no station-shaped token anywhere on the page**. The only occurrence of the word is a "Work Location" *column header*. The flow read that page, found nothing, and blamed the part.
+- **This is also the real explanation for the earlier "first serial succeeds, every one after it fails" report** — the first serial left the session sitting on the Open tab. The popup leak fixed earlier was real, but it was not that symptom's cause.
+- **Fixed** by detecting that the Details tab is not active and selecting it explicitly, then waiting for the `Location:` label itself to appear rather than for a fixed delay. The failure message now includes the URL actually being read.
+- **The loose fallback is gone.** The parser no longer falls back to the first bare `XXX/YYY` token anywhere in the body. That fallback is actively dangerous: against a real search-results grid it returns `PNS/STORE` — **another item's location** — which would resolve to a confident set of repair shops for the wrong site and transfer a real part to the wrong place. Failing visibly is correct here.
+
+### Added — unit tests (`npm test`)
+The project had no test framework. Now uses Node's built-in runner via tsx, so no new dependency.
+
+- Parsing is split into a pure `inHouseScrapParsing.ts` (`parseCurrentLocation`, `looksLikeDetailsTab`) so it is testable with no browser. This parse has now been the reported bug twice; a regression should surface in milliseconds, not in a live scrap run.
+- 10 tests over real production text: the genuine Details-tab rendering of `820CE02Y01/403`, label/value split across lines, mixed-case locations (`PNS/Repair1`), deeper segments (`CLT/USSTG/RACK1`), and end-to-end resolution to `DAY/REPAIR2/SHOP2`.
+- Two named **REGRESSION** tests pin the two ways this has actually failed: another item's location off a grid, and a "Work Location" column header being mistaken for the field.
+- One test loads the **real L903140 capture from disk** and asserts it does *not* look like the Details tab and yields no location. It throws a pointed error naming the regeneration command if the fixture is ever missing, rather than silently passing.
+- **The tests were verified to actually fail on the old behaviour**, not merely to pass on the new: reintroducing the bare-token fallback fails the grid regression test with `actual: 'PNS/STORE'`.
+
+**Flow-level fix verified separately** in a browser against a served page that simulates MXI restoring the previous tab:
+
+| session's restored tab | old behaviour | new behaviour |
+|---|---|---|
+| Details (fresh session) | `DAY/USSTG` → `DAY/REPAIR2/SHOP2` | same |
+| `Open.OpenChecks` (after a prior serial) | **"not found" — the reported bug** | `DAY/USSTG` → `DAY/REPAIR2/SHOP2` |
+
+### Fixed — "no open work package" when the tab click silently never happened
+User-reported: the in-house scrap says there's no work package when there plainly is one. Root-caused with `npm run diag:inhouse-scrap`, then reproduced and fixed.
+
+- **The probe passed, and that was the clue.** Run read-only against `L903140` in production it reached `aTab=Open.OpenChecks`, found `input[name="aCheck"]` count `1`, listed the real package (`Repair (1) LIFEVEST - CREW CRJ (PN: D21344-195, SN: L903140)`), and recorded **no** close, crash, popup or dialog. So navigation was sound and the browser never shut down — the difference had to be timing.
+- **Root cause**: the two tab clicks were fire-and-forget. `clickIfPresent` waits only **6s** for a link to become *visible*, returns `false` if it doesn't, and **both return values were discarded**. On a slow page the tab was never switched, the flow then read the *Details* tab, found no `aCheck` there, and blamed the part: "No open work package for serial X." This suite has already measured MXI part-detail pages taking **~19s** under load (see the usage-table work in `partOwnDetails.ts`) — which is exactly why a fast read-only probe won the race every time while the real batch lost it.
+- **Fixed by confirming the tab actually changed**, with a retry, instead of clicking and hoping. The URL markers are real, captured from production by the probe: `&aTab=Open` after the first click, `&aTab=Open.OpenChecks` after the second. Timeout raised from 6s to 30s, matching the standard used for every other genuine render wait here.
+- **"Could not get to the list" is no longer reported as "the list is empty."** Failing to reach the Open Work Packages view now returns its own error naming the URL actually reached, and says plainly that it proves nothing about whether a work package exists.
+- **Same class swept through the rest of the flow**: the `Details` tab click gets the same 30s treatment, and the two optional post-transfer `OK` clicks get 15s and now **record which of them fired** in `stepsTaken`. Those are legitimately conditional, but at 6s a slow render reads as "absent" — and a skipped required OK would leave the transfer incomplete while the run reported clean success.
+- A closed page is also now its own distinct failure (added alongside the probe), so a browser/session failure can never again be reported as a missing work package.
+
+**Verified** by replaying the real `clickIfPresent` against a served page whose tab links appear after a delay:
+
+| | tabs render fast | tabs render after 12s |
+|---|---|---|
+| old code | work package found | **"No open work package for serial X"** — the reported bug |
+| new code | work package found | work package found |
+
+### Fixed — a work package named anything but "Repair …" got a duplicate created over it
+User-reported: the write-up creates a work package even when one already exists, because presence was decided by name format. Per explicit direction — **any value at all in the USSTG line's Work Package column now means a work package exists and the line proceeds**.
+
+- **Presence is read from the Work Package COLUMN, not from the link's name.** It was matched against `/^Repair .*\(PN: …, SN: …\)$/`, so a package named anything else was invisible **twice over**: the no-work-package scanner saw an empty slot and created a duplicate on top of the real one, and the candidate matcher didn't recognise it either, so the line couldn't have been written up regardless. The most obvious case is a package this suite itself renames to `Scrap …` during an in-house scrap, but nothing guarantees `Repair ` is the only prefix MXI or an analyst ever uses.
+- **The column is located from the header, not a fixed index**, so adding or removing columns via Options > Display Columns cannot silently shift it. Confirmed against the real captured grid (`data/diagnostics/grid-wait-21844-*.html`): the top header row carries "Work Package" as its own `colspan=1` cell, every cell before it is `colspan=1` too, and the matching data cell is index 6 — empty on that genuinely no-work-package row. If the header cannot be located at all it falls back to the link test rather than risk creating a duplicate off an unreadable row.
+- **`REPAIR_LINK_PATTERN` broadened** to require only the `(PN: X, SN|BN: Y)` suffix, so such a line is actually picked up and written up rather than silently skipped. Verified this still matches nothing else on a real row: Part No, Serial No, Owner, Location and the vendor name are all rejected.
+- **Aero Repair carries the same change** — its four `^Repair `-anchored patterns (two candidate searches, its own no-work-package scanner, and `navigateToPartGridAndGetCandidates`) no longer require the prefix. The part-number anchor is kept, since that is the safety property that actually matters on a part-filtered grid.
+- **`findNoWorkPackageRowForSerial` now delegates to `findNoWorkPackageRowsOnGrid`** instead of keeping a second DOM walk with its own copy of the rule, so the two engines cannot drift on what counts as "has a work package" again.
+
+**A latent runtime bug was caught before shipping.** The first version factored the column lookup into `const` arrow helpers inside `page.evaluate`. tsx/esbuild compiles this file with `keepNames`, which wraps such a function in a `__name(…)` helper that does not exist inside the page — it died with `ReferenceError: __name is not defined`. It would have failed on the first live run. The lookup is now straight-line code with no named helpers, and the constraint is documented in place.
+
+**Verified** by running the real shipped scanner against the real captured production grid, with the Work Package cell patched to hold each name in turn: empty → still correctly reported as no work package (creation still happens where it is genuinely needed); `Repair …`, `Scrap …`, and `WO-12345 whatever the analyst typed` → all three report a work package exists and proceed.
+
+### Fixed — in-house scrap only worked on the first serial in a batch
+User-reported: running several serials scraps the first successfully and fails every one after it, always with `Could not read a base station from this item's current location ("not found")`, and **the same serial succeeds when it is first in the list**. Nothing was wrong with the parts — state was carrying between iterations, and the read was landing on the wrong page.
+
+- **Neither location-picker popup was ever closed.** `schedulePopup` and `transferPopup` were each opened via `page.waitForEvent('popup')`, used, and abandoned — so a multi-serial run accumulated **two orphaned MXI pages per part**, each still holding whatever server-side transaction state MXI attaches to a picker. Both are now tracked in outer scope and closed in a `finally`, so they are released on every exit path including the several early returns between them that previously abandoned an open popup.
+- **Every serial now starts from a clean browser context.** `page.goto()` resets the main page but does nothing about extra pages left open by the previous serial. The reset loop closes anything that is not the client's own page — directly addressing "there's simply an issue with it moving into the next part."
+- **The location read now confirms which page it is on.** The old wait polled the whole body for a bare `XXX/YYY` token and then **swallowed its own timeout**. That failed two ways: it was satisfied by any page carrying a location-shaped token — including the search-results grid — and when it genuinely timed out it fell through silently and reported `"not found"`, which reads like the item has no location rather than "we were never on the item's page". Replaced with the same positive page-identity check proven for the usage-table read: the URL must be the inventory details page, `document.readyState` must be `complete`, and the page must show **this** serial (which also rules out landing on a different item). Failing that now names the URL actually landed on.
+- **The location is now anchored on the page's own `Location:` label**, with the bare pattern kept only as a fallback. This is not cosmetic: verification showed that on a search-results grid the old pattern parses `PNS/STORE` — **another item's location** — which would have produced confident candidates for the wrong site. Failing visibly is much better than transferring a real part to the wrong shop.
+
+**Verified** against real page text (taken verbatim from the live `diag:usage-table` probe) served in a browser: a real details page is recognised and parses `DAY/USSTG` → `["DAY/REPAIR2/SHOP2", "DAY/REPAIR1/SHOP1", "DAY/REPAIR"]`; a search-results grid carrying both the serial and other items' locations is correctly **rejected** (the old wait accepted it and would have read `PNS/STORE`); and the stray-page reset takes a context from 3 pages back to 1.
+
+The other scrap paths (`writeVendorScrap`, `writeScrapPriceLines`, `convertToExchange`) were checked for the same popup pattern and have none.
+
+### Root-caused by live probe: the table was there and all-zero; the read was early
+`npm run diag:usage-table -- 0t1y4 --env production` settled it. On `820CE02Y01 / 403` — one of the eight failing lines — the probe reported `#idTableCurrentUsage present: true` with real rows, `CYCLES 0 0 0` and `HOURS 0 0 0`, at `DAY/USSTG`. The page was fine and the correct record; the writer was reading it too early. Those values classify as `present_all_zero`, which on a USSTG line routes to `order_created_do_not_ship` — exactly what these same parts did on 2026-08-24.
+
+Three distinct defects, found in order:
+
+1. **A missing table element returned instantly as a confirmed-absent table** (fixed earlier the same day). Genuinely wrong, but not this symptom's cause.
+2. **The URL check alone was too weak — a bug introduced by that first fix.** `page.url()` flips the moment a navigation COMMITS, while a server-rendered JSP body arrives much later. The two confirmation polls, 250ms apart, both landed inside that gap, so the writer declared "absent" roughly **500ms after the URL changed** on a page taking seconds to render. Absent now additionally requires `document.readyState === 'complete'` (nothing further is coming for a server-rendered page) **and** the page to actually contain the requested part number and serial — which simultaneously proves real content rendered and rules out having landed on a different inventory record. A genuine BN line satisfies all of this on arrival, so its fast path is preserved.
+3. **Probing mid-navigation threw instead of re-polling.** `page.evaluate` against a page that is navigating raises "Execution context was destroyed", and that propagated out as a hard failure. This one was **already in the audit trail** — it quarantined a real Aero Repair line (`5013640`) at 11:56:55 the same morning. A destroyed context is not a fault here; it is the ordinary consequence of the very navigation being waited for, so it is now treated as "not ready yet" and the next poll looks again. Any other error is still re-thrown.
+
+**Verified** by replaying the real shipped `readPartOwnDetails` in a browser against a served page that reproduces the actual race — URL commits immediately, body arrives late — using the live table markup from the probe above:
+
+| case | result |
+|---|---|
+| body arrives 6s after URL commits | `rows=2 CYCLES=0/0/0 HOURS=0/0/0` (6.6s) |
+| body arrives 15s after URL commits | `rows=2 CYCLES=0/0/0 HOURS=0/0/0` (15.5s) |
+| body arrives immediately (control) | `rows=2` (425ms) |
+| genuine BN line, truly no table (control) | `rows=0, tableFound=false` (622ms — still fast, not stalled) |
+
+Before this change, all three race cases threw or returned a false "absent".
+
+### Still occurring — first diagnosis was wrong; instrumented to settle it
+The user re-ran and got the same result on the same 8 lines. **The first fix was not the cause**, and that is now established rather than assumed.
+
+- **The re-run disproves the slow-navigation theory.** Per-line time went from ~14s to ~33s, so the new waiting is definitely running (the fix shipped at 12:16 UTC, the run was 12:31). But **no forced capture was written**, which only happens when `timedOut === false` — meaning the writer *did* reach `InventoryDetails.jsp` and `#idTableCurrentUsage` genuinely was not in the DOM. The element is really missing from the page being read; the open question is now **which page that is**.
+- **The previous fix is still correct and stays.** It closed a real hole — a missing table element returning instantly as "confirmed absent" from wherever the browser happened to be — it just was not this symptom's cause. The extra ~19s per line it now spends is real navigation wait that used to be skipped entirely.
+- **A second blind spot, and the reason this needed another round trip**: when the table element was missing, the diagnostic capture recorded `(no table element found)` for both its content fields and nothing else. The one case that most needs the surrounding page recorded none of it. `describeMissingTable()` now dumps, on any absent verdict: whether a "Current Usage" heading exists at all, the text and outerHTML around it, **every `<table>` id on the page**, and the first 6000 characters of page text — which is the only way to tell "this part genuinely has no usage" apart from "we opened a different inventory record than we meant to".
+- **Captures now fire on every absent verdict**, not just on a timeout. That verdict is rare (44 in the entire history before this) and is exactly the one that was disputed, so it can no longer be reached without the page being recorded.
+- **`usage_table_absent_unexpected` now persists its serial number.** It was logged but never written to `filled_fields_json`, so the audit DB could not answer the first question the outcome raises — was this actually a BN line, which legitimately has no usage table?
+- **New `npm run diag:usage-table -- <vendorCode> [serialNumber] [--env production]`** reproduces one line's part-details open exactly as the write-up does and dumps the page (text, HTML, screenshot) in about a minute, instead of needing a full batch run to produce evidence. Read-only with respect to MXI data: it ticks the row's inventory checkbox and vendor radio, which is what opening part details requires, and clicks Close afterwards — nothing is filled, submitted, authorized, issued or docked.
+
+**What is known vs. not**: known — the writer reaches the part-details page and the usage table element is absent there; Aero Repair reads the same table fine through the same shared function minutes later; `D98C08-607` had a real table captured on 2026-08-18 and reports absent now. Not yet known — whether the page being read is the intended inventory record. `openPartOwnDetails` clicks the serial-number link **page-wide rather than scoped to the row it just ticked**, which on a vendor-code grid (many parts, many rows) is a materially weaker match than on Aero Repair's single-part grid. That is the leading hypothesis and the probe above is built to confirm or kill it.
+
+### Fixed — "Expected to find times and cycles but no table was there" on every non-BN line
+User-reported: the shared vendor-code write-up returned this for all non-BN parts, and "the table is there, definitely." It was. The read was giving a confident wrong answer.
+
+- **Root cause**: `waitForUsageTableResolved`'s exit condition was `if (!last.tableFound || last.rows.length > 0) return`. A **missing** `#idTableCurrentUsage` element returned **immediately** as a *confirmed-absent* table, having waited zero milliseconds. That is only correct for a BN-override line, which genuinely has no Usage Parm table. For every other line it silently converted "the details page hasn't finished loading" into "this part has no times and cycles."
+- **The upstream guard couldn't catch it either.** `readPartOwnDetails` waited on `waitForBodyTextIncludes(serialNumber)` — but the **grid** we just clicked from shows the same serial, so that wait passes while the browser is still on the old page. A click that hadn't navigated yet sailed straight through to a probe of the wrong page. This is the same failure the function's own docstring already described for a different symptom in August: a wait satisfied by something that renders earlier than the thing being read.
+- **Pinned to that path by timing, not by guesswork**: each of the 8 failing lines took **~14s end to end**, not the 30s+ a real row-parsing timeout costs. The instant-return branch was the only way to be that fast.
+- **Corroborating evidence**: `usage_table_absent_unexpected` had **never once occurred** before this run in the whole audit history. In the same 3-minute window the only vendor-code line that succeeded was `903-1341 / BN 397158` — a BN line, which skips the table entirely — and Aero Repair read the table fine through the same shared function at 11:47:56. So this was never a global MXI change.
+- **The fix**: "absent" is now only believed once we are positively confirmed to be **on the part-details page**, and the table has been missing on **two consecutive polls**. The URL marker is evidence-backed rather than assumed — all 523 captured usage-table reads in `data/diagnostics` are on `InventoryDetails.jsp`, the 479 successful ones and all 44 genuine BN table-absent ones alike.
+- **Read order changed too**: the usage-table wait now runs **first**, because it is the only step that positively establishes which page we are on. `rawText` (which feeds `partDescription`) is read after it, so a slow navigation can no longer have the description parsed off the grid. This also keeps **one** 30s budget for the whole read instead of two stacked ones.
+- **The failure is now self-diagnosing.** Two genuinely different causes had been collapsing into one vague outcome; they are now separate errors — `part_details_page_not_reached` (names the URL actually landed on, and states plainly that the table's absence proves nothing) versus `usage_table_rows_empty` (table present, rows didn't parse). A failed read also **always** writes a diagnostic capture now, bypassing the `DIAGNOSTICS_CAPTURE` gate: the eight failures today left no evidence behind at all precisely because that gate was off, which is what made this slow to diagnose. Successful reads stay opt-in.
+- **Verified** by replaying the real shipped `readPartOwnDetails` in a real browser against four served pages: details page + real table → 2 rows in 101ms; details page + genuinely no table (BN) → absent in 362ms, unchanged behaviour; **still on the grid (the reported bug)** → now refuses with `part_details_page_not_reached` instead of inventing "absent"; and a details page that arrives 3s late → waits and reads the real rows, where the old code returned "absent" instantly. The forced capture was confirmed written, with the URL and `reachedDetailsPage=false` in its header.
+
 ## 2026-08-24
 
 ### Added — API reachability diagnostic; connection errors now name their real cause

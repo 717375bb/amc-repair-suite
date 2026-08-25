@@ -5,6 +5,8 @@
   "type": "module",
   "description": "Phase 1 ESD inference engine for PSA Airlines component repair open orders.",
   "scripts": {
+    "diag:inhouse-scrap": "tsx src/cli/inHouseScrapProbeCli.ts",
+    "diag:usage-table": "tsx src/cli/usageTableProbeCli.ts",
     "diag:api-reachability": "tsx src/cli/apiReachabilityCli.ts",
     "cli": "tsx src/cli/cli.ts",
     "server": "tsx src/server.ts",
@@ -34,6 +36,7 @@
     "rotate-encryption-key": "tsx src/security/rotateEncryptionKey.ts",
     "verify-gitignore": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-gitignore.ps1",
     "build": "tsc -b",
+    "test": "tsx --test src/**/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

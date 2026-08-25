@@ -33,56 +33,30 @@ async function pace(page: Page): Promise<void> {
  *     these `type` attributes in UPPERCASE.
  */
 /**
- * Addition 1 (Create Work Package) — locates the SPECIFIC no-work-package
- * row (exact partNumber + serialNumber) on the currently-rendered filtered
- * grid. Mirrors batchDiscovery.ts's findNoWorkPackageLinesForPart's own
- * confirmed DOM-walk technique (every real per-line row, with or without a
- * work package, has its own Part No and Serial No as two consecutive plain
- * `<a>` links) but scoped to one exact serial, and additionally returns the
- * row's own full accessible-name text — used to build a
- * `page.getByRole('row', ...)` locator, the same real selector confirmed
- * live in discovery-work-package-recording.ts — plus the composed
- * part-description text (everything in the row's own text before the Part
- * No token) needed for the Work Package name. Returns null if this exact
- * line currently has a work package (a real "Repair ..." link exists for
- * it) or isn't present on this grid at all — a definitive read either way,
- * never guessed.
+ * Aero Repair's per-serial variant: the one no-work-package row matching an
+ * exact part number + serial, or null.
+ *
+ * REWRITTEN 2026-08-25 to delegate to findNoWorkPackageRowsOnGrid rather
+ * than keep a second DOM walk. It previously carried its own copy of the
+ * "Repair ... (PN: ..., SN: ...)" link-text test, which is exactly the
+ * check the user's report was about — a work package named anything else
+ * read as no work package at all, and a duplicate got created over it.
+ * Sharing one implementation means the two engines cannot drift on what
+ * counts as "has a work package" again.
+ *
+ * Both callers run against the same To Do List grid (Aero Repair filters
+ * it by part number, the vendor-code family by vendor code), so the row
+ * shape and header are identical — confirmed against the real captured
+ * grid cited in this module's header docstring.
  */
 export async function findNoWorkPackageRowForSerial(
   page: Page,
   partNumber: string,
   serialNumber: string,
 ): Promise<{ inventoryToken: string; partDescription: string } | null> {
-  return page.evaluate(
-    ({ pn, sn }: { pn: string; sn: string }) => {
-      const repairLinkRe = new RegExp(`^Repair .*\\(PN: ${pn.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&')}, SN: [^)]+\\)$`);
-      const trs = Array.from(document.querySelectorAll('tr'));
-      for (const tr of trs) {
-        const text = (tr.textContent ?? '').replace(/\s+/g, ' ').trim();
-        if (!text.includes('USSTG')) continue;
-        if (text.includes('Options...')) continue; // admin/wrapper row, not a real line
-
-        const linkTexts = Array.from(tr.querySelectorAll('a')).map((a) => (a.textContent ?? '').trim());
-        const pnIdx = linkTexts.indexOf(pn);
-        if (pnIdx === -1) continue; // not this part number's own row
-
-        const rowSerial = linkTexts[pnIdx + 1];
-        if (rowSerial !== sn) continue; // not this specific serial
-
-        const hasRepairLink = linkTexts.some((t) => repairLinkRe.test(t));
-        if (hasRepairLink) continue; // already has a work package — not this case
-
-        const inventoryToken = tr.querySelector('input[name="aInventory"]')?.getAttribute('value');
-        if (!inventoryToken) continue; // no real inventory control -> not a real line
-
-        const pnPos = text.indexOf(pn);
-        const partDescription = pnPos > 0 ? text.slice(0, pnPos).trim() : '';
-        return { inventoryToken, partDescription };
-      }
-      return null;
-    },
-    { pn: partNumber, sn: serialNumber },
-  );
+  const rows = await findNoWorkPackageRowsOnGrid(page);
+  const hit = rows.find((r) => r.partNumber === partNumber && r.serialNumber === serialNumber);
+  return hit ? { inventoryToken: hit.inventoryToken, partDescription: hit.partDescription } : null;
 }
 
 /**
@@ -233,8 +207,20 @@ export interface NoWorkPackageRow {
  */
 export async function findNoWorkPackageRowsOnGrid(page: Page): Promise<NoWorkPackageRow[]> {
   return page.evaluate(() => {
-    const repairLinkRe = /^Repair .*\(PN: .*, SN: [^)]+\)$/;
+    // Fallback only, for a grid whose Work Package header cannot be
+    // located. Not anchored on a "Repair " prefix either — the whole point
+    // of this change is that the package's NAME does not decide whether it
+    // exists.
+    const repairLinkRe = /\(PN: .*, SN: [^)]+\)$/;
     const out: { partNumber: string; serialNumber: string; inventoryToken: string; partDescription: string }[] = [];
+
+    // NOTE — the Work Package lookup below is written as straight-line code
+    // with NO named helper functions, on purpose. tsx/esbuild compiles this
+    // file with keepNames, which wraps a const-assigned arrow in a
+    // `__name(...)` helper; that helper does not exist inside the page, so
+    // factoring this out dies at runtime with "__name is not defined".
+    // Caught by running this against the real captured grid before it
+    // shipped — it would have failed on the first live run.
 
     for (const tr of Array.from(document.querySelectorAll('tr'))) {
       // Guard 1 — exactly one inventory checkbox means exactly one real line.
@@ -248,7 +234,55 @@ export async function findNoWorkPackageRowsOnGrid(page: Page): Promise<NoWorkPac
       if (!text.includes('USSTG')) continue; // Guard 3 — never auto-create for a DOCK row.
 
       const linkTexts = Array.from(tr.querySelectorAll('a')).map((a) => (a.textContent ?? '').trim());
-      if (linkTexts.some((t) => repairLinkRe.test(t))) continue; // already has a work package.
+
+      // --- Does this row's Work Package column hold ANY value? ---
+      //
+      // REAL BUG FOUND AND FIXED (2026-08-25), per explicit user direction:
+      // "if, in the USSTG line, there is any value in the work package at
+      // all, it is assumed that a work package does exist and the script
+      // proceeds." Presence used to be decided by matching the LINK TEXT
+      // against /^Repair .*\(PN: ..., SN: ...\)$/, so a package named
+      // anything else — most obviously one this suite itself renames to
+      // "Scrap ..." during an in-house scrap — read as no work package at
+      // all, and a duplicate got created on top of a real one.
+      //
+      // The column is located from the HEADER, not a fixed index, so
+      // adding or removing columns via Options > Display Columns cannot
+      // silently shift it. Confirmed against the real captured grid
+      // (data/diagnostics/grid-wait-21844-*.html): the top header row
+      // carries "Work Package" as its own colspan=1 cell, every cell
+      // before it is colspan=1 too, and the matching data cell is index 6
+      // — empty (&nbsp;) on that genuinely no-work-package row.
+      let wpCell: string | null = null;
+      const table = tr.closest('table');
+      const headerRow = table ? table.querySelector('tr') : null;
+      if (headerRow && headerRow !== tr) {
+        let column = 0;
+        let target = -1;
+        for (const cell of Array.from(headerRow.querySelectorAll(':scope > td, :scope > th'))) {
+          const headerText = (cell.textContent ?? '').replace(/ /g, ' ').replace(/\s+/g, ' ').trim();
+          if (headerText === 'Work Package') {
+            target = column;
+            break;
+          }
+          column += Number.parseInt(cell.getAttribute('colspan') ?? '1', 10) || 1;
+        }
+        if (target >= 0) {
+          const cells = Array.from(tr.querySelectorAll(':scope > td, :scope > th'));
+          if (target < cells.length) {
+            wpCell = (cells[target].textContent ?? '').replace(/ /g, ' ').replace(/\s+/g, ' ').trim();
+          }
+        }
+      }
+
+      if (wpCell === null) {
+        // Column not locatable on this grid — fall back to the old
+        // link-text test rather than risk creating a duplicate work
+        // package off an unreadable row.
+        if (linkTexts.some((t) => repairLinkRe.test(t))) continue;
+      } else if (wpCell !== '') {
+        continue; // ANY value means a work package exists. This is the fix.
+      }
 
       const partNumber = linkTexts[0];
       const serialNumber = linkTexts[1];

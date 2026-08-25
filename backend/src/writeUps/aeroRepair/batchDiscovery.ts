@@ -91,7 +91,7 @@ async function findCandidateLinesForPart(
     return [];
   }
 
-  const repairLinkPattern = new RegExp(`^Repair .*\\(PN: ${escapeRegExp(partNumber)}, SN: [^)]+\\)$`);
+  const repairLinkPattern = new RegExp(`\\(PN: ${escapeRegExp(partNumber)}, SN: [^)]+\\)$`);
   const repairLinks = page.getByRole('link', { name: repairLinkPattern });
   const count = await repairLinks.count();
 
@@ -173,7 +173,7 @@ async function verifyLineStillEligibleOnce(
     return false;
   }
 
-  const repairLinkPattern = new RegExp(`^Repair .*\\(PN: ${escapeRegExp(partNumber)}, SN: [^)]+\\)$`);
+  const repairLinkPattern = new RegExp(`\\(PN: ${escapeRegExp(partNumber)}, SN: [^)]+\\)$`);
   const repairLinks = page.getByRole('link', { name: repairLinkPattern });
   const count = await repairLinks.count();
 
@@ -382,7 +382,7 @@ export async function findNoWorkPackageLinesForPart(
 
   const rows = await page.evaluate(
     ({ pn }: { pn: string }) => {
-      const repairLinkRe = new RegExp(`^Repair .*\\(PN: ${pn.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&')}, SN: [^)]+\\)$`);
+      const repairLinkRe = new RegExp(`\\(PN: ${pn.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&')}, SN: [^)]+\\)$`);
       const trs = Array.from(document.querySelectorAll('tr'));
       const found: { serialNumber: string; stationCode: string; note: string }[] = [];
 

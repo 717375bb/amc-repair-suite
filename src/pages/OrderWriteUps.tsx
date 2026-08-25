@@ -9,6 +9,7 @@ import {
   getVendors,
   startDiscovery,
   startExecute,
+  draftMaintenanceRecordsEmail,
   type CraGroupEntry,
   type DiscoveredLineSummary,
   type MxiEnv,
@@ -164,26 +165,65 @@ function statusVisual(status: RunLogEvent['status'] | DiscoveredLineSummary['sta
 // codebase (composeNotesForNormalLine), not a new format.
 // ---------------------------------------------------------------------------
 const MAINTENANCE_RECORDS_EMAIL = 'DL_PSA_MaintenanceRecords@psaairlines.com'
+// Fixed by explicit user direction: every one of these carries this exact
+// subject. Mirrors MAINTENANCE_RECORDS_SUBJECT in maintenanceRecordsDraft.ts.
+const MAINTENANCE_RECORDS_SUBJECT = 'Times and Cycles'
 
+/**
+ * Kept ONLY for the "Copy draft" fallback button. The real draft is
+ * composed server-side by maintenanceRecordsDraft.ts, which is the single
+ * source of truth for wording, recipient and subject — this must stay in
+ * step with it, and the backend's unit tests cover that wording.
+ *
+ * Two changes from the mailto: era, both per explicit user direction:
+ * the subject is now always "Times and Cycles", and because of that the
+ * part identity moved INTO the body. It used to live only in the subject,
+ * so a fixed subject would have left the records team unable to tell which
+ * part was meant.
+ */
 function buildMaintenanceRecordsEmailDraft(event: RunLogEvent): { subject: string; body: string } {
-  const subject = `Zero Times & Cycles — PN ${event.partNumber} / SN ${event.serialNumber}`
-  const tableHeader = 'Usage Parm\tTSN\tTSO\tTSI'
   const tableRows = (event.usageRows ?? []).map((row) => `${row.label}\t${row.tsn}\t${row.tso}\t${row.tsi}`)
   const body = [
     'Good morning Maintenance Records team!',
     '',
     'This part is showing with zero times and cycles. Can you please have this corrected? Thank you!',
-    tableHeader,
+    '',
+    `PN: ${event.partNumber}    SN: ${event.serialNumber}`,
+    'Usage Parm\tTSN\tTSO\tTSI',
     ...tableRows,
   ].join('\n')
-  return { subject, body }
+  return { subject: MAINTENANCE_RECORDS_SUBJECT, body }
 }
 
 function LogRow({ event }: { event: RunLogEvent }) {
   const [showDetail, setShowDetail] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [draftState, setDraftState] = useState<'idle' | 'drafting' | 'drafted'>('idle')
+  const [draftError, setDraftError] = useState<string | null>(null)
   const { icon: Icon, className, border } = statusVisual(event.status)
   const showEmailDraft = event.exceptionType === 'zero_usage' && !!event.usageRows?.length
+
+  // Creates the draft in the analyst's own Outlook Drafts via the backend.
+  // Nothing is sent — the send path exists server-side but is off, and the
+  // analyst reviews and sends every message themselves.
+  const handleDraft = async () => {
+    setDraftError(null)
+    setDraftState('drafting')
+    try {
+      await draftMaintenanceRecordsEmail({
+        partNumber: event.partNumber,
+        serialNumber: event.serialNumber,
+        usageRows: event.usageRows ?? [],
+      })
+      setDraftState('drafted')
+    } catch (err) {
+      // Report it rather than silently reverting to idle — the whole point
+      // of moving off mailto: was that a failure used to be invisible. The
+      // Copy button next to this stays available as the manual path.
+      setDraftState('idle')
+      setDraftError(err instanceof Error ? err.message : 'Could not create the Outlook draft.')
+    }
+  }
 
   const handleCopy = async () => {
     const { body } = buildMaintenanceRecordsEmailDraft(event)
@@ -212,16 +252,20 @@ function LogRow({ event }: { event: RunLogEvent }) {
         <div className="flex shrink-0 items-center gap-3">
           {showEmailDraft && (
             <>
-              <a
-                href={(() => {
-                  const { subject, body } = buildMaintenanceRecordsEmailDraft(event)
-                  return `mailto:${MAINTENANCE_RECORDS_EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
-                })()}
-                className="flex items-center gap-1 text-xs text-accent hover:underline"
+              <button
+                type="button"
+                onClick={handleDraft}
+                disabled={draftState === 'drafting'}
+                className="flex items-center gap-1 text-xs text-accent hover:underline disabled:cursor-not-allowed disabled:opacity-60"
+                title={`Creates a draft to ${MAINTENANCE_RECORDS_EMAIL} in your Outlook Drafts. Nothing is sent.`}
               >
                 <Mail size={13} />
-                Email Maintenance Records
-              </a>
+                {draftState === 'drafting'
+                  ? 'Drafting…'
+                  : draftState === 'drafted'
+                    ? 'Draft created in Outlook'
+                    : 'Draft to Maintenance Records'}
+              </button>
               <button type="button" onClick={handleCopy} className="flex items-center gap-1 text-xs text-accent hover:underline">
                 <ClipboardCopy size={13} />
                 {copied ? 'Copied!' : 'Copy draft'}
@@ -237,6 +281,12 @@ function LogRow({ event }: { event: RunLogEvent }) {
       </div>
       {showDetail && event.detail && (
         <pre className="mt-2 whitespace-pre-wrap rounded bg-bg p-2.5 text-xs text-muted">{event.detail}</pre>
+      )}
+      {draftError && (
+        <p className="mt-2 text-xs text-danger">
+          Couldn&apos;t create the Outlook draft: {draftError} Use &quot;Copy draft&quot; and paste it into a new
+          email to {MAINTENANCE_RECORDS_EMAIL} instead.
+        </p>
       )}
     </div>
   )

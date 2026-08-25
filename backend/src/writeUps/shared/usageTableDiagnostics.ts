@@ -36,9 +36,18 @@ export async function captureUsageTableDiagnostics(
     tableHtml: string | null;
     tableInnerText: string | null;
     parsedRows: UsageParmRowLike[];
+    /**
+     * Bypasses the DIAGNOSTICS_CAPTURE gate. Set on a FAILED read only.
+     * The 2026-08-25 "the table is there, definitely" report was slow to
+     * diagnose precisely because captures were gated off and the eight
+     * failures left no evidence behind at all. Failures are rare and are
+     * exactly the case worth the disk, so they now always capture; routine
+     * successful reads stay opt-in as before.
+     */
+    force?: boolean;
   },
 ): Promise<void> {
-  if (process.env.DIAGNOSTICS_CAPTURE !== 'true') {
+  if (!context.force && process.env.DIAGNOSTICS_CAPTURE !== 'true') {
     return;
   }
   try {
@@ -68,6 +77,12 @@ export async function captureUsageTableDiagnostics(
       '',
       '=== Full HTML dump of the table element and its parent container ===',
       context.tableHtml ?? '(no table element found)',
+      // When the table element is MISSING, the two sections above say only
+      // "(no table element found)" and the capture explains nothing — which
+      // is exactly the hole hit on 2026-08-25, when eight lines reported an
+      // absent table on a page the user could see it on. A missing table is
+      // precisely the case that needs the surrounding page, so dump it.
+      ...(context.tableHtml === null ? await describeMissingTable(page) : []),
     ].join('\n');
 
     await fs.writeFile(textPath, report, 'utf-8');
@@ -80,5 +95,67 @@ export async function captureUsageTableDiagnostics(
       { errorMessage: err instanceof Error ? err.message : String(err) },
       '[usage-table-diagnostics] Failed to capture evidence (non-fatal, continuing)',
     );
+  }
+}
+
+/**
+ * Evidence for the case the capture was blindest to: the usage table
+ * element is not on the page at all. Answers, in order, the questions that
+ * actually distinguish the possible causes:
+ *   - is a "Current Usage" heading present but its table missing (a page
+ *     that renders the section empty for this record), or is the heading
+ *     absent too (we are on the wrong page or the wrong record entirely)?
+ *   - which inventory record is this page actually showing? A page-wide
+ *     click on a serial-number link can land on a DIFFERENT record than the
+ *     row that was checked, and the page's own PN/SN is the only way to
+ *     tell that apart from a genuinely usage-less part.
+ *   - what tables DO exist, by id, so a renamed element is obvious at a
+ *     glance rather than requiring another round trip.
+ */
+async function describeMissingTable(page: Page): Promise<string[]> {
+  try {
+    const probe = await page.evaluate(() => {
+      const bodyText = document.body?.innerText ?? '';
+      const headingIdx = bodyText.indexOf('Current Usage');
+      const tableIds = Array.from(document.querySelectorAll('table'))
+        .map((t) => t.id || '(no id)')
+        .slice(0, 60);
+      // The section around the heading, if the page has one at all.
+      let currentUsageSection: string | null = null;
+      for (const el of Array.from(document.querySelectorAll('td, div, table'))) {
+        const text = (el as HTMLElement).innerText ?? '';
+        if (text.trimStart().startsWith('Current Usage') && text.length < 4000) {
+          currentUsageSection = (el as HTMLElement).outerHTML.slice(0, 4000);
+          break;
+        }
+      }
+      return {
+        hasCurrentUsageHeading: headingIdx >= 0,
+        aroundHeading: headingIdx >= 0 ? bodyText.slice(headingIdx, headingIdx + 600) : null,
+        currentUsageSection,
+        tableIds,
+        bodyText: bodyText.slice(0, 6000),
+      };
+    });
+
+    return [
+      '',
+      '=== WHY WAS THE TABLE MISSING? (auto-captured — see describeMissingTable) ===',
+      `"Current Usage" heading present on the page: ${probe.hasCurrentUsageHeading}`,
+      '',
+      '--- page text starting at the "Current Usage" heading ---',
+      probe.aroundHeading ?? '(heading not present anywhere on this page)',
+      '',
+      '--- outerHTML of the element containing that heading ---',
+      probe.currentUsageSection ?? '(no such element)',
+      '',
+      `--- every <table> id on the page (${probe.tableIds.length} shown) ---`,
+      probe.tableIds.join(', '),
+      '',
+      '--- first 6000 chars of the page text (which record is this really?) ---',
+      probe.bodyText,
+    ];
+  } catch (err) {
+    return ['', `=== missing-table probe failed: ${err instanceof Error ? err.message : String(err)} ===`];
   }
 }

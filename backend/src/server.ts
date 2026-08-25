@@ -31,6 +31,7 @@ import {
   peekInvoicePriceFile,
 } from './api/invoicePriceWriter/ingestion.js';
 import { registerAuthRoutes, requireSession, type AuthedRequest } from './api/authRoutes.js';
+import { createMaintenanceRecordsDraft } from './writeUps/shared/maintenanceRecordsDraft.js';
 import { getMxiCredentialForUser } from './auth/authService.js';
 import { getOptionalSecret, getSecretProvider } from './security/secretProvider.js';
 import { createLogger } from './logging/logger.js';
@@ -239,6 +240,71 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
   // CLAUDE_CODE_PROMPT (cancel button) — cancels whichever job (discovery
   // or execute) this runId refers to, at whatever point it's currently at.
   // See jobManager.ts's cancelJob() docstring for the real stop mechanism.
+  /**
+   * Drafts the zero-times-and-cycles notification to Maintenance Records
+   * into the analyst's own Outlook Drafts.
+   *
+   * Replaces a `mailto:` link, which depended on the machine having a
+   * registered mail handler and, in a browser, silently did nothing when
+   * it did not. Outlook COM is the mechanism this project already uses and
+   * has proven for the quote replies.
+   *
+   * Recipient and subject are FIXED server-side (see
+   * maintenanceRecordsDraft.ts) — the client cannot choose who this goes
+   * to. Draft only: nothing leaves the mailbox.
+   */
+  app.post('/api/writeups/maintenance-records-draft', requireSession, async (req, res) => {
+    const { partNumber, serialNumber, usageRows } = (req.body ?? {}) as {
+      partNumber?: unknown;
+      serialNumber?: unknown;
+      usageRows?: unknown;
+    };
+
+    if (typeof partNumber !== 'string' || !partNumber.trim()) {
+      res.status(400).json({ error: 'partNumber is required.' });
+      return;
+    }
+    if (typeof serialNumber !== 'string' || !serialNumber.trim()) {
+      res.status(400).json({ error: 'serialNumber is required.' });
+      return;
+    }
+    if (!Array.isArray(usageRows) || usageRows.length === 0) {
+      res.status(400).json({ error: 'usageRows is required and must not be empty.' });
+      return;
+    }
+
+    // Normalize to strings rather than trusting the shape off the wire —
+    // these land verbatim in a message a human sends to another team.
+    const rows = usageRows.map((row) => {
+      const r = (row ?? {}) as Record<string, unknown>;
+      return {
+        label: String(r.label ?? ''),
+        tsn: String(r.tsn ?? ''),
+        tso: String(r.tso ?? ''),
+        tsi: String(r.tsi ?? ''),
+      };
+    });
+
+    const result = await createMaintenanceRecordsDraft({
+      partNumber: partNumber.trim(),
+      serialNumber: serialNumber.trim(),
+      usageRows: rows,
+    });
+
+    if (!result.ok) {
+      // 502: the request was fine, the local Outlook step is what failed.
+      res.status(502).json({ error: result.error ?? 'Could not create the Outlook draft.' });
+      return;
+    }
+    res.json({
+      ok: true,
+      subject: result.subject,
+      recipients: result.recipients,
+      resolved: result.resolved,
+      mode: result.mode,
+    });
+  });
+
   app.post('/api/runs/:runId/cancel', requireSession, (req, res) => {
     const result = cancelJob(req.params.runId);
     if (!result.ok) {

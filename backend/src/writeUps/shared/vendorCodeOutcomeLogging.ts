@@ -131,6 +131,10 @@ export function logVendorCodeOutcome(
     }
     case 'usage_table_absent_unexpected': {
       dbOutcome = 'usage_table_absent_unexpected';
+      // The serial was logged but never persisted, so the DB could not
+      // answer the first question this outcome raises — was this actually
+      // a BN line, which legitimately has no usage table? Persisted now.
+      filledFieldsJson = JSON.stringify({ serialNumber: outcome.serialNumber }, null, 2);
       log.error(
         { partNumber: outcome.partNumber, serialNumber: outcome.serialNumber },
         'Usage Table Absent (Unexpected) — no usage table found and this line did not match the BN override. Nothing filled.',

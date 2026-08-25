@@ -1,9 +1,105 @@
 import type { Page } from 'playwright';
 import type { MxiClient } from './mxiClient.js';
 import { clickIfPresent, enterPasswordIfPrompted, pace, repairLocationCandidates } from './scrapFlowHelpers.js';
+import { PART_DETAILS_URL_MARKER } from '../writeUps/shared/partOwnDetails.js';
+import {
+  looksLikeDetailsTab,
+  parseCurrentLocation,
+  pickWorkPackageNameFieldIndex,
+  toScrapWorkPackageName,
+} from './inHouseScrapParsing.js';
 import { createLogger } from '../logging/logger.js';
 
+/**
+ * Closes a location-picker popup, best-effort.
+ *
+ * REAL LEAK FOUND AND FIXED (2026-08-25): neither the schedule popup nor
+ * the transfer popup was EVER closed. Both were opened via
+ * `page.waitForEvent('popup')`, used, and abandoned — so a multi-serial
+ * run accumulated two orphaned MXI pages per part, each one still holding
+ * whatever server-side transaction state MXI attaches to a picker.
+ *
+ * Reported symptom this is part of: running several serials scraps the
+ * FIRST successfully and fails every one after it, and the same serial
+ * succeeds when it is first in the list. That is state carried between
+ * iterations rather than anything wrong with the parts.
+ *
+ * Never throws — a popup that has already closed itself is the normal
+ * case, and a cleanup failure must not fail a scrap that otherwise
+ * succeeded.
+ */
+async function closePopupQuietly(popup: Page | undefined): Promise<void> {
+  if (!popup || popup.isClosed()) return;
+  try {
+    await popup.close();
+  } catch {
+    /* already gone, or closing raced with navigation — nothing to do */
+  }
+}
+
 const log = createLogger('scrap');
+
+/**
+ * Real URL markers for the inventory-details tabs this flow needs,
+ * captured from production by `npm run diag:inhouse-scrap -- L903140`:
+ *   after "Open"               -> .../InventoryDetails.jsp?...&aTab=Open
+ *   after "Open Work Packages" -> ...&aTab=Open.OpenChecks
+ * Note the first is a prefix of the second, which is fine — reaching the
+ * checks view necessarily means the Open tab was reached too.
+ */
+const OPEN_TAB_URL_MARKER = 'aTab=Open';
+const OPEN_CHECKS_URL_MARKER = 'aTab=Open.OpenChecks';
+/**
+ * Deliberately generous. clickIfPresent's own 6s default is far too short
+ * for MXI under load — this suite has measured part-detail pages taking
+ * ~19s to render (see partOwnDetails.ts). 30s matches the standard used
+ * for every other genuine render wait in this project.
+ */
+const TAB_CLICK_TIMEOUT_MS = 30_000;
+const TAB_NAV_TIMEOUT_MS = 20_000;
+/**
+ * For clicks that legitimately may not exist. Longer than the old 6s so a
+ * slow render is not mistaken for absence, but not the full 30s — every
+ * genuinely-absent one costs this much wall time, twice per part.
+ */
+const OPTIONAL_CLICK_TIMEOUT_MS = 15_000;
+
+/**
+ * Clicks a tab link and CONFIRMS the page actually moved to it, retrying
+ * once. Returns whether the target tab was genuinely reached.
+ *
+ * Exists because the two callers below used to discard clickIfPresent's
+ * return value entirely, so a click that never happened was
+ * indistinguishable from one that did — and the next read then blamed the
+ * part rather than the navigation.
+ */
+async function clickUntilUrlContains(
+  page: Page,
+  locator: ReturnType<Page['getByRole']>,
+  marker: string,
+  label: string,
+  serialNumber: string,
+): Promise<boolean> {
+  if (page.url().includes(marker)) return true;
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const clicked = await clickIfPresent(page, locator, TAB_CLICK_TIMEOUT_MS);
+    if (!clicked) {
+      log.warn({ serialNumber, label, attempt, url: page.url() }, '[in-house scrap] tab link never became visible');
+      continue;
+    }
+    try {
+      await page.waitForURL((url) => url.href.includes(marker), { timeout: TAB_NAV_TIMEOUT_MS });
+      return true;
+    } catch {
+      log.warn(
+        { serialNumber, label, attempt, url: page.url(), expected: marker },
+        '[in-house scrap] clicked the tab but the URL never reached it — retrying',
+      );
+    }
+  }
+  return page.url().includes(marker);
+}
 
 /** Description written into the scheduled work package, per the recording. */
 export const INHOUSE_SCHEDULE_DESCRIPTION = 'scrap as NREP';
@@ -115,9 +211,26 @@ export async function writeInHouseScrap(
   let locationUsed: string | null = null;
   let partDescription: string | null = null;
   let page: Page | undefined;
+  // Tracked so a failure ANYWHERE below still closes them — several of the
+  // early returns between here and the end used to abandon an open popup.
+  let schedulePopup: Page | undefined;
+  let transferPopup: Page | undefined;
 
   try {
     page = await client.getAuthenticatedPage();
+
+    // Start every serial from a clean browser context. `page.goto` below
+    // resets the MAIN page, but it does nothing about extra pages left
+    // open by a previous serial in the same batch — which, before the
+    // popup fix in this file, was two per part and growing. This is the
+    // reset the reported symptom asked for: "there's simply an issue with
+    // it moving into the next part."
+    //
+    // Only the client's own page is kept; anything else is a leftover.
+    for (const other of page.context().pages()) {
+      if (other !== page) await closePopupQuietly(other);
+    }
+
     await page.goto(client.todoListUrl);
     await pace(page);
 
@@ -162,44 +275,212 @@ export async function writeInHouseScrap(
     // Waits for the location pattern itself to appear rather than guessing
     // a longer sleep — same content-aware-wait discipline as
     // waitForUnassignedTasksSectionResolved.
+    // REAL BUG FOUND AND FIXED (2026-08-25), reported as: running several
+    // serials scraps the FIRST one and fails every one after it, always
+    // with "could not read a base station ... (not found)" — and the same
+    // serial succeeds when it is first in the list. Nothing was wrong with
+    // the parts; the read was landing on the wrong page.
+    //
+    // The old wait polled the whole body for a bare `XXX/YYY` token and
+    // SWALLOWED its own timeout. Two ways that goes wrong, both live here:
+    //   - it is satisfied by any page carrying a location-shaped token,
+    //     including the search results grid, so it could stop waiting while
+    //     still on the wrong page;
+    //   - when it genuinely timed out it fell through silently and reported
+    //     "not found", which reads like the item has no location rather
+    //     than "we were never on the item's page".
+    //
+    // Replaced with the same positive page-identity check proven for the
+    // usage-table read: the URL must actually be the inventory details page
+    // (PART_DETAILS_URL_MARKER — confirmed across 523 captured reads), the
+    // document must be COMPLETE (a server-rendered JSP has nothing further
+    // coming), and the page must show THIS serial, which also rules out
+    // having landed on a different item.
+    let onDetailsPage = false;
     try {
       await page.waitForFunction(
-        () => /\b[A-Za-z]{3}\/[A-Za-z0-9]+/.test(document.body?.innerText ?? ''),
-        undefined,
-        { timeout: 20_000, polling: 250 },
+        ({ marker, sn }) =>
+          window.location.href.includes(marker) &&
+          document.readyState === 'complete' &&
+          (document.body?.innerText ?? '').includes(sn),
+        { marker: PART_DETAILS_URL_MARKER, sn: serialNumber },
+        { timeout: 30_000, polling: 250 },
       );
+      onDetailsPage = true;
     } catch {
-      // Fall through — the explicit "couldn't read a location" error below
-      // is clearer than a raw timeout.
+      /* reported explicitly below, with the URL actually landed on */
     }
 
-    // Current location drives which repair shop this goes to.
-    const bodyText = await page.locator('body').innerText();
-    // Case-insensitive — MXI renders mixed-case locations at many sites
-    // (PNS/Repair1/Shop1, CAK/, CLT/, GSP/, ORF/, SAV/). Only the base
-    // station is used downstream, and repairLocationCandidates() uppercases
-    // it, so a mixed-case read still resolves correctly.
-    const locationMatch = bodyText.match(/\b([A-Za-z]{3})\/[A-Za-z0-9]+/);
-    const currentLocation = locationMatch?.[0] ?? '';
-    const candidates = repairLocationCandidates(currentLocation);
-    if (candidates.length === 0) {
+    if (!onDetailsPage) {
+      const landedOn = page.url();
+      log.warn(
+        { serialNumber, landedOn, stepsTaken },
+        '[in-house scrap] never reached the inventory details page after clicking the serial',
+      );
       return {
         status: 'failed',
         stepsTaken,
         locationUsed,
         partDescription,
         errorMessage:
-          `Could not read a base station from this item's current location ("${currentLocation || 'not found'}"), ` +
-          `so the repair shop to send it to is unknown. Nothing was changed.`,
+          `Clicking serial ${serialNumber} never landed on its inventory details page (still on "${landedOn}" ` +
+          `after 30s). Its location was never actually looked for, so nothing was changed.`,
+      };
+    }
+
+    // ROOT CAUSE FOUND AND FIXED (2026-08-25, second report of the same
+    // error): MXI remembers the ACTIVE TAB for the session. This very flow
+    // ends up on `aTab=Open.OpenChecks` while reading an item's work
+    // packages, so the next time an item is opened MXI restores that tab —
+    // and the Details content, the only place the location is stated, is
+    // never rendered at all.
+    //
+    // Proven from a real production capture of this exact serial
+    // (data/diagnostics/inhouse-scrap-L903140-*.txt, taken on
+    // aTab=Open.OpenChecks): no `Location:` label, and no station-shaped
+    // token anywhere on the page. The flow read that page, found no
+    // location, and blamed the part.
+    //
+    // This is also the real explanation for the earlier "first serial
+    // succeeds, every one after it fails" report — the first serial left
+    // the session sitting on the Open tab.
+    let bodyText = await page.locator('body').innerText();
+    if (!looksLikeDetailsTab(bodyText)) {
+      log.info(
+        { serialNumber, url: page.url() },
+        '[in-house scrap] details tab not active (MXI restored a previous tab) — selecting it explicitly',
+      );
+      await clickIfPresent(page, page.getByRole('link', { name: 'Details', exact: true }), TAB_CLICK_TIMEOUT_MS);
+      try {
+        // Wait for the location LABEL itself, not for a fixed delay — the
+        // content-aware discipline used everywhere else in this suite.
+        await page.waitForFunction(
+          () => /Location:\s*[A-Za-z]{3}\/[A-Za-z0-9]+/.test(document.body?.innerText ?? ''),
+          undefined,
+          { timeout: TAB_NAV_TIMEOUT_MS, polling: 250 },
+        );
+      } catch {
+        /* reported below, with the real page state */
+      }
+      bodyText = await page.locator('body').innerText();
+    }
+
+    const currentLocation = parseCurrentLocation(bodyText);
+    const candidates = repairLocationCandidates(currentLocation);
+    if (candidates.length === 0) {
+      log.warn(
+        { serialNumber, url: page.url(), onDetailsTab: looksLikeDetailsTab(bodyText) },
+        '[in-house scrap] no base station readable even after selecting the Details tab',
+      );
+      return {
+        status: 'failed',
+        stepsTaken,
+        locationUsed,
+        partDescription,
+        errorMessage:
+          `Could not read a base station from this item's current location ("${currentLocation || 'not found'}") ` +
+          `on its own details page (url "${page.url()}"). Nothing was changed.`,
       };
     }
     log.info({ serialNumber, currentLocation, candidates }, 'derived in-house scrap location candidates');
 
-    await clickIfPresent(page, page.getByRole('link', { name: 'Open', exact: true }));
-    await clickIfPresent(page, page.getByRole('link', { name: 'Open Work Packages' }));
+    // REAL BUG FOUND AND FIXED (2026-08-25). Reported as: the flow "says
+    // there's no work package, even though there is".
+    //
+    // These two clicks used to be fire-and-forget. clickIfPresent waits
+    // only 6s for the link to become VISIBLE and returns false if it does
+    // not — and both return values were discarded. So on a slow page the
+    // tab was never switched, the flow read the Details tab instead of the
+    // Open Work Packages tab, found no `aCheck` there, and blamed the
+    // part: "No open work package for serial X."
+    //
+    // 6s is far too short here. This same suite has already measured MXI
+    // part-detail pages taking ~19s to render under load (see the
+    // usage-table work in partOwnDetails.ts), which is exactly why a
+    // read-only probe of this flow succeeded while the real batch failed —
+    // the probe was fast enough to win the race every time.
+    //
+    // Now: click, then positively CONFIRM the tab actually changed, with a
+    // retry. The URL markers are real, captured from production by
+    // `npm run diag:inhouse-scrap` against serial L903140 —
+    // ".../InventoryDetails.jsp?...&aTab=Open" after the first click and
+    // "...&aTab=Open.OpenChecks" after the second.
+    const onOpenTab = await clickUntilUrlContains(
+      page,
+      page.getByRole('link', { name: 'Open', exact: true }),
+      OPEN_TAB_URL_MARKER,
+      'Open tab',
+      serialNumber,
+    );
+    const onOpenChecks = await clickUntilUrlContains(
+      page,
+      page.getByRole('link', { name: 'Open Work Packages' }),
+      OPEN_CHECKS_URL_MARKER,
+      'Open Work Packages tab',
+      serialNumber,
+    );
+
+    if (!onOpenChecks) {
+      // Never conflate "we could not get to the list" with "the list is
+      // empty". The whole point of this fix.
+      return {
+        status: 'failed',
+        stepsTaken,
+        locationUsed,
+        partDescription,
+        errorMessage:
+          `Could not open the Open Work Packages view for serial ${serialNumber} (reached Open tab: ${onOpenTab}; ` +
+          `still on "${page.url()}"). Its work packages were never actually listed, so this says nothing about ` +
+          `whether one exists. Nothing was changed.`,
+      };
+    }
+
+    // A CLOSED page is its own distinct failure and must be reported as
+    // one. Reported live (2026-08-25): "it's completely shutting down the
+    // MXI page after clicking the Open Work Package role and saying
+    // there's no work package". Those are two different things, and
+    // everything below reads the page — on a closed page each of those
+    // reads throws something opaque, which is how a shut-down browser ends
+    // up disguised as "no work package".
+    if (page.isClosed()) {
+      return {
+        status: 'failed',
+        stepsTaken,
+        locationUsed,
+        partDescription,
+        errorMessage:
+          `The MXI page closed while opening the work packages for serial ${serialNumber}. This is a browser/session ` +
+          `failure, NOT a missing work package — nothing was read and nothing was changed.`,
+      };
+    }
 
     const checkBox = page.locator('input[name="aCheck"]');
     if ((await checkBox.count()) === 0) {
+      // Evidence first — a disputed "no work package" verdict was
+      // previously unfalsifiable after the fact. Best-effort throughout;
+      // capture must never replace the real result.
+      try {
+        const seen = await page.evaluate(() => ({
+          url: window.location.href,
+          checkboxNames: Array.from(document.querySelectorAll('input[type="CHECKBOX" i]'))
+            .map((i) => i.getAttribute('name') || '(no name)')
+            .slice(0, 30),
+          pnLinks: Array.from(document.querySelectorAll('a'))
+            .map((a) => (a.textContent ?? '').replace(/\s+/g, ' ').trim())
+            .filter((t) => /\(PN:/i.test(t))
+            .slice(0, 10),
+          mentionsWorkPackage: (document.body?.innerText ?? '').includes('Work Package'),
+        }));
+        log.warn(
+          { serialNumber, ...seen, pagesInContext: page.context().pages().length },
+          '[in-house scrap] no aCheck checkbox found — recording what the page actually showed',
+        );
+      } catch (probeErr) {
+        log.warn(
+          { serialNumber, error: probeErr instanceof Error ? probeErr.message : String(probeErr) },
+          '[in-house scrap] could not even read the page while reporting a missing work package',
+        );
+      }
       // Per user direction a missing work package should be created. That
       // is a genuinely different flow (the existing Create Work Package
       // path) and has not been proven from this entry point, so it stops
@@ -241,23 +522,121 @@ export async function writeInHouseScrap(
     await pace(page);
 
     // --- Rename the work package to a Scrap description ---
-    await clickIfPresent(page, page.getByRole('link', { name: 'Details' }));
+    // Same tab-click class as the Open/Open Work Packages pair above, so
+    // the same generous timeout: at 6s a slow render reads as "the tab
+    // isn't there" and the click is skipped silently.
+    await clickIfPresent(page, page.getByRole('link', { name: 'Details' }), TAB_CLICK_TIMEOUT_MS);
     await page.getByRole('link', { name: 'Edit Work Package' }).click();
     await pace(page);
 
-    const nameField = page.locator('#idInput10');
-    if ((await nameField.count()) > 0) {
-      // .fill() replaces the whole value in one DOM-level set. The
-      // recording pressed ArrowLeft eleven times first, which is what a
-      // human does to clear a masked field; this project has already
-      // established (see selectors.ts's updateEsdField) that .fill() is
-      // both correct and safer than simulated keystrokes here.
-      await nameField.first().fill(`Scrap ${partDescription}`);
-      await pace(page);
+    // REAL BUG FOUND AND FIXED (2026-08-25): the rename silently did not
+    // happen, while the flow still reported that it had.
+    //
+    // It targeted `#idInput10` — a generated, positional id copied from the
+    // discovery recording — as `if (count > 0) { fill }`. When that id did
+    // not match, the fill was skipped, OK was clicked anyway, and
+    // `renamed work package to "Scrap ..."` went into stepsTaken
+    // regardless. The scrap completed with the package still called
+    // "Repair ...", which is exactly what was reported: "It all worked,
+    // only thing it didn't do was change the name."
+    //
+    // Now the field is identified by its CONTENT (it is the input already
+    // holding the package's current name), which survives id changes, and
+    // every stage is verified: the field must be found, the typed value
+    // must read back, and the committed page must actually show the new
+    // name. A rename that cannot be confirmed FAILS rather than being
+    // reported as done.
+    const newWorkPackageName = toScrapWorkPackageName(wpText);
+
+    const textInputs = page.locator('input[type="text" i], input:not([type])');
+    const inputCount = await textInputs.count();
+    const values: string[] = [];
+    for (let i = 0; i < inputCount; i++) {
+      values.push(await textInputs.nth(i).inputValue().catch(() => ''));
     }
+    // `#idInput10` stays the first choice — it IS right when it matches,
+    // and it came from the real recording — but it is no longer trusted
+    // blindly.
+    const byRecordedId = page.locator('#idInput10');
+    const recordedIdValue =
+      (await byRecordedId.count()) > 0 ? await byRecordedId.first().inputValue().catch(() => null) : null;
+    const useRecordedId =
+      recordedIdValue !== null &&
+      pickWorkPackageNameFieldIndex([recordedIdValue], wpText) === 0;
+
+    const fieldIndex = useRecordedId ? -1 : pickWorkPackageNameFieldIndex(values, wpText);
+    const nameField = useRecordedId ? byRecordedId.first() : fieldIndex >= 0 ? textInputs.nth(fieldIndex) : null;
+
+    if (!nameField) {
+      log.warn(
+        { serialNumber, url: page.url(), inputCount, values: values.slice(0, 20), currentName: wpText },
+        '[in-house scrap] could not identify the work package name field',
+      );
+      return {
+        status: 'failed',
+        stepsTaken,
+        locationUsed,
+        partDescription,
+        errorMessage:
+          `Could not find the work package name field on the Edit Work Package page for serial ${serialNumber} ` +
+          `(url "${page.url()}", ${inputCount} text input(s) present). The rename was NOT made and nothing else ` +
+          `was changed.`,
+      };
+    }
+
+    // .fill() replaces the whole value in one DOM-level set. The recording
+    // pressed ArrowLeft eleven times first, which is what a human does to
+    // clear a field; this project already established (see selectors.ts's
+    // updateEsdField) that .fill() is both correct and safer here.
+    await nameField.fill(newWorkPackageName);
+    await pace(page);
+
+    const typedBack = await nameField.inputValue();
+    if (typedBack.replace(/\s+/g, ' ').trim() !== newWorkPackageName.replace(/\s+/g, ' ').trim()) {
+      // Do NOT click OK on a field that did not take the value — that
+      // would commit the old name and report a rename that never happened.
+      return {
+        status: 'failed',
+        stepsTaken,
+        locationUsed,
+        partDescription,
+        errorMessage:
+          `Typed the new work package name for serial ${serialNumber} but the field read back as "${typedBack}" ` +
+          `instead of "${newWorkPackageName}". Nothing was submitted and nothing was changed.`,
+      };
+    }
+
     await page.getByRole('link', { name: 'OK' }).click();
     await pace(page);
-    stepsTaken.push(`renamed work package to "Scrap ${partDescription}"`);
+
+    // Independent confirmation that the rename actually committed — the
+    // same discipline writeEsdAndNotes uses. A click is not evidence.
+    let renameConfirmed = false;
+    try {
+      await page.waitForFunction(
+        (expected) => (document.body?.innerText ?? '').replace(/\s+/g, ' ').includes(expected),
+        newWorkPackageName.replace(/\s+/g, ' ').trim(),
+        { timeout: TAB_NAV_TIMEOUT_MS, polling: 250 },
+      );
+      renameConfirmed = true;
+    } catch {
+      /* reported below */
+    }
+
+    if (!renameConfirmed) {
+      return {
+        status: 'failed',
+        stepsTaken,
+        locationUsed,
+        partDescription,
+        errorMessage:
+          `Submitted the rename to "${newWorkPackageName}" for serial ${serialNumber}, but the page never showed ` +
+          `that name afterwards (url "${page.url()}"). The work package may still be named "${wpText}" — check it ` +
+          `by hand before scheduling or transferring this part.`,
+      };
+    }
+
+    stepsTaken.push(`renamed work package to "${newWorkPackageName}"`);
 
     // --- Schedule to the repair shop ---
     await page.getByRole('link', { name: 'Schedule Work Package' }).click();
@@ -265,7 +644,7 @@ export async function writeInHouseScrap(
 
     const schedulePopupPromise = page.waitForEvent('popup');
     await page.getByRole('link', { name: 'Select Repair Location' }).click();
-    const schedulePopup = await schedulePopupPromise;
+    schedulePopup = await schedulePopupPromise;
     await schedulePopup.waitForLoadState('domcontentloaded');
     locationUsed = await pickLocationInPopup(schedulePopup, candidates);
     if (!locationUsed) {
@@ -299,7 +678,7 @@ export async function writeInHouseScrap(
 
     const transferPopupPromise = page.waitForEvent('popup');
     await page.getByRole('link', { name: 'Select Local Location' }).click();
-    const transferPopup = await transferPopupPromise;
+    transferPopup = await transferPopupPromise;
     await transferPopup.waitForLoadState('domcontentloaded');
     // Per explicit user direction: "The transfer location will always be
     // the same as the scheduled location." Pinned to exactly what was
@@ -318,8 +697,16 @@ export async function writeInHouseScrap(
     }
     await pace(page);
 
-    await clickIfPresent(page, page.getByRole('link', { name: 'OK' }));
-    await clickIfPresent(page, page.getByRole('link', { name: 'OK' }));
+    // These two are genuinely conditional — the recording shows the second
+    // OK does not always appear — so they stay optional. But WHICH of them
+    // fired is now recorded rather than discarded: if a required OK is
+    // ever skipped because the page was slow rather than because it was
+    // absent, the transfer is incomplete, and the audit trail has to show
+    // that instead of a clean "success". Same reasoning as the tab clicks
+    // above, applied where the click legitimately may not exist.
+    const firstOk = await clickIfPresent(page, page.getByRole('link', { name: 'OK' }), OPTIONAL_CLICK_TIMEOUT_MS);
+    const secondOk = await clickIfPresent(page, page.getByRole('link', { name: 'OK' }), OPTIONAL_CLICK_TIMEOUT_MS);
+    stepsTaken.push(`transfer confirmations clicked: ${[firstOk && 'OK#1', secondOk && 'OK#2'].filter(Boolean).join(', ') || 'none'}`);
     if (await enterPasswordIfPrompted(page, password)) stepsTaken.push('password: create transfer');
     stepsTaken.push(`created transfer to ${locationUsed}`);
 
@@ -333,5 +720,11 @@ export async function writeInHouseScrap(
       partDescription,
       errorMessage: err instanceof Error ? err.message : String(err),
     };
+  } finally {
+    // Runs on EVERY exit — success, early return, or throw — so the next
+    // serial in a batch starts from a clean context instead of inheriting
+    // this one's open pickers.
+    await closePopupQuietly(schedulePopup);
+    await closePopupQuietly(transferPopup);
   }
 }
