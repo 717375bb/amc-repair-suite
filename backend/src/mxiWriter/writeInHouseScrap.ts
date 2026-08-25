@@ -2,6 +2,7 @@ import type { Page } from 'playwright';
 import type { MxiClient } from './mxiClient.js';
 import { clickIfPresent, enterPasswordIfPrompted, pace, repairLocationCandidates } from './scrapFlowHelpers.js';
 import { PART_DETAILS_URL_MARKER } from '../writeUps/shared/partOwnDetails.js';
+import { looksLikeDetailsTab, parseCurrentLocation } from './inHouseScrapParsing.js';
 import { createLogger } from '../logging/logger.js';
 
 /**
@@ -322,21 +323,50 @@ export async function writeInHouseScrap(
       };
     }
 
-    // Current location drives which repair shop this goes to.
-    const bodyText = await page.locator('body').innerText();
-    // Anchored on the page's own "Location:" label first — the real page
-    // renders "Location:   DAY/USSTG (Unserviceable Staging)" (confirmed
-    // live). The bare pattern is kept only as a fallback, because it can
-    // match an unrelated token elsewhere on the page and silently pick the
-    // wrong base station.
-    // Case-insensitive throughout: MXI's location casing varies by site
-    // (PNS/Repair1/Shop1 alongside DFW/REPAIR1/SHOP1), and
-    // repairLocationCandidates() uppercases what it is given.
-    const labelled = bodyText.match(/Location:\s*([A-Za-z]{3}\/[A-Za-z0-9]+)/);
-    const locationMatch = labelled?.[1] ?? bodyText.match(/\b[A-Za-z]{3}\/[A-Za-z0-9]+/)?.[0];
-    const currentLocation = locationMatch ?? '';
+    // ROOT CAUSE FOUND AND FIXED (2026-08-25, second report of the same
+    // error): MXI remembers the ACTIVE TAB for the session. This very flow
+    // ends up on `aTab=Open.OpenChecks` while reading an item's work
+    // packages, so the next time an item is opened MXI restores that tab —
+    // and the Details content, the only place the location is stated, is
+    // never rendered at all.
+    //
+    // Proven from a real production capture of this exact serial
+    // (data/diagnostics/inhouse-scrap-L903140-*.txt, taken on
+    // aTab=Open.OpenChecks): no `Location:` label, and no station-shaped
+    // token anywhere on the page. The flow read that page, found no
+    // location, and blamed the part.
+    //
+    // This is also the real explanation for the earlier "first serial
+    // succeeds, every one after it fails" report — the first serial left
+    // the session sitting on the Open tab.
+    let bodyText = await page.locator('body').innerText();
+    if (!looksLikeDetailsTab(bodyText)) {
+      log.info(
+        { serialNumber, url: page.url() },
+        '[in-house scrap] details tab not active (MXI restored a previous tab) — selecting it explicitly',
+      );
+      await clickIfPresent(page, page.getByRole('link', { name: 'Details', exact: true }), TAB_CLICK_TIMEOUT_MS);
+      try {
+        // Wait for the location LABEL itself, not for a fixed delay — the
+        // content-aware discipline used everywhere else in this suite.
+        await page.waitForFunction(
+          () => /Location:\s*[A-Za-z]{3}\/[A-Za-z0-9]+/.test(document.body?.innerText ?? ''),
+          undefined,
+          { timeout: TAB_NAV_TIMEOUT_MS, polling: 250 },
+        );
+      } catch {
+        /* reported below, with the real page state */
+      }
+      bodyText = await page.locator('body').innerText();
+    }
+
+    const currentLocation = parseCurrentLocation(bodyText);
     const candidates = repairLocationCandidates(currentLocation);
     if (candidates.length === 0) {
+      log.warn(
+        { serialNumber, url: page.url(), onDetailsTab: looksLikeDetailsTab(bodyText) },
+        '[in-house scrap] no base station readable even after selecting the Details tab',
+      );
       return {
         status: 'failed',
         stepsTaken,
@@ -344,7 +374,7 @@ export async function writeInHouseScrap(
         partDescription,
         errorMessage:
           `Could not read a base station from this item's current location ("${currentLocation || 'not found'}") ` +
-          `on its own details page, so the repair shop to send it to is unknown. Nothing was changed.`,
+          `on its own details page (url "${page.url()}"). Nothing was changed.`,
       };
     }
     log.info({ serialNumber, currentLocation, candidates }, 'derived in-house scrap location candidates');

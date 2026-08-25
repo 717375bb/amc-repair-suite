@@ -4,6 +4,31 @@ All notable changes to this project, newest session first. Item numbers refer to
 
 ## 2026-08-25
 
+### Root-caused — MXI remembers the active tab, so the location was read off the wrong one
+Second report of `Could not read a base station from this item's current location ("not found")`. This time it is root-caused from real evidence rather than reasoned at, and covered by unit tests.
+
+- **The cause**: MXI remembers the **active tab per session**. This flow itself ends on `aTab=Open.OpenChecks` while reading an item's work packages, so the *next* time an item is opened MXI restores that tab — and the Details content, the only place the item's location is stated, is never rendered at all.
+- **Proven from the real capture of the exact serial**: `data/diagnostics/inhouse-scrap-L903140-*.txt`, taken on `aTab=Open.OpenChecks`, contains **no `Location:` label and no station-shaped token anywhere on the page**. The only occurrence of the word is a "Work Location" *column header*. The flow read that page, found nothing, and blamed the part.
+- **This is also the real explanation for the earlier "first serial succeeds, every one after it fails" report** — the first serial left the session sitting on the Open tab. The popup leak fixed earlier was real, but it was not that symptom's cause.
+- **Fixed** by detecting that the Details tab is not active and selecting it explicitly, then waiting for the `Location:` label itself to appear rather than for a fixed delay. The failure message now includes the URL actually being read.
+- **The loose fallback is gone.** The parser no longer falls back to the first bare `XXX/YYY` token anywhere in the body. That fallback is actively dangerous: against a real search-results grid it returns `PNS/STORE` — **another item's location** — which would resolve to a confident set of repair shops for the wrong site and transfer a real part to the wrong place. Failing visibly is correct here.
+
+### Added — unit tests (`npm test`)
+The project had no test framework. Now uses Node's built-in runner via tsx, so no new dependency.
+
+- Parsing is split into a pure `inHouseScrapParsing.ts` (`parseCurrentLocation`, `looksLikeDetailsTab`) so it is testable with no browser. This parse has now been the reported bug twice; a regression should surface in milliseconds, not in a live scrap run.
+- 10 tests over real production text: the genuine Details-tab rendering of `820CE02Y01/403`, label/value split across lines, mixed-case locations (`PNS/Repair1`), deeper segments (`CLT/USSTG/RACK1`), and end-to-end resolution to `DAY/REPAIR2/SHOP2`.
+- Two named **REGRESSION** tests pin the two ways this has actually failed: another item's location off a grid, and a "Work Location" column header being mistaken for the field.
+- One test loads the **real L903140 capture from disk** and asserts it does *not* look like the Details tab and yields no location. It throws a pointed error naming the regeneration command if the fixture is ever missing, rather than silently passing.
+- **The tests were verified to actually fail on the old behaviour**, not merely to pass on the new: reintroducing the bare-token fallback fails the grid regression test with `actual: 'PNS/STORE'`.
+
+**Flow-level fix verified separately** in a browser against a served page that simulates MXI restoring the previous tab:
+
+| session's restored tab | old behaviour | new behaviour |
+|---|---|---|
+| Details (fresh session) | `DAY/USSTG` → `DAY/REPAIR2/SHOP2` | same |
+| `Open.OpenChecks` (after a prior serial) | **"not found" — the reported bug** | `DAY/USSTG` → `DAY/REPAIR2/SHOP2` |
+
 ### Fixed — "no open work package" when the tab click silently never happened
 User-reported: the in-house scrap says there's no work package when there plainly is one. Root-caused with `npm run diag:inhouse-scrap`, then reproduced and fixed.
 
