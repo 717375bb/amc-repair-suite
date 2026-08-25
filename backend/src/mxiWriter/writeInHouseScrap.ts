@@ -33,6 +33,68 @@ async function closePopupQuietly(popup: Page | undefined): Promise<void> {
 
 const log = createLogger('scrap');
 
+/**
+ * Real URL markers for the inventory-details tabs this flow needs,
+ * captured from production by `npm run diag:inhouse-scrap -- L903140`:
+ *   after "Open"               -> .../InventoryDetails.jsp?...&aTab=Open
+ *   after "Open Work Packages" -> ...&aTab=Open.OpenChecks
+ * Note the first is a prefix of the second, which is fine — reaching the
+ * checks view necessarily means the Open tab was reached too.
+ */
+const OPEN_TAB_URL_MARKER = 'aTab=Open';
+const OPEN_CHECKS_URL_MARKER = 'aTab=Open.OpenChecks';
+/**
+ * Deliberately generous. clickIfPresent's own 6s default is far too short
+ * for MXI under load — this suite has measured part-detail pages taking
+ * ~19s to render (see partOwnDetails.ts). 30s matches the standard used
+ * for every other genuine render wait in this project.
+ */
+const TAB_CLICK_TIMEOUT_MS = 30_000;
+const TAB_NAV_TIMEOUT_MS = 20_000;
+/**
+ * For clicks that legitimately may not exist. Longer than the old 6s so a
+ * slow render is not mistaken for absence, but not the full 30s — every
+ * genuinely-absent one costs this much wall time, twice per part.
+ */
+const OPTIONAL_CLICK_TIMEOUT_MS = 15_000;
+
+/**
+ * Clicks a tab link and CONFIRMS the page actually moved to it, retrying
+ * once. Returns whether the target tab was genuinely reached.
+ *
+ * Exists because the two callers below used to discard clickIfPresent's
+ * return value entirely, so a click that never happened was
+ * indistinguishable from one that did — and the next read then blamed the
+ * part rather than the navigation.
+ */
+async function clickUntilUrlContains(
+  page: Page,
+  locator: ReturnType<Page['getByRole']>,
+  marker: string,
+  label: string,
+  serialNumber: string,
+): Promise<boolean> {
+  if (page.url().includes(marker)) return true;
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const clicked = await clickIfPresent(page, locator, TAB_CLICK_TIMEOUT_MS);
+    if (!clicked) {
+      log.warn({ serialNumber, label, attempt, url: page.url() }, '[in-house scrap] tab link never became visible');
+      continue;
+    }
+    try {
+      await page.waitForURL((url) => url.href.includes(marker), { timeout: TAB_NAV_TIMEOUT_MS });
+      return true;
+    } catch {
+      log.warn(
+        { serialNumber, label, attempt, url: page.url(), expected: marker },
+        '[in-house scrap] clicked the tab but the URL never reached it — retrying',
+      );
+    }
+  }
+  return page.url().includes(marker);
+}
+
 /** Description written into the scheduled work package, per the recording. */
 export const INHOUSE_SCHEDULE_DESCRIPTION = 'scrap as NREP';
 
@@ -287,8 +349,56 @@ export async function writeInHouseScrap(
     }
     log.info({ serialNumber, currentLocation, candidates }, 'derived in-house scrap location candidates');
 
-    await clickIfPresent(page, page.getByRole('link', { name: 'Open', exact: true }));
-    await clickIfPresent(page, page.getByRole('link', { name: 'Open Work Packages' }));
+    // REAL BUG FOUND AND FIXED (2026-08-25). Reported as: the flow "says
+    // there's no work package, even though there is".
+    //
+    // These two clicks used to be fire-and-forget. clickIfPresent waits
+    // only 6s for the link to become VISIBLE and returns false if it does
+    // not — and both return values were discarded. So on a slow page the
+    // tab was never switched, the flow read the Details tab instead of the
+    // Open Work Packages tab, found no `aCheck` there, and blamed the
+    // part: "No open work package for serial X."
+    //
+    // 6s is far too short here. This same suite has already measured MXI
+    // part-detail pages taking ~19s to render under load (see the
+    // usage-table work in partOwnDetails.ts), which is exactly why a
+    // read-only probe of this flow succeeded while the real batch failed —
+    // the probe was fast enough to win the race every time.
+    //
+    // Now: click, then positively CONFIRM the tab actually changed, with a
+    // retry. The URL markers are real, captured from production by
+    // `npm run diag:inhouse-scrap` against serial L903140 —
+    // ".../InventoryDetails.jsp?...&aTab=Open" after the first click and
+    // "...&aTab=Open.OpenChecks" after the second.
+    const onOpenTab = await clickUntilUrlContains(
+      page,
+      page.getByRole('link', { name: 'Open', exact: true }),
+      OPEN_TAB_URL_MARKER,
+      'Open tab',
+      serialNumber,
+    );
+    const onOpenChecks = await clickUntilUrlContains(
+      page,
+      page.getByRole('link', { name: 'Open Work Packages' }),
+      OPEN_CHECKS_URL_MARKER,
+      'Open Work Packages tab',
+      serialNumber,
+    );
+
+    if (!onOpenChecks) {
+      // Never conflate "we could not get to the list" with "the list is
+      // empty". The whole point of this fix.
+      return {
+        status: 'failed',
+        stepsTaken,
+        locationUsed,
+        partDescription,
+        errorMessage:
+          `Could not open the Open Work Packages view for serial ${serialNumber} (reached Open tab: ${onOpenTab}; ` +
+          `still on "${page.url()}"). Its work packages were never actually listed, so this says nothing about ` +
+          `whether one exists. Nothing was changed.`,
+      };
+    }
 
     // A CLOSED page is its own distinct failure and must be reported as
     // one. Reported live (2026-08-25): "it's completely shutting down the
@@ -377,7 +487,10 @@ export async function writeInHouseScrap(
     await pace(page);
 
     // --- Rename the work package to a Scrap description ---
-    await clickIfPresent(page, page.getByRole('link', { name: 'Details' }));
+    // Same tab-click class as the Open/Open Work Packages pair above, so
+    // the same generous timeout: at 6s a slow render reads as "the tab
+    // isn't there" and the click is skipped silently.
+    await clickIfPresent(page, page.getByRole('link', { name: 'Details' }), TAB_CLICK_TIMEOUT_MS);
     await page.getByRole('link', { name: 'Edit Work Package' }).click();
     await pace(page);
 
@@ -454,8 +567,16 @@ export async function writeInHouseScrap(
     }
     await pace(page);
 
-    await clickIfPresent(page, page.getByRole('link', { name: 'OK' }));
-    await clickIfPresent(page, page.getByRole('link', { name: 'OK' }));
+    // These two are genuinely conditional — the recording shows the second
+    // OK does not always appear — so they stay optional. But WHICH of them
+    // fired is now recorded rather than discarded: if a required OK is
+    // ever skipped because the page was slow rather than because it was
+    // absent, the transfer is incomplete, and the audit trail has to show
+    // that instead of a clean "success". Same reasoning as the tab clicks
+    // above, applied where the click legitimately may not exist.
+    const firstOk = await clickIfPresent(page, page.getByRole('link', { name: 'OK' }), OPTIONAL_CLICK_TIMEOUT_MS);
+    const secondOk = await clickIfPresent(page, page.getByRole('link', { name: 'OK' }), OPTIONAL_CLICK_TIMEOUT_MS);
+    stepsTaken.push(`transfer confirmations clicked: ${[firstOk && 'OK#1', secondOk && 'OK#2'].filter(Boolean).join(', ') || 'none'}`);
     if (await enterPasswordIfPrompted(page, password)) stepsTaken.push('password: create transfer');
     stepsTaken.push(`created transfer to ${locationUsed}`);
 

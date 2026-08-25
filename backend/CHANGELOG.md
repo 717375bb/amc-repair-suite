@@ -4,6 +4,23 @@ All notable changes to this project, newest session first. Item numbers refer to
 
 ## 2026-08-25
 
+### Fixed — "no open work package" when the tab click silently never happened
+User-reported: the in-house scrap says there's no work package when there plainly is one. Root-caused with `npm run diag:inhouse-scrap`, then reproduced and fixed.
+
+- **The probe passed, and that was the clue.** Run read-only against `L903140` in production it reached `aTab=Open.OpenChecks`, found `input[name="aCheck"]` count `1`, listed the real package (`Repair (1) LIFEVEST - CREW CRJ (PN: D21344-195, SN: L903140)`), and recorded **no** close, crash, popup or dialog. So navigation was sound and the browser never shut down — the difference had to be timing.
+- **Root cause**: the two tab clicks were fire-and-forget. `clickIfPresent` waits only **6s** for a link to become *visible*, returns `false` if it doesn't, and **both return values were discarded**. On a slow page the tab was never switched, the flow then read the *Details* tab, found no `aCheck` there, and blamed the part: "No open work package for serial X." This suite has already measured MXI part-detail pages taking **~19s** under load (see the usage-table work in `partOwnDetails.ts`) — which is exactly why a fast read-only probe won the race every time while the real batch lost it.
+- **Fixed by confirming the tab actually changed**, with a retry, instead of clicking and hoping. The URL markers are real, captured from production by the probe: `&aTab=Open` after the first click, `&aTab=Open.OpenChecks` after the second. Timeout raised from 6s to 30s, matching the standard used for every other genuine render wait here.
+- **"Could not get to the list" is no longer reported as "the list is empty."** Failing to reach the Open Work Packages view now returns its own error naming the URL actually reached, and says plainly that it proves nothing about whether a work package exists.
+- **Same class swept through the rest of the flow**: the `Details` tab click gets the same 30s treatment, and the two optional post-transfer `OK` clicks get 15s and now **record which of them fired** in `stepsTaken`. Those are legitimately conditional, but at 6s a slow render reads as "absent" — and a skipped required OK would leave the transfer incomplete while the run reported clean success.
+- A closed page is also now its own distinct failure (added alongside the probe), so a browser/session failure can never again be reported as a missing work package.
+
+**Verified** by replaying the real `clickIfPresent` against a served page whose tab links appear after a delay:
+
+| | tabs render fast | tabs render after 12s |
+|---|---|---|
+| old code | work package found | **"No open work package for serial X"** — the reported bug |
+| new code | work package found | work package found |
+
 ### Fixed — a work package named anything but "Repair …" got a duplicate created over it
 User-reported: the write-up creates a work package even when one already exists, because presence was decided by name format. Per explicit direction — **any value at all in the USSTG line's Work Package column now means a work package exists and the line proceeds**.
 
