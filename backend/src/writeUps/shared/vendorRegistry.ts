@@ -41,6 +41,8 @@ export const VENDOR_REGISTRY: Readonly<Record<string, VendorConfig>> = Object.fr
   VC00564: buildWarrantyTerminalStateVendorConfig('VC00564', 'LUMINATOR HOLDING LP'),
   '21844': buildWarrantyTerminalStateVendorConfig('21844', 'BARFIELD INSTRUMENT CORP'),
   '6MXR1': buildWarrantyTerminalStateVendorConfig('6MXR1', 'MEASURETECH INC'),
+  'VC00664': buildWarrantyTerminalStateVendorConfig('VC00664', 'HR SMITH GROUP', { hasPartDetailsStep: true }),
+  '1JYM3': buildWarrantyTerminalStateVendorConfig('1JYM3', 'AVIATRON INC', { hasPartDetailsStep: true }),
   // CLAUDE_CODE_PROMPT (vendor 7A9Y2 "shipset" case) — baseline behavior is
   // identical to every other vendor in this family (WARRANTY auth,
   // AUTHORIZATION_ONLY terminal state, FEDEX-2 transport, NET30/717375) —
