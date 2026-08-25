@@ -263,7 +263,28 @@ export interface VendorCodeCandidateLine {
   preferredVendorState: PreferredVendorIndicatorState;
 }
 
-const REPAIR_LINK_PATTERN = /^Repair .*\(PN: ([^,]+), (SN|BN): ([^)]+)\)$/;
+/**
+ * Matches a work-package link on the grid and pulls its part number and
+ * serial (or BN) out of the name.
+ *
+ * BROADENED 2026-08-25, per explicit user direction that any value in the
+ * Work Package column means a work package exists and the line should be
+ * written up. This used to be anchored `/^Repair .*\(PN: ...\)$/`, so a
+ * package named anything else was invisible here — and, separately,
+ * invisible to the no-work-package scanner too, which is why a duplicate
+ * package got created on top of a real one. The most obvious case is a
+ * package this suite itself renames to "Scrap ..." during an in-house
+ * scrap, but nothing guarantees "Repair " is the only prefix MXI or an
+ * analyst ever uses.
+ *
+ * Only the "(PN: X, SN|BN: Y)" suffix is required now. That is safe on
+ * this grid specifically: the real captured row
+ * (data/diagnostics/grid-wait-21844-*.html) shows its only other links are
+ * Part No, Serial No, Owner, Location, Special Handling and the vendor —
+ * none of which end in that suffix — so the work-package cell's link
+ * remains the only thing this can match.
+ */
+const REPAIR_LINK_PATTERN = /\(PN: ([^,]+), (SN|BN): ([^)]+)\)$/;
 
 async function findCandidateLinesForVendorCodeOnce(
   page: Page,

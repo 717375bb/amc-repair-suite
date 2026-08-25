@@ -151,7 +151,14 @@ async function navigateToPartGridAndGetCandidates(
   // result-set failure class here too.
   await waitForGridResolved(page, partNumber);
 
-  const repairLinkPattern = new RegExp(`^Repair .*\\(PN: ${escapeRegExp(partNumber)}, SN: [^)]+\\)$`);
+  // Deliberately NOT anchored on a "Repair " prefix — see
+  // vendorCodeWriteUp.ts's REPAIR_LINK_PATTERN docstring. A work package
+  // named anything else (most obviously one renamed to "Scrap ..." by the
+  // in-house scrap flow) is still a real work package, and treating it as
+  // absent is what caused duplicates to be created over existing ones.
+  // The part number stays anchored, which is the safety property that
+  // actually matters on this part-filtered grid.
+  const repairLinkPattern = new RegExp(`\\(PN: ${escapeRegExp(partNumber)}, SN: [^)]+\\)$`);
   const candidates = page.getByRole('link', { name: repairLinkPattern });
   const candidateCount = await candidates.count();
   return { candidates, candidateCount };

@@ -4,6 +4,19 @@ All notable changes to this project, newest session first. Item numbers refer to
 
 ## 2026-08-25
 
+### Fixed — a work package named anything but "Repair …" got a duplicate created over it
+User-reported: the write-up creates a work package even when one already exists, because presence was decided by name format. Per explicit direction — **any value at all in the USSTG line's Work Package column now means a work package exists and the line proceeds**.
+
+- **Presence is read from the Work Package COLUMN, not from the link's name.** It was matched against `/^Repair .*\(PN: …, SN: …\)$/`, so a package named anything else was invisible **twice over**: the no-work-package scanner saw an empty slot and created a duplicate on top of the real one, and the candidate matcher didn't recognise it either, so the line couldn't have been written up regardless. The most obvious case is a package this suite itself renames to `Scrap …` during an in-house scrap, but nothing guarantees `Repair ` is the only prefix MXI or an analyst ever uses.
+- **The column is located from the header, not a fixed index**, so adding or removing columns via Options > Display Columns cannot silently shift it. Confirmed against the real captured grid (`data/diagnostics/grid-wait-21844-*.html`): the top header row carries "Work Package" as its own `colspan=1` cell, every cell before it is `colspan=1` too, and the matching data cell is index 6 — empty on that genuinely no-work-package row. If the header cannot be located at all it falls back to the link test rather than risk creating a duplicate off an unreadable row.
+- **`REPAIR_LINK_PATTERN` broadened** to require only the `(PN: X, SN|BN: Y)` suffix, so such a line is actually picked up and written up rather than silently skipped. Verified this still matches nothing else on a real row: Part No, Serial No, Owner, Location and the vendor name are all rejected.
+- **Aero Repair carries the same change** — its four `^Repair `-anchored patterns (two candidate searches, its own no-work-package scanner, and `navigateToPartGridAndGetCandidates`) no longer require the prefix. The part-number anchor is kept, since that is the safety property that actually matters on a part-filtered grid.
+- **`findNoWorkPackageRowForSerial` now delegates to `findNoWorkPackageRowsOnGrid`** instead of keeping a second DOM walk with its own copy of the rule, so the two engines cannot drift on what counts as "has a work package" again.
+
+**A latent runtime bug was caught before shipping.** The first version factored the column lookup into `const` arrow helpers inside `page.evaluate`. tsx/esbuild compiles this file with `keepNames`, which wraps such a function in a `__name(…)` helper that does not exist inside the page — it died with `ReferenceError: __name is not defined`. It would have failed on the first live run. The lookup is now straight-line code with no named helpers, and the constraint is documented in place.
+
+**Verified** by running the real shipped scanner against the real captured production grid, with the Work Package cell patched to hold each name in turn: empty → still correctly reported as no work package (creation still happens where it is genuinely needed); `Repair …`, `Scrap …`, and `WO-12345 whatever the analyst typed` → all three report a work package exists and proceed.
+
 ### Fixed — in-house scrap only worked on the first serial in a batch
 User-reported: running several serials scraps the first successfully and fails every one after it, always with `Could not read a base station from this item's current location ("not found")`, and **the same serial succeeds when it is first in the list**. Nothing was wrong with the parts — state was carrying between iterations, and the read was landing on the wrong page.
 
