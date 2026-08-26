@@ -376,6 +376,10 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
   app.post(
     '/api/esd/compare',
     requireSession,
+    // craFile removed 2026-08-26 — the ESD Finder runs from the Vendor OOR
+    // file alone. Still declared so an older client posting one gets a
+    // clear 400 below rather than multer rejecting the whole request with
+    // an opaque "Unexpected field".
     esdUpload.fields([
       { name: 'vendorFiles', maxCount: 20 },
       { name: 'craFile', maxCount: 1 },
@@ -398,14 +402,17 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
         res.status(400).json({ error: 'At least one Vendor OOR file is required.' });
         return;
       }
-      if (craFiles.length !== 1) {
+      if (craFiles.length > 0) {
         cleanupUploads();
-        res.status(400).json({ error: 'Exactly one CRA OOR file is required.' });
+        res.status(400).json({
+          error:
+            'A CRA OOR file is no longer used — the ESD Finder now runs from the Vendor OOR file alone. ' +
+            'Re-load the page if this came from an older tab.',
+        });
         return;
       }
 
       const vendorFileRefs = vendorFiles.map((f) => ({ filePath: f.path, fileName: f.originalname }));
-      const craFileRef = { filePath: craFiles[0].path, fileName: craFiles[0].originalname };
 
       // Fast rejection before a background job is even started — see
       // validateHeadersOnly's docstring for why this is a convenience, not
@@ -415,7 +422,6 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
         for (const f of vendorFileRefs) {
           await validateHeadersOnly(f.filePath, f.fileName, 'vendor');
         }
-        await validateHeadersOnly(craFileRef.filePath, craFileRef.fileName, 'cra');
       } catch (err) {
         cleanupUploads();
         if (err instanceof MissingHeadersError) {
@@ -426,7 +432,7 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
         return;
       }
 
-      const result = startEsdCompareJob(vendorFileRefs, craFileRef);
+      const result = startEsdCompareJob(vendorFileRefs);
       cleanupUploads(); // already copied into the job's own staging dir by now
       if (!result.ok) {
         res.status(409).json({ error: 'An ESD Finder job is already running.', activeRunId: result.conflictRunId });

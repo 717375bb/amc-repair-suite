@@ -164,10 +164,14 @@ export function getActiveEsdJob(): Promise<{ activeRunId: string | null; kind: E
   return jsonRequest('/api/esd/active-job')
 }
 
-export function startCompare(vendorFiles: File[], craFile: File): Promise<{ runId: string }> {
+/**
+ * CRA file removed 2026-08-26 — the ESD Finder runs from the Vendor OOR
+ * file alone. Every field the inference reads comes off the vendor row, so
+ * the comparison influenced no decision.
+ */
+export function startCompare(vendorFiles: File[]): Promise<{ runId: string }> {
   const formData = new FormData()
   for (const f of vendorFiles) formData.append('vendorFiles', f)
-  formData.append('craFile', craFile)
   return uploadRequest('/api/esd/compare', formData)
 }
 

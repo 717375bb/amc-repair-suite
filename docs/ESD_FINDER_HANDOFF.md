@@ -1,3 +1,14 @@
+> **SUPERSEDED IN PART (2026-08-26): the CRA OOR file is gone.** The tab now
+> runs from the Vendor OOR file(s) alone — every field the inference reads
+> (`roEsd`, `currentStatus`, `vendorNotes`) comes off the vendor row, so the
+> join influenced no decision. `matchOrders` is no longer called by this tab;
+> see `backend/src/matching/vendorOnlyOrders.ts`, including why
+> `matchOrders(vendorRows, [])` is deliberately NOT reused (it orphans every
+> row, which would make all of them non-actionable). Consequences:
+> `mxiEsdRaw` and `deltaDaysVsMxi` are always null here, and the review table
+> now reads Vendor ESD → Inferred ESD. Gotcha #3 below (the index-zip)
+> still applies and still holds — re-verified 1:1 over 495 real rows.
+
 # Handoff: Open Order ESD Finder build + Aero Repair "Unassigned Task Present"
 
 Written to resume in a fresh session without re-deriving this session's work. Read this first, before touching any of the files below — then independently re-verify anything you're about to rely on (see "Before you touch anything" at the bottom). Two unrelated pieces of work happened in this session, in this order: (A) a small aeroRepair addition, (B) the full Open Order ESD Finder tab, built and proven end to end across 5 stages.
@@ -83,7 +94,7 @@ A new top-level tab (`/esd-finder`) that replaces the manual Excel-paste step of
 
 ```
 POST /api/esd/peek        multipart: file, role ('vendor'|'cra')  →  { fileName, rowCount }  |  400 with a named-header error
-POST /api/esd/compare      multipart: vendorFiles[] (1+), craFile (1)  →  202 { runId }  |  400  |  409 (job already active)
+POST /api/esd/compare      multipart: vendorFiles[] (1+)               →  202 { runId }  |  400  |  409 (job already active)
 GET  /api/esd/active-job                                          →  { activeRunId }
 GET  /api/esd/runs/:runId                                         →  { runId, kind, status, phase, startedAt, completedAt,
                                                                         fatalError, result, writeEnv, writeResults }

@@ -31,10 +31,14 @@ interface StagedFile {
 }
 
 // ---------------------------------------------------------------------------
-// A single drop zone — used for both Vendor OOR(s) (multi) and CRA OOR
-// (single). Peeks each dropped/selected file immediately (real row count or
-// a real rejection message), per the spec's State A requirement — never
-// silently stages a file that later turns out to be unparseable.
+// The Vendor OOR drop zone. Peeks each dropped/selected file immediately
+// (real row count or a real rejection message), per the spec's State A
+// requirement — never silently stages a file that later turns out to be
+// unparseable.
+//
+// The CRA OOR zone was removed 2026-08-26: the tab now runs from the vendor
+// file alone.  is kept because peekFile still takes it, and the CRA
+// parser/validator remain in use by the original two-file CLI pipeline.
 // ---------------------------------------------------------------------------
 function DropZone({
   label,
@@ -267,7 +271,6 @@ function WriteStatusCell({ result, jobDone }: { result: EsdWriteOrderResult | un
 // ---------------------------------------------------------------------------
 export default function EsdFinder() {
   const [vendorStaged, setVendorStaged] = useState<StagedFile[]>([])
-  const [craStaged, setCraStaged] = useState<StagedFile[]>([])
   const [loadError, setLoadError] = useState<string | null>(null)
   const [activeJobRunId, setActiveJobRunId] = useState<string | null>(null)
 
@@ -326,20 +329,14 @@ export default function EsdFinder() {
   }
 
   const removeVendorFile = (file: File) => setVendorStaged((prev) => prev.filter((s) => s.file !== file))
-  const removeCraFile = () => setCraStaged([])
 
   const validVendorFiles = vendorStaged.filter((s) => !s.error && s.rowCount !== null)
-  const validCraFile = craStaged.find((s) => !s.error && s.rowCount !== null)
   const jobIsActive = effectivePhase === 'comparing' || isWriting || !!activeJobRunId
 
   const handleRun = async () => {
-    if (!validCraFile) return
     setLoadError(null)
     try {
-      const { runId: newRunId } = await startCompare(
-        validVendorFiles.map((s) => s.file),
-        validCraFile.file,
-      )
+      const { runId: newRunId } = await startCompare(validVendorFiles.map((s) => s.file))
       setRemovedOrderNumbers(new Set())
       startCompareTracking(newRunId)
     } catch (err) {
@@ -369,7 +366,6 @@ export default function EsdFinder() {
   const resetToStart = () => {
     clearAll()
     setVendorStaged([])
-    setCraStaged([])
     setRemovedOrderNumbers(new Set())
     getActiveEsdJob()
       .then((r) => setActiveJobRunId(r.activeRunId))
@@ -393,7 +389,7 @@ export default function EsdFinder() {
     }
   }
 
-  const canRun = !jobIsActive && validVendorFiles.length > 0 && !!validCraFile
+  const canRun = !jobIsActive && validVendorFiles.length > 0
 
   return (
     <div className="space-y-5" data-workflow="esd-finder">
@@ -411,7 +407,7 @@ export default function EsdFinder() {
 
       {effectivePhase === 'upload' && (
         <div className="space-y-4">
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div className="grid grid-cols-1 gap-4">
             <DropZone
               label="Vendor OOR(s)"
               description="Drop one or more vendor open-order report files. Rows from all files are pooled together."
@@ -422,21 +418,11 @@ export default function EsdFinder() {
               onRemove={removeVendorFile}
               disabled={jobIsActive}
             />
-            <DropZone
-              label="CRA OOR"
-              description="Drop exactly one CRA open-order report file."
-              multiple={false}
-              role="cra"
-              staged={craStaged}
-              onAdd={(files) => addFiles(files, 'cra', setCraStaged)}
-              onRemove={removeCraFile}
-              disabled={jobIsActive}
-            />
           </div>
           <div className="flex justify-end">
             <PrimaryButton onClick={handleRun} disabled={!canRun}>
               <PlayCircle size={16} />
-              Run Comparison
+              Run
             </PrimaryButton>
           </div>
         </div>
@@ -499,7 +485,7 @@ export default function EsdFinder() {
 
       {showCancelConfirm && (
         <ConfirmDialog
-          title={effectivePhase === 'comparing' ? 'Cancel this comparison?' : 'Cancel this write?'}
+          title={effectivePhase === 'comparing' ? 'Cancel this run?' : 'Cancel this write?'}
           message={
             effectivePhase === 'comparing'
               ? "This will stop the comparison where it's at and discard whatever's been found so far. Nothing was written, so there's nothing to undo."
@@ -556,7 +542,7 @@ function ReviewState({
       <Card className="border-danger p-6">
         <div className="flex items-center gap-2 text-danger">
           <AlertTriangle size={18} />
-          <p className="text-sm font-semibold">Comparison failed</p>
+          <p className="text-sm font-semibold">Run failed</p>
         </div>
         <p className="mt-2 text-sm text-text">{runStatus.fatalError ?? 'Unknown error.'}</p>
         <div className="mt-4 flex justify-end">
@@ -600,7 +586,7 @@ function ReviewState({
       <Card className="flex items-center justify-between p-4">
         <div className="flex items-center gap-2 text-sm text-text">
           <CheckCircle2 size={16} className="text-success" />
-          Comparison complete — {summary.processed} orders processed ({summary.aiCallsMade} AI call(s)).
+          Complete — {summary.processed} orders processed ({summary.aiCallsMade} AI call(s)).
         </div>
         <a
           href={`file:///${outputFilePath.replace(/\\/g, '/')}`}
@@ -707,8 +693,7 @@ function ReviewState({
                   <th className="px-5 py-3 font-medium">P/N</th>
                   <th className="px-5 py-3 font-medium">Serial</th>
                   <th className="px-5 py-3 font-medium">Vendor ESD</th>
-                  <th className="px-5 py-3 font-medium">MXI ESD</th>
-                  <th className="px-5 py-3 font-medium">Delta (days)</th>
+                  <th className="px-5 py-3 font-medium">Inferred ESD</th>
                   <th className="px-5 py-3 font-medium">Confidence</th>
                   <th className="px-5 py-3 font-medium">Notes to Receiver</th>
                   {hasWriteRun && <th className="px-5 py-3 font-medium">Write status</th>}
@@ -744,9 +729,8 @@ function ReviewState({
                       <td className="px-5 py-3 text-muted">{row.vendorName ?? '—'}</td>
                       <td className="px-5 py-3 text-muted">{row.partNumber ?? '—'}</td>
                       <td className="px-5 py-3 text-muted">{row.serialNumber ?? '—'}</td>
+                      <td className="px-5 py-3 text-muted">{formatRawDate(row.roEsdRaw)}</td>
                       <td className="px-5 py-3 text-text">{row.inferredEsd ?? '—'}</td>
-                      <td className="px-5 py-3 text-muted">{formatRawDate(row.mxiEsdRaw)}</td>
-                      <td className="px-5 py-3 text-text">{row.deltaDaysVsMxi ?? '—'}</td>
                       <td className="px-5 py-3">
                         <Badge tone={flagBadgeTone(row.flag)}>{row.confidence ?? '—'}</Badge>
                       </td>

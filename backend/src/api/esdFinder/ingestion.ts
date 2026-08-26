@@ -331,27 +331,33 @@ export function detectDuplicateOrderNumbers(vendorRows: VendorOorRowWithSource[]
 
 export interface IngestedEsdFinderInput {
   vendorRows: VendorOorRowWithSource[];
-  craRows: CraOorRowWithSource[];
   duplicates: DuplicateOrderNumber[];
 }
 
 /**
  * Full ingestion: validates + parses every vendor file (concatenating their
- * rows into one pool, per the confirmed rule), validates + parses the
- * single CRA file, and runs duplicate-order detection over the concatenated
- * vendor pool. Throws immediately on the first file with a real problem —
- * never guesses a mapping or silently proceeds with a partially-wrong file.
+ * rows into one pool, per the confirmed rule) and runs duplicate-order
+ * detection over that pool. Throws immediately on the first file with a
+ * real problem — never guesses a mapping or silently proceeds with a
+ * partially-wrong file.
+ *
+ * CRA FILE REMOVED (2026-08-26, explicit user direction): this used to
+ * also require a CRA OOR file, purely so vendor rows could be joined to
+ * it. Every field the inference actually reads — `roEsd`, `currentStatus`,
+ * `vendorNotes` — comes off the VENDOR row, so the join influenced no
+ * decision; it was an extra file to produce and an extra way to fail. The
+ * CRA-side parser (`parseCraOorFileWithValidation`) is deliberately kept
+ * and still exported: the original two-file CLI pipeline (`--file`) uses
+ * it, and that path is untouched by this change.
  */
 export async function ingestEsdFinderFiles(
   vendorFiles: Array<{ filePath: string; fileName: string }>,
-  craFile: { filePath: string; fileName: string },
 ): Promise<IngestedEsdFinderInput> {
   const vendorRowArrays = await Promise.all(
     vendorFiles.map((f) => parseVendorOorFileWithValidation(f.filePath, f.fileName)),
   );
   const vendorRows = vendorRowArrays.flat();
-  const craRows = await parseCraOorFileWithValidation(craFile.filePath, craFile.fileName);
   const duplicates = detectDuplicateOrderNumbers(vendorRows);
 
-  return { vendorRows, craRows, duplicates };
+  return { vendorRows, duplicates };
 }

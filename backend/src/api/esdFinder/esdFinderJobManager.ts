@@ -105,13 +105,12 @@ function stageUploadedFiles(runDir: string, files: UploadedFileRef[]): UploadedF
   });
 }
 
-export function startEsdCompareJob(vendorFiles: UploadedFileRef[], craFile: UploadedFileRef): StartEsdJobResult {
+export function startEsdCompareJob(vendorFiles: UploadedFileRef[]): StartEsdJobResult {
   if (activeRunId) return { ok: false, conflictRunId: activeRunId };
 
   const runId = nextRunId();
   const runDir = path.join('data', 'esd-finder-tmp', runId);
   const stagedVendorFiles = stageUploadedFiles(runDir, vendorFiles);
-  const stagedCraFile = stageUploadedFiles(runDir, [craFile])[0];
 
   const job: EsdJob = {
     runId,
@@ -137,7 +136,7 @@ export function startEsdCompareJob(vendorFiles: UploadedFileRef[], craFile: Uplo
 
   job.process = spawnRunner(
     'src/api/jobRunners/esdCompareRunner.ts',
-    ['--vendor-files', JSON.stringify(stagedVendorFiles), '--cra-file', JSON.stringify(stagedCraFile)],
+    ['--vendor-files', JSON.stringify(stagedVendorFiles)],
     (envelope) => {
       const e = envelope as { type: string; phase?: string; message?: string; result?: EsdCompareResult };
       if (e.type === 'phase') {

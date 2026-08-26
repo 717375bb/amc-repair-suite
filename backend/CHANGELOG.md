@@ -2,6 +2,19 @@
 
 All notable changes to this project, newest session first. Item numbers refer to the numbered work list agreed with the user (e.g. `[#4a]`).
 
+## 2026-08-26
+
+### Changed — ESD Finder runs from the Vendor OOR file alone
+Per explicit user direction: the CRA OOR file and the comparison step are gone. Every field the inference actually reads — `roEsd`, `currentStatus`, `vendorNotes` — comes off the **vendor** row, so the join influenced no decision; it was an extra file to produce and an extra way to fail.
+
+- **`matching/vendorOnlyOrders.ts`** turns vendor rows straight into the shape the inference consumes. `matchOrders(vendorRows, [])` is deliberately **not** reused: it flags every unmatched vendor row `orphaned_vendor_row`, and that match flag becomes the row's ESD flag verbatim in `applyInferenceRules` — so with an empty CRA list every row would have come out non-actionable and the tab would have silently written nothing. Pinned by a regression test that asserts exactly that difference.
+- `cra: null` needed no downstream changes — `applyInferenceRules` already read `order.cra?.mxiRoEsd ?? null`. `mxiEsdRaw` and `deltaDaysVsMxi` simply come out null, which is correct when no CRA file stated them.
+- **The review table now reads Vendor ESD → Inferred ESD.** The old layout labelled the *inferred* value "Vendor ESD" and sat it next to a Delta column that can no longer have a value; the vendor's own stated ESD (`roEsdRaw`) was not shown at all.
+- **`--cra-file` is rejected, not ignored** — a caller still passing it is on an older contract and is told so. The endpoint likewise returns a clear 400 rather than letting multer fail with an opaque "Unexpected field", so a stale browser tab gets an actionable message.
+- **The CRA parser and validator are deliberately kept.** The original two-file CLI pipeline (`--file`) still uses them and is untouched by this.
+
+**Verified end to end against the real 495-row OOR file**, with no CRA file: 495 rows ingested, 495 orders built, **all flagged `ok`, zero orphaned**, 495 records out (the index-zip invariant the handoff calls gotcha #3 still holds 1:1), and 12 orders resolved straight off the vendor row's RO ESD with no AI call and no CRA file — which is the point: the vendor file alone carries everything the inference needs. 8 new unit tests, 51 total.
+
 ## 2026-08-25
 
 ### Added — zero times-and-cycles drafts now land in Outlook Drafts

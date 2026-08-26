@@ -4,7 +4,7 @@ import { insertInferenceRecords, insertRun, openDb } from '../../db/db.js';
 import { applyInferenceRules } from '../../inference/applyInferenceRules.js';
 import { AnthropicEsdProvider } from '../../inference/anthropicProvider.js';
 import { classifyRowAction, type RowActionType } from '../../inference/classifyRowAction.js';
-import { matchOrders } from '../../matching/matchOrders.js';
+import { buildVendorOnlyOrders } from '../../matching/vendorOnlyOrders.js';
 import { assembleNoteText } from '../../mxiWriter/esdFormatting.js';
 import { exportExcel } from '../../output/exportExcel.js';
 import type { InferenceRecord, RunSummary } from '../../types.js';
@@ -93,27 +93,29 @@ interface FileRef {
   fileName: string;
 }
 
-function parseArgs(): { vendorFiles: FileRef[]; craFile: FileRef } {
+function parseArgs(): { vendorFiles: FileRef[] } {
   const args = process.argv.slice(2);
   const vendorFilesIdx = args.indexOf('--vendor-files');
-  const craFileIdx = args.indexOf('--cra-file');
   const rawVendorFiles = vendorFilesIdx >= 0 ? args[vendorFilesIdx + 1] : undefined;
-  const rawCraFile = craFileIdx >= 0 ? args[craFileIdx + 1] : undefined;
 
   if (!rawVendorFiles) throw new Error('--vendor-files is required (JSON array of {filePath, fileName})');
-  if (!rawCraFile) throw new Error('--cra-file is required (JSON object {filePath, fileName})');
 
   const vendorFiles = JSON.parse(rawVendorFiles) as FileRef[];
-  const craFile = JSON.parse(rawCraFile) as FileRef;
   if (!Array.isArray(vendorFiles) || vendorFiles.length === 0) {
     throw new Error('--vendor-files must be a non-empty JSON array.');
   }
-  return { vendorFiles, craFile };
+  // `--cra-file` is no longer accepted. Deliberately not silently ignored:
+  // a caller still passing it is running against an older contract and
+  // should be told, not left believing a CRA file was used.
+  if (args.includes('--cra-file')) {
+    throw new Error('--cra-file is no longer supported — the ESD Finder now runs from the Vendor OOR file alone.');
+  }
+  return { vendorFiles };
 }
 
 async function main(): Promise<void> {
   const startedAt = new Date().toISOString();
-  const { vendorFiles, craFile } = parseArgs();
+  const { vendorFiles } = parseArgs();
 
   // CLAUDE_CODE_PROMPT (#6-hardening, secrets-seam) — this runner never
   // touches MXI, so it never goes through cliMxiClient.ts's embedded
@@ -133,11 +135,13 @@ async function main(): Promise<void> {
   const cancelSignal = watchStdinForCancellation();
 
   emit({ type: 'phase', phase: 'ingesting' });
-  const { vendorRows, craRows, duplicates } = await ingestEsdFinderFiles(vendorFiles, craFile);
+  const { vendorRows, duplicates } = await ingestEsdFinderFiles(vendorFiles);
   if (cancelSignal.aborted) return;
 
-  emit({ type: 'phase', phase: 'matching' });
-  const matched = matchOrders(vendorRows, craRows);
+  // No matching phase any more — the CRA file is gone, so each vendor row
+  // IS the unit of work. See matching/vendorOnlyOrders.ts for why
+  // matchOrders(vendorRows, []) is deliberately not reused here.
+  const matched = buildVendorOnlyOrders(vendorRows);
   if (cancelSignal.aborted) return;
 
   emit({ type: 'phase', phase: 'inferring' });
@@ -149,7 +153,10 @@ async function main(): Promise<void> {
   const dbRunId = insertRun(db, {
     startedAt,
     vendorOorFile: vendorFiles.map((f) => f.fileName).join(', '),
-    craOorFile: craFile.fileName,
+    // No CRA file in this flow any more. Recorded explicitly rather than
+    // left blank so an old run and a new one stay distinguishable in the
+    // audit history.
+    craOorFile: '(none — vendor-only run)',
     rowCount: records.length,
   });
   insertInferenceRecords(db, dbRunId, records);
