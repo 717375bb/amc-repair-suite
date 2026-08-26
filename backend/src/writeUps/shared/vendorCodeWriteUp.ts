@@ -51,6 +51,7 @@ import { closePartOwnDetails, openPartOwnDetails, readPartOwnDetails, type PartO
 import { completeCreateOrderOnly, composeAwaitingRmaNote, composeDoNotShipNote, verifyExternalReferenceCommitted, ZERO_USAGE_DO_NOT_SHIP_REASON } from './createOrderOnly.js';
 import { closePartDetailsReceivingNotes, openPartDetailsReceivingNotes, readPartDetailsReceivingNotes } from './partDetailsReceivingNotes.js';
 import { isRmaVendor } from './rmaVendors.js';
+import { resolveParkerContract, type ParkerContractOutcome } from './parkerContractCodes.js';
 import { captureVendorCodeGridDiagnostics } from './vendorCodeGridDiagnostics.js';
 import { createWorkPackageForLine, findNoWorkPackageRowsOnGrid } from './createWorkPackage.js';
 import { extractRemovalTaskInfo, readPreferredVendorIndicator, type PreferredVendorIndicatorState } from './removalTaskInfo.js';
@@ -734,12 +735,15 @@ export async function runVendorCodeWriteUp(
     // for the retry-until-APPROVED gate below. 76863/4X623/6FVE5/75818 are
     // the first vendors where REPAIR is the DEFAULT (no override at all) —
     // isBnFlow is false for them even though they need the same
-    // retry-until-APPROVED discipline as a real BN line. isRepairFlow keys
-    // on the actually-resolved authFlow instead, a strict superset of
-    // isBnFlow (every BN-override line already resolves to AUTH_FLOW_REPAIR
-    // by construction), so this is a widening, not a behavior change, for
-    // every existing vendor.
-    const isRepairFlow = resolved.authFlow === AUTH_FLOW_REPAIR;
+    // retry-until-APPROVED discipline as a real BN line.
+    //
+    // SUPERSEDED 2026-08-26: this used to be a `const isRepairFlow` read
+    // off `resolved.authFlow` here. The gate now keys on
+    // `effectiveAuthFlow` at the point of use instead, because a Parker
+    // contract line only becomes a REPAIR flow once its receiving notes
+    // have been read — which happens far below this point, long after the
+    // serial-number-based resolution. Deciding it here would have locked
+    // in WARRANTY before the deciding evidence was even available.
 
     await openVendorCodeCandidate(page, candidate);
     await waitForWorkPackageDetailsResolved(page);
@@ -900,8 +904,19 @@ export async function runVendorCodeWriteUp(
     // never reaches Request Authorization regardless of what its own
     // normal terminal state would otherwise have been.
     let effectiveTerminalState: TerminalState = resolved.terminalState;
+    /**
+     * The auth flow actually used, as opposed to the one resolved from the
+     * serial number alone. A Parker contract code found in the part's
+     * receiving notes — which are only readable AFTER the line is opened,
+     * long after resolveAuthFlowPolicy has run — flips this from WARRANTY
+     * to REPAIR. Mirrors effectiveTerminalState above, which already exists
+     * for exactly the same reason (the zero-usage CREATE_ORDER_ONLY
+     * redirect).
+     */
+    let effectiveAuthFlow: string = resolved.authFlow;
+    let parkerContract: ParkerContractOutcome = { contractCode: null, chargeToAccount: null };
     let doNotShipReason: string | null = null;
-    let receivingNotes:string | null;
+    let receivingNotes: string | null = null;
     let notesText: string;
     if (shipset) {
       // CLAUDE_CODE_PROMPT (vendor 7A9Y2 "shipset" case, Deltas 3 & 4) —
@@ -985,7 +1000,42 @@ export async function runVendorCodeWriteUp(
         );
         await closePartDetailsReceivingNotes(page);
 
-        if (receivingNotes && /account/i.test(receivingNotes)) {
+        // PARKER CONTRACT CODES — resolved here, BEFORE the "account"
+        // guard below, and deliberately so.
+        //
+        // That guard stops any line whose notes mention "account", because
+        // a human referring to an account means we do not know which one to
+        // use and must not guess. A recognised Parker contract code is the
+        // opposite situation: it says exactly which account to use. Letting
+        // the guard fire first would stop every Parker contract line —
+        // "Charge to account PARKERCPH" trips it — and the whole point of
+        // this rule is that those lines run automatically.
+        //
+        // Scoped to the Parker vendor codes only (see parkerContractCodes.ts):
+        // for any other vendor the guard still fires exactly as before.
+        parkerContract = resolveParkerContract(vendorCode, receivingNotes);
+        if (parkerContract.contractCode) {
+          // Not warranty work — billed against the contract. Bypass the
+          // warranty flow, take REPAIR authorization, and issue + dock,
+          // instead of stopping at authorization-only like the rest of
+          // this vendor family.
+          effectiveAuthFlow = AUTH_FLOW_REPAIR;
+          effectiveTerminalState = 'ISSUE_AND_DOCK';
+          log.info(
+            {
+              vendorConfigId: config.id,
+              partNumber: candidate.partNumber,
+              serialNumber: candidate.serialNumber,
+              contractCode: parkerContract.contractCode,
+              chargeToAccount: parkerContract.chargeToAccount,
+              authFlow: effectiveAuthFlow,
+              terminalState: effectiveTerminalState,
+            },
+            '[parker-contract] contract code found in receiving notes — repair flow, issue and dock',
+          );
+        }
+
+        if (!parkerContract.contractCode && receivingNotes && /account/i.test(receivingNotes)) {
           log.error(
             { vendorConfigId: config.id, partNumber: candidate.partNumber, serialNumber: candidate.serialNumber, receivingNotes },
             '[vendor-config] receiving notes mention "account" — flagging for manual review per explicit instruction rather than risk writing to the wrong Charge To Account. Nothing filled, no order created',
@@ -1063,15 +1113,33 @@ export async function runVendorCodeWriteUp(
       // module entirely and is untouched by this. See
       // chargeToAccount.ts's buildDefaultRepairChargeToAccount for the
       // "default to CR7 if no CR-prefix is present at all" rule.
-      // @ts-ignore
-      if (/\bPARKERCPH\b/i.test(receivingNotes ?? '')){
-        config.form.chargeToAccountSuffix = 'PARKERCPH'}
-      // @ts-ignore
-      if (/\bFOKKERPBH\b/i.test(receivingNotes ?? '')){config.form.chargeToAccountSuffix = 'FOKKERPBH'}
-      chargeToAccountAfter =
-        config.form.chargeToAccountSuffix === WARRANTY_TERMINAL_STATE_CHARGE_TO_ACCOUNT_SUFFIX
-          ? buildDefaultRepairChargeToAccount(chargeToAccountBefore)
-          : buildChargeToAccountWithSuffix(chargeToAccountBefore, config.form.chargeToAccountSuffix);
+      // PARKER CONTRACT CODES — see parkerContractCodes.ts.
+      //
+      // REAL BUG FOUND AND FIXED (2026-08-26): the first version of this
+      // assigned `config.form.chargeToAccountSuffix` directly. VENDOR_REGISTRY
+      // is `Object.freeze`d, but that is SHALLOW — `config.form` is a
+      // nested object and stays mutable, so the assignment permanently
+      // re-coded the registry entry for the rest of the process. Once ONE
+      // Parker line carried the code, every later line for that vendor
+      // inherited it, whether or not its own notes said so, until the
+      // server restarted. Demonstrated directly against the real registry
+      // before this rewrite, and now pinned by a regression test.
+      //
+      // The value is used verbatim, with no CR-prefix, per explicit user
+      // direction — so it deliberately bypasses BOTH of the normal
+      // charge-to-account builders rather than being routed through
+      // buildChargeToAccountWithSuffix (which would produce "CR7PARKERCPH"
+      // and, worse, THROWS on any autofilled value that is not exactly
+      // "<CR-prefix>ROUTINE+NONROUTINE" — a shape already seen to vary
+      // live, e.g. "CR7HMV").
+      if (parkerContract.chargeToAccount) {
+        chargeToAccountAfter = parkerContract.chargeToAccount;
+      } else {
+        chargeToAccountAfter =
+          config.form.chargeToAccountSuffix === WARRANTY_TERMINAL_STATE_CHARGE_TO_ACCOUNT_SUFFIX
+            ? buildDefaultRepairChargeToAccount(chargeToAccountBefore)
+            : buildChargeToAccountWithSuffix(chargeToAccountBefore, config.form.chargeToAccountSuffix);
+      }
       await fillChargeToAccount(page, chargeToAccountAfter);
     }
     await fillPurchasingContact(page, config.form.purchasingContact);
@@ -1192,13 +1260,16 @@ export async function runVendorCodeWriteUp(
     // REQUESTED-is-fine acceptance, since this is explicitly a non-warranty
     // situation per the delta. isRepairFlow (not isBnFlow) as of #1 — see
     // its own docstring above for why.
-    if (isRepairFlow || shipset) {
+    // effectiveAuthFlow, not the serial-resolved one: a Parker contract
+    // line is REPAIR authorization even though its serial resolved to
+    // WARRANTY, and it needs this branch's retry-until-APPROVED discipline.
+    if (effectiveAuthFlow === AUTH_FLOW_REPAIR || shipset) {
       const MAX_AUTH_ATTEMPTS = 2;
       let approved = false;
       realAuthStatus = null;
       for (let attempt = 1; attempt <= MAX_AUTH_ATTEMPTS; attempt++) {
         await clickRequestAuthorization(page);
-        await selectAuthFlow(page, resolved.authFlow);
+        await selectAuthFlow(page, effectiveAuthFlow);
         await confirmAuthorizationRequest(page);
 
         const attemptState = await readOrderRealState(page, generatedOrderNumber, client.todoListUrl);
@@ -1248,7 +1319,7 @@ export async function runVendorCodeWriteUp(
       chargeToAccountAfter,
       notesText,
       generatedOrderNumber,
-      authFlow: resolved.authFlow,
+      authFlow: effectiveAuthFlow,
       unassignedTaskWasAssigned,
       workPackageWasCreated,
     };
@@ -1257,7 +1328,7 @@ export async function runVendorCodeWriteUp(
     // no code path from the AUTHORIZATION_ONLY branch can reach
     // issueGeneratedOrder/moveOutboundShipmentToDock; it simply never calls
     // them, not via an early return that a future edit could bypass.
-    switch (resolved.terminalState) {
+    switch (effectiveTerminalState) {
       case 'ISSUE_AND_DOCK': {
         const issueResult = await issueGeneratedOrder(client, generatedOrderNumber);
         const postIssueState = await readOrderRealState(page, generatedOrderNumber, client.todoListUrl);
@@ -1291,16 +1362,15 @@ export async function runVendorCodeWriteUp(
         return { status: 'authorized_only', fields };
       }
       case 'CREATE_ORDER_ONLY': {
-        // Structurally unreachable: resolved.terminalState (from
-        // resolveAuthFlowPolicy/shipset) never actually produces this
-        // value — only the separate effectiveTerminalState variable does,
-        // and that path already returned above, well before this switch,
+        // Structurally unreachable: effectiveTerminalState is only ever set
+        // to CREATE_ORDER_ONLY together with doNotShipReason, and that
+        // combination already returned above, well before this switch,
         // openGeneratedOrder, or Request Authorization ever ran. This case
         // exists only to satisfy TerminalState's exhaustiveness now that
         // CREATE_ORDER_ONLY is a member of the shared type.
         throw new Error(
-          `Unreachable: resolved.terminalState was 'CREATE_ORDER_ONLY' for ${candidate.partNumber}/${candidate.serialNumber} ` +
-            `— this should have been handled by the effectiveTerminalState early-return above.`,
+          `Unreachable: effectiveTerminalState was 'CREATE_ORDER_ONLY' without a doNotShipReason for ` +
+            `${candidate.partNumber}/${candidate.serialNumber} — this should have returned above.`,
         );
       }
     }

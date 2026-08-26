@@ -40,14 +40,28 @@ export async function openPartDetailsReceivingNotes(page: Page, linkText: string
   await pace(page);
 }
 
-//const RECEIVING_NOTES_SELECTOR = '#idContentRow_IdGrpReceivingNotes > td';
+/**
+ * Corrected live (2026-08-25): the note text lives in `#idCellPartNote`.
+ * The previous `#idContentRow_IdGrpReceivingNotes > td` did not match the
+ * real page.
+ */
+const RECEIVING_NOTES_SELECTOR = '#idCellPartNote';
 
-/** Null if the box genuinely isn't present on this part's Details view — never guessed/fabricated. */
+/**
+ * Null if the box genuinely isn't present on this part's Details view —
+ * never guessed/fabricated.
+ *
+ * The absence check is NOT optional. Every vendor in this family runs with
+ * `hasPartDetailsStep: true`, so this executes on every line; calling
+ * `.innerText()` on a selector that matches nothing waits out the full
+ * default timeout and then throws, turning "this part has no note box"
+ * into a 30-second failure of an otherwise fine line. A brief window where
+ * the check was dropped is what this restores.
+ */
 export async function readPartDetailsReceivingNotes(page: Page): Promise<string | null> {
-  return (await page.locator('#idCellPartNote').innerText()).trim();
-  //const locator = page.locator(RECEIVING_NOTES_SELECTOR);
-  //if ((await locator.count()) === 0) return null;
-  //return (await locator.first().innerText()).trim();
+  const locator = page.locator(RECEIVING_NOTES_SELECTOR);
+  if ((await locator.count()) === 0) return null;
+  return (await locator.first().innerText()).trim();
 }
 
 /** Real from the recording: a single "OK" (not "Close") dismisses this specific view. */
