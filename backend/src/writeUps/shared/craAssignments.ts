@@ -45,7 +45,6 @@ export const CRA_VENDOR_ASSIGNMENTS: readonly CraVendorAssignment[] = [
   { vendorCode: 'VC00714', vendorName: 'EPICAMRO INC', craCode: '232126', craName: 'Alex Morales' },
   { vendorCode: 'VC00644', vendorName: 'EVIDENT SCIENTIFIC', craCode: '232126', craName: 'Alex Morales' },
   { vendorCode: '836S5', vendorName: 'GSE AMERICA LLC', craCode: '232126', craName: 'Alex Morales' },
-  { vendorCode: 'VC00664', vendorName: 'HR SMITH GROUP', craCode: '232126', craName: 'Alex Morales' },
   { vendorCode: '1YXM4', vendorName: 'JACKSON AIRCRAFT WEIGHING SERVICE', craCode: '232126', craName: 'Alex Morales' },
   { vendorCode: 'VC00311', vendorName: 'MOBILE COMMUNICATION AMERICA (MCA)', craCode: '232126', craName: 'Alex Morales' },
   { vendorCode: 'VC00824', vendorName: 'MSA SAFETY INCORPORATED', craCode: '232126', craName: 'Alex Morales' },
