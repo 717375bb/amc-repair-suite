@@ -228,7 +228,7 @@ export const AUTH_FLOW_REPAIR = 'REPAIR (Repair Authorization)';
 export const BN_SERIAL_PREFIX = 'BN ';
 
 /** Real recorded permanent Notes-field header text for this vendor family. */
-export const WARRANTY_TERMINAL_STATE_NOTES_HEADER = 'INSPECT AND SERVICE AS REQUIRED';
+export const WARRANTY_TERMINAL_STATE_NOTES_HEADER = 'Inspect and service as required. Provide estimate for approval. Provide new 8130 with times and cycles and SFR. Provide new certificate and test data sheet.';
 
 /** Charge-to-account suffix confirmed in both real recordings for this vendor family. */
 export const WARRANTY_TERMINAL_STATE_CHARGE_TO_ACCOUNT_SUFFIX = 'REPAIR';
