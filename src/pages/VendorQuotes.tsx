@@ -4,10 +4,9 @@ import { Badge, Card, CardHeader, PrimaryButton, SecondaryButton } from '../comp
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { ApiError } from '../lib/api'
 import { EnvironmentBar } from '../components/EnvironmentBar'
+import { QuoteRun } from '../lib/tabRuns'
 import {
-  cancelQuoteRun,
   getActiveQuoteJob,
-  getQuoteRun,
   setQuoteDisposition,
   startQuoteIngest,
   startQuoteWrite,
@@ -19,8 +18,6 @@ import {
   resolveWriteAction,
   type QuoteWriteResult,
 } from '../lib/quoteApi'
-
-const POLL_MS = 2000
 
 function isTerminal(status: QuoteRunStatusResponse['status'] | undefined): boolean {
   return !!status && status !== 'running' && status !== 'pending'
@@ -165,9 +162,13 @@ function WriteStatusCell({
 // ---------------------------------------------------------------------------
 // Main page
 // ---------------------------------------------------------------------------
+const useQuoteRun = QuoteRun.useTrackedRun
+
 export default function VendorQuotes() {
-  const [runId, setRunId] = useState<string | null>(null)
-  const [run, setRun] = useState<QuoteRunStatusResponse | null>(null)
+  // Run state lives in the provider (lib/tabRuns.tsx), not here. Held
+  // locally it was lost the moment this page unmounted, so navigating away
+  // stopped polling while the backend job carried on invisibly.
+  const { runId, run, startTracking, restart, patchRun, cancel: cancelRun } = useQuoteRun()
   const [loadError, setLoadError] = useState<string | null>(null)
   const [activeJobRunId, setActiveJobRunId] = useState<string | null>(null)
   const [maxMessages, setMaxMessages] = useState<number | "">(1);
@@ -178,10 +179,6 @@ export default function VendorQuotes() {
   const [showWriteConfirm, setShowWriteConfirm] = useState(false)
   /** How many rows this write actually submitted — the progress bar's denominator. */
   const [submittedCount, setSubmittedCount] = useState<number | null>(null)
-  /** Bumped to restart polling when a new phase begins on an existing runId (see the poll effect). */
-  const [pollEpoch, setPollEpoch] = useState(0)
-
-  const pollRef = useRef<number | null>(null)
   const isRunning = !!runId && !isTerminal(run?.status)
 
   /**
@@ -220,37 +217,12 @@ export default function VendorQuotes() {
    * progress appeared at all. `pollEpoch` is bumped whenever a new phase
    * starts on an existing runId, which is what restarts polling.
    */
-  useEffect(() => {
-    if (!runId) return
-    let cancelled = false
+  // Polling belongs to the provider now, so it keeps running whether or
+  // not this page is mounted.
 
-    const tick = async () => {
-      try {
-        const status = await getQuoteRun(runId)
-        if (cancelled) return
-        setRun(status)
-        if (isTerminal(status.status)) {
-          if (pollRef.current) window.clearInterval(pollRef.current)
-          pollRef.current = null
-          setActiveJobRunId(null)
-        }
-      } catch (err) {
-        if (!cancelled) reportError(err instanceof Error ? err.message : String(err))
-      }
-    }
-
-    void tick()
-    pollRef.current = window.setInterval(tick, POLL_MS)
-    return () => {
-      cancelled = true
-      if (pollRef.current) window.clearInterval(pollRef.current)
-      pollRef.current = null
-    }
-  }, [runId, pollEpoch])
 
   const handleRun = async () => {
     setLoadError(null)
-    setRun(null)
     try {
       // The field is allowed to sit empty while being typed into, so it can
       // still be "" here if Run is clicked before it blurs. Falls back to
@@ -259,7 +231,7 @@ export default function VendorQuotes() {
         maxMessages: maxMessages === '' ? 1 : maxMessages,
         unreadOnly,
       })
-      setRunId(newRunId)
+      startTracking(newRunId)
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         reportError(`A Vendor Quote job is already running (${err.activeRunId ?? "unknown"}).`)
@@ -274,7 +246,7 @@ export default function VendorQuotes() {
     if (!runId) return
     setCancelling(true)
     try {
-      await cancelQuoteRun(runId)
+      await cancelRun()
     } catch (err) {
       reportError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -346,10 +318,10 @@ export default function VendorQuotes() {
       // progress card appears on THIS tick rather than up to POLL_MS later
       // — the server already set status='running' before returning 202, so
       // this only anticipates what the next poll confirms.
-      setRun((prev) => (prev ? { ...prev, kind: 'write', status: 'running', phase: 'writing', writeEnv: env } : prev))
+      patchRun((prev) => ({ ...prev, kind: 'write', status: 'running', phase: 'writing', writeEnv: env }))
       // Restart polling: the run reached a terminal status after ingest, so
       // the poll interval was cleared. Without this the write runs blind.
-      setPollEpoch((e) => e + 1)
+      restart()
     } catch (err) {
       setSubmittedCount(null)
       if (err instanceof ApiError && err.status === 409) {

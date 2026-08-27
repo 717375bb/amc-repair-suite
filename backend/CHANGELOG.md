@@ -4,6 +4,22 @@ All notable changes to this project, newest session first. Item numbers refer to
 
 ## 2026-08-27
 
+### Added — jobs run in parallel across tabs, with live status everywhere
+Per explicit user direction: write-ups, the ESD writer and quotes can now run at once, and you can toggle between them while their statuses keep updating.
+
+**The backend already allowed this.** Each of the five job managers has its own module-scoped `activeRunId` and `spawnRunner` has no cap, so one job per tab could already run concurrently. The frontend was the blocker: Order Write-Ups and the ESD Finder had providers mounted in `RequireAuth`, but **Vendor Quotes, Scrapped Parts and the Invoice Price Writer held their `runId` in page-local state** — navigating away unmounted the page, the runId went with it, and polling stopped while the backend job carried on invisibly. The job was fine; the UI forgot.
+
+- **`activeRuns.tsx`** — a registry each tab reports a small summary into and the sidebar renders from. Deliberately a *reporting* registry, not a controller: every tab keeps sole ownership of its polling, phase names and cancel semantics, so a change to one cannot break another.
+- **`trackedRun.tsx`** — one generic provider for the three tabs sharing the same lifecycle, including re-attaching to a job already running server-side so a mid-run browser refresh doesn't show an idle tab.
+- **The two existing providers were deliberately NOT collapsed into it.** They carry real per-tab complexity — two phases, differing cancel semantics, an incremental log endpoint — that is proven in production; rewriting them would risk a regression for no behavioural gain. They report into the same registry instead, so the sidebar treats all five identically.
+- **Sidebar badges** show a spinner plus `N/M`, the backend's own phase word, or a bare "running" — never invented progress. Visible collapsed too, where the spinner alone carries it.
+- **Two behaviours were preserved rather than lost in the refactor**, both of which came from real reported bugs:
+  - `restart()` — Vendor Quotes and the Invoice Price Writer reuse one `runId` across two phases (ingest→write, and retry). Polling correctly stops at a terminal status, so without an explicit restart the second phase runs blind. That is exactly the "the lines being written still don't appear live" bug; the mechanism is now in the provider rather than duplicated per page.
+  - `patchRun()` — the optimistic flip to the write phase, so the progress card appears on the current tick rather than up to 2s later. Only ever anticipates a phase the server has already confirmed by returning 202; never asserts an *outcome*.
+
+### Fixed — SQLite would have failed jobs at random under parallel load
+`busy_timeout = 5000` added. WAL already allows readers plus **one** writer, but without a busy timeout a second writer does not wait — it fails immediately with `SQLITE_BUSY`. With five processes now writing audit rows at overlapping moments that would have surfaced as a job dying mid-run for no reason an analyst could act on, and worse, **after** its real MXI write had already landed.
+
 ### Added — Aerotron notes carry the part's removal date
 Per explicit user direction: the Note To Vendor must read `Removal date: DD-MMM-YYYY` directly above the times and cycles table.
 

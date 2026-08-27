@@ -51,6 +51,25 @@ export interface TrackedRunValue<T extends TrackableRunStatus> {
   attachChecked: boolean
   isRunning: boolean
   startTracking: (runId: string) => void
+  /**
+   * Restarts polling on the SAME runId.
+   *
+   * Needed because a second phase can begin on a run that has already
+   * reached a terminal status — Vendor Quotes reuses one runId for both
+   * the ingest and the write. Polling correctly stops at terminal, so
+   * without this the write's progress never appears at all. That was a
+   * real reported bug ("the lines being written still don't appear live"),
+   * and this is the mechanism that fixed it, lifted into the provider.
+   */
+  restart: () => void
+  /**
+   * Applies an optimistic local patch to the current snapshot.
+   *
+   * Only for making a just-requested phase visible immediately; the next
+   * poll overwrites it with real server state a moment later. Never used to
+   * assert an OUTCOME the backend has not confirmed.
+   */
+  patchRun: (patch: (prev: T) => T) => void
   cancel: () => Promise<void>
   clear: () => void
 }
@@ -66,6 +85,7 @@ export function createTrackedRun<T extends TrackableRunStatus>(
     const [runId, setRunId] = useState<string | null>(null)
     const [run, setRun] = useState<T | null>(null)
     const [attachChecked, setAttachChecked] = useState(false)
+    const [pollEpoch, setPollEpoch] = useState(0)
     const attachedRef = useRef(false)
 
     // Re-attach to whatever the server already has in flight. Without this,
@@ -118,7 +138,7 @@ export function createTrackedRun<T extends TrackableRunStatus>(
         stopped = true
         if (timer) clearTimeout(timer)
       }
-    }, [runId])
+    }, [runId, pollEpoch])
 
     const isRunning = !!runId && !isTerminalStatus(run?.status)
 
@@ -128,6 +148,12 @@ export function createTrackedRun<T extends TrackableRunStatus>(
     const startTracking = useCallback((next: string) => {
       setRunId(next)
       setRun(null)
+    }, [])
+
+    const restart = useCallback(() => setPollEpoch((n) => n + 1), [])
+
+    const patchRun = useCallback((patch: (prev: T) => T) => {
+      setRun((prev) => (prev ? patch(prev) : prev))
     }, [])
 
     const cancel = useCallback(async () => {
@@ -144,7 +170,7 @@ export function createTrackedRun<T extends TrackableRunStatus>(
     }, [])
 
     return (
-      <Ctx.Provider value={{ runId, run, attachChecked, isRunning, startTracking, cancel, clear }}>
+      <Ctx.Provider value={{ runId, run, attachChecked, isRunning, startTracking, restart, patchRun, cancel, clear }}>
         {children}
       </Ctx.Provider>
     )

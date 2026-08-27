@@ -1,12 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react'
+import { useCallback, useEffect, useState, type DragEvent } from 'react'
 import { AlertTriangle, CheckCircle2, FileSpreadsheet, Loader2, PlayCircle, RotateCcw, StopCircle, UploadCloud, X } from 'lucide-react'
 import { Badge, Card, CardHeader, PrimaryButton, SecondaryButton } from '../components/ui'
 import { EnvironmentBar } from '../components/EnvironmentBar'
+import { InvoicePriceRun } from '../lib/tabRuns'
 import {
   ApiError,
-  cancelInvoicePriceRun,
   getActiveInvoicePriceJob,
-  getInvoicePriceRunStatus,
   peekInvoicePriceFile,
   retryInvoicePriceRun,
   startInvoicePriceRun,
@@ -26,7 +25,6 @@ import {
  * straight to the real per-row job, live-streaming results as they land.
  */
 
-const POLL_MS = 2000
 const TERMINAL_STATUSES = new Set<InvoicePriceRunStatusResponse['status']>(['completed', 'failed', 'cancelled'])
 
 function isTerminal(status: InvoicePriceRunStatusResponse['status'] | undefined): boolean {
@@ -79,6 +77,8 @@ function ResultRow({ result }: { result: InvoicePriceOrderResult }) {
   )
 }
 
+const useInvoicePriceRun = InvoicePriceRun.useTrackedRun
+
 export default function InvoicePriceWriter() {
   const [file, setFile] = useState<File | null>(null)
   const [rowCount, setRowCount] = useState<number | null>(null)
@@ -90,15 +90,16 @@ export default function InvoicePriceWriter() {
   const [showCancelConfirm, setShowCancelConfirm] = useState(false)
   const [cancelling, setCancelling] = useState(false)
 
-  const [runId, setRunId] = useState<string | null>(null)
-  const [runStatus, setRunStatus] = useState<InvoicePriceRunStatusResponse | null>(null)
+  // Run state lives in the provider (lib/tabRuns.tsx) as of the
+  // parallel-jobs work. Held locally it was lost the moment this page
+  // unmounted, so navigating away stopped polling while the backend job
+  // carried on invisibly.
+  const { runId, run: runStatus, startTracking, restart, cancel: cancelRun, clear: clearRun } = useInvoicePriceRun()
   const [retrying, setRetrying] = useState(false)
-  // CLAUDE_CODE_PROMPT (retry failed lines) — a retry re-runs the SAME
-  // runId (so results merge into the same table instead of starting a
-  // fresh one), but that means the polling effect below (keyed on runId)
-  // won't naturally restart when a retry begins, since runId itself never
-  // changes. Bumping this on every retry forces it to.
-  const [pollGeneration, setPollGeneration] = useState(0)
+  // A retry re-runs the SAME runId so results merge into one table, which
+  // means polling has to be restarted explicitly — the runId itself never
+  // changes, and polling has already stopped at the terminal status. The
+  // provider's restart() is that mechanism.
 
   const isRunning = !!runId && !isTerminal(runStatus?.status)
 
@@ -110,35 +111,16 @@ export default function InvoicePriceWriter() {
     getActiveInvoicePriceJob()
       .then((r) => {
         setActiveJobRunId(r.activeRunId)
-        if (r.activeRunId) setRunId(r.activeRunId)
+        // Re-attaching to the run itself is the provider's job.
       })
       .catch(() => {
         /* non-fatal — Run will surface a 409 if a job really is active */
       })
   }, [])
 
-  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  useEffect(() => {
-    if (!runId) return
-    let cancelled = false
+  // Polling belongs to the provider now, so it survives this page
+  // unmounting.
 
-    const tick = async () => {
-      try {
-        const status = await getInvoicePriceRunStatus(runId)
-        if (cancelled) return
-        setRunStatus(status)
-        if (!isTerminal(status.status)) pollRef.current = setTimeout(tick, POLL_MS)
-      } catch {
-        if (!cancelled) pollRef.current = setTimeout(tick, POLL_MS)
-      }
-    }
-    tick()
-
-    return () => {
-      cancelled = true
-      if (pollRef.current) clearTimeout(pollRef.current)
-    }
-  }, [runId, pollGeneration])
 
   const handleFile = useCallback(async (selected: File) => {
     setFile(selected)
@@ -171,8 +153,7 @@ export default function InvoicePriceWriter() {
     setLoadError(null)
     try {
       const { runId: newRunId } = await startInvoicePriceRun(file, env)
-      setRunStatus(null)
-      setRunId(newRunId)
+      startTracking(newRunId)
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         setLoadError(`An Invoice Price Writer job is already running (${err.activeRunId ?? 'unknown'}).`)
@@ -187,8 +168,10 @@ export default function InvoicePriceWriter() {
     setShowCancelConfirm(false)
     setCancelling(true)
     try {
-      await cancelInvoicePriceRun(runId)
-      setRunStatus(await getInvoicePriceRunStatus(runId))
+      await cancelRun()
+      // restart() polls immediately, so the real cancelled status lands
+      // without asserting it locally first.
+      restart()
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -215,8 +198,8 @@ export default function InvoicePriceWriter() {
       // progress" immediately rather than waiting for the next poll tick.
       // Prior results (including the ones just about to be retried) stay
       // visible throughout — this fetch doesn't clear them.
-      setRunStatus(await getInvoicePriceRunStatus(runId))
-      setPollGeneration((g) => g + 1)
+      restart()
+      restart()
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         setLoadError(err.message)
@@ -229,8 +212,7 @@ export default function InvoicePriceWriter() {
   }
 
   const resetToStart = () => {
-    setRunId(null)
-    setRunStatus(null)
+    clearRun()
     setFile(null)
     setRowCount(null)
     setPeekError(null)
