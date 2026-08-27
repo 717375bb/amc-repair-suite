@@ -2,6 +2,8 @@ import { Navigate, Outlet } from 'react-router-dom'
 import { useAuth } from '../lib/authContext'
 import { OrderWriteUpsRunProvider } from '../lib/orderWriteUpsRun'
 import { EsdFinderRunProvider } from '../lib/esdFinderRun'
+import { ActiveRunsProvider } from '../lib/activeRuns'
+import { InvoicePriceRun, QuoteRun, ScrapRun } from '../lib/tabRuns'
 
 /**
  * Gates every real workflow route behind a valid session. 'loading' (the
@@ -24,11 +26,29 @@ export function RequireAuth() {
   if (status === 'loading') return null
   if (status === 'unauthenticated') return <Navigate to="/login" replace />
   return (
-    <OrderWriteUpsRunProvider>
-      <EsdFinderRunProvider>
-        <Outlet />
-      </EsdFinderRunProvider>
-    </OrderWriteUpsRunProvider>
+    // ActiveRunsProvider wraps them all: every run provider reports into it
+    // and the sidebar renders from it, so what's in flight is visible from
+    // any tab. Added 2026-08-27 with the parallel-jobs work.
+    //
+    // The three trackers below (Quote/Scrap/InvoicePrice) are new for the
+    // same reason. Those tabs used to hold their runId in page-local state,
+    // so navigating away stopped their polling while the backend job
+    // carried on invisibly — the UI forgot, not the job. Mounted here, for
+    // the same reason the other two already were: their one-shot "re-attach
+    // to a running job" check is meaningless before a session exists.
+    <ActiveRunsProvider>
+      <OrderWriteUpsRunProvider>
+        <EsdFinderRunProvider>
+          <QuoteRun.Provider>
+            <ScrapRun.Provider>
+              <InvoicePriceRun.Provider>
+                <Outlet />
+              </InvoicePriceRun.Provider>
+            </ScrapRun.Provider>
+          </QuoteRun.Provider>
+        </EsdFinderRunProvider>
+      </OrderWriteUpsRunProvider>
+    </ActiveRunsProvider>
   )
 }
 

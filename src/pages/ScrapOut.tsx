@@ -2,20 +2,18 @@ import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import { AlertTriangle, CheckCircle2, FileSpreadsheet, Loader2, PlayCircle, StopCircle, UploadCloud, X } from 'lucide-react'
 import { Card, CardHeader, PrimaryButton, SecondaryButton } from '../components/ui'
 import { ConfirmDialog } from '../components/ConfirmDialog'
+import { ScrapRun } from '../lib/tabRuns'
 import { EnvironmentBar } from '../components/EnvironmentBar'
 import { ApiError } from '../lib/api'
 import type { MxiEnv } from '../lib/quoteApi'
 import {
-  cancelScrapRun,
   getActiveScrapJob,
-  getScrapRun,
   startInHouseScrap,
   startVendorScrap,
   previewSerialList,
   type ScrapRunStatusResponse,
 } from '../lib/scrapApi'
 
-const POLL_MS = 2000
 
 type ScrapKind = 'vendor' | 'in_house'
 
@@ -36,6 +34,8 @@ function phaseLabel(phase: string | null): string {
   }
 }
 
+const useScrapRun = ScrapRun.useTrackedRun
+
 export default function ScrapOut() {
   const [kind, setKind] = useState<ScrapKind>('vendor')
   const [env, setEnv] = useState<MxiEnv>('production')
@@ -43,15 +43,16 @@ export default function ScrapOut() {
   const [serialNumber, setSerialNumber] = useState('')
   const [isDragOver, setIsDragOver] = useState(false)
 
-  const [runId, setRunId] = useState<string | null>(null)
-  const [run, setRun] = useState<ScrapRunStatusResponse | null>(null)
+  // Run state lives in the provider (lib/tabRuns.tsx), not here. Held
+  // locally, it was lost the moment this page unmounted — so navigating
+  // away stopped the polling while the backend job carried on invisibly.
+  // That is the whole reason parallel runs were not usable.
+  const { runId, run, startTracking, cancel: cancelRun, clear: clearRun } = useScrapRun()
   const [loadError, setLoadError] = useState<string | null>(null)
   const [activeJobRunId, setActiveJobRunId] = useState<string | null>(null)
   const [showConfirm, setShowConfirm] = useState(false)
   const [showCancelConfirm, setShowCancelConfirm] = useState(false)
   const [cancelling, setCancelling] = useState(false)
-
-  const pollRef = useRef<number | null>(null)
   const errorRef = useRef<HTMLDivElement | null>(null)
   const isRunning = !!runId && !isTerminal(run?.status)
 
@@ -66,31 +67,9 @@ export default function ScrapOut() {
       .catch(() => {})
   }, [])
 
-  useEffect(() => {
-    if (!runId) return
-    let cancelled = false
-    const tick = async () => {
-      try {
-        const status = await getScrapRun(runId)
-        if (cancelled) return
-        setRun(status)
-        if (isTerminal(status.status)) {
-          if (pollRef.current) window.clearInterval(pollRef.current)
-          pollRef.current = null
-          setActiveJobRunId(null)
-        }
-      } catch (err) {
-        if (!cancelled) reportError(err instanceof Error ? err.message : String(err))
-      }
-    }
-    void tick()
-    pollRef.current = window.setInterval(tick, POLL_MS)
-    return () => {
-      cancelled = true
-      if (pollRef.current) window.clearInterval(pollRef.current)
-      pollRef.current = null
-    }
-  }, [runId])
+  // Polling now belongs to the provider, which keeps running regardless of
+  // whether this page is mounted.
+
 
   const handleFiles = (files: FileList | null) => {
     if (!files || files.length === 0) return
@@ -106,13 +85,12 @@ export default function ScrapOut() {
   const handleConfirmed = async () => {
     setShowConfirm(false)
     setLoadError(null)
-    setRun(null)
     try {
       const { runId: newRunId } =
         kind === 'vendor'
           ? await startVendorScrap({ certificate: certificate!, env })
           : await startInHouseScrap(serialNumber, env)
-      setRunId(newRunId)
+      startTracking(newRunId)
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         reportError(`A scrap job is already running (${err.activeRunId ?? 'unknown'}).`)
@@ -127,7 +105,7 @@ export default function ScrapOut() {
     if (!runId) return
     setCancelling(true)
     try {
-      await cancelScrapRun(runId)
+      await cancelRun()
     } catch (err) {
       reportError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -136,8 +114,7 @@ export default function ScrapOut() {
   }
 
   const reset = () => {
-    setRunId(null)
-    setRun(null)
+    clearRun()
     setCertificate(null)
     setSerialNumber('')
     setLoadError(null)

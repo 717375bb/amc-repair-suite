@@ -17,6 +17,7 @@ import {
   type RunLogEvent,
   type RunStatusResponse,
 } from './api'
+import { useReportRunActivity } from './activeRuns'
 
 /**
  * CLAUDE_CODE_PROMPT (persistent run state + cancel button) — supersedes
@@ -229,6 +230,19 @@ export function OrderWriteUpsRunProvider({ children }: { children: ReactNode }) 
     )
     return discoveryRun.lines.filter((l) => l.status === 'completed' && !attemptedKeys.has(l.lineId))
   }, [discoveryRun, executeRun, executeEvents])
+
+  // Reports into the shared registry so the sidebar can show this tab as
+  // running from anywhere. Read-only: this provider remains the single
+  // owner of its own polling and cancel semantics.
+  const owRunning =
+    (!!discoveryRunId && !isTerminal(discoveryRun?.status)) || (!!executeRunId && !isTerminal(executeRun?.status))
+  const owPhase =
+    executeRunId && !isTerminal(executeRun?.status)
+      ? 'writing'
+      : discoveryRunId && !isTerminal(discoveryRun?.status)
+        ? 'finding lines'
+        : null
+  useReportRunActivity('/order-write-ups', owRunning ? { running: true, phase: owPhase, done: executeEvents.length || undefined } : null)
 
   return (
     <OrderWriteUpsRunContext.Provider

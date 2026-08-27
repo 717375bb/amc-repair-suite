@@ -238,6 +238,21 @@ export function openDb(dbPath: string): Database.Database {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
+  /**
+   * REQUIRED FOR PARALLEL JOBS (2026-08-27). Every runner is its own OS
+   * process opening this same file, and with jobs now running concurrently
+   * across tabs, several of them write audit rows at overlapping moments.
+   *
+   * WAL already lets readers and one writer coexist, but it still allows
+   * only ONE writer at a time — and without a busy timeout the second
+   * writer does not wait, it fails immediately with SQLITE_BUSY. That would
+   * surface as a random job dying mid-run for no reason the analyst could
+   * act on, and worse, AFTER its real MXI write had already landed.
+   *
+   * 5s is far longer than any write here takes (single-row inserts), so in
+   * practice this converts a spurious failure into an imperceptible wait.
+   */
+  db.pragma('busy_timeout = 5000');
   db.exec(SCHEMA_SQL);
   ensureColumn(db, 'write_up_actions', 'order_number', 'TEXT');
   // quote_extractions already has real rows in the live audit.db from runs

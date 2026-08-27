@@ -13,6 +13,7 @@ import {
   getEsdRunStatus,
   type EsdRunStatusResponse,
 } from './esdFinderApi'
+import { useReportRunActivity } from './activeRuns'
 
 /**
  * CLAUDE_CODE_PROMPT (persistent run state + cancel button) — symmetric to
@@ -178,6 +179,17 @@ export function EsdFinderRunProvider({ children }: { children: ReactNode }) {
       setCompareRun(null)
     }
   }, [writeRunId, writeRun, compareRunId, compareRun])
+
+  // Same reporting contract as every other tab — see activeRuns.tsx.
+  const esdRunning =
+    (!!compareRunId && !isTerminal(compareRun?.status)) || (!!writeRunId && !isTerminal(writeRun?.status))
+  const esdPhase =
+    writeRunId && !isTerminal(writeRun?.status)
+      ? (writeRun?.phase ?? 'writing')
+      : compareRunId && !isTerminal(compareRun?.status)
+        ? (compareRun?.phase ?? 'reading')
+        : null
+  useReportRunActivity('/esd-finder', esdRunning ? { running: true, phase: esdPhase } : null)
 
   return (
     <EsdFinderRunContext.Provider
