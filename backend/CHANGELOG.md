@@ -4,6 +4,21 @@ All notable changes to this project, newest session first. Item numbers refer to
 
 ## 2026-08-27
 
+### Added — daily back-shop listing: parser and row classification
+First piece of the in-house-scrap-from-a-daily-list workflow. Reads `BackShopListing.xlsm`, sheet `Today`, and decides which rows are candidates.
+
+- **Confirmed against the real workbook, not assumed.** Row 1 is the header row *except* that A1 holds the sheet's date (`8/27/2026`) rather than a header, and column A of each data row holds a composite `PartNo&SerialNo` key. Neither is used as a field — part number and serial are read from their own named columns, so a change to that composite key cannot silently shift what gets scrapped. The existing `readSheetRows` already tolerates the A1 quirk (the date becomes an unused extra key), so it is reused rather than special-cased.
+- **Already-actioned rows are excluded and say why.** Real statuses on the live sheet include `SCRAPPED`, `Sent to QRO for scrap` and `transfer qro scrap 8/18` — all three mean someone has already dispositioned the part, and scrapping it again would be a second irreversible action. The exclusion **quotes the sheet verbatim** rather than paraphrasing, because that text is the whole justification a human needs.
+- **The match errs toward excluding, deliberately.** Over-excluding costs a part not scrapped today, which is visible and recoverable; under-excluding costs a double scrap, which is not. Those are not symmetric. It is still whole-word matched, so an unrelated token containing "scrap" cannot quietly remove real work from a run.
+- **Stale-sheet warning** reads A1 and compares to today, warning without blocking per explicit choice — a sheet updated late in the day is normal, but running yesterday's list would scrap the wrong parts. An **unreadable** date warns too; it never passes as "probably fine". Future-dated sheets warn as well.
+- Rows missing a part number or serial are counted, not silently dropped, so "46 rows parsed, 44 checked" is explainable.
+
+**Verified against the live workbook**: 46 rows parsed, 0 incomplete, date read as today, 8 CRAs found for the filter, and a 32 open / 14 already-handled split with the correct verbatim reason on each exclusion. 12 new unit tests, 97 total.
+
+Two findings from writing the tests, both real:
+- A "scrapbook" assertion contradicted its own test name. `\b` correctly does not match inside `scrapbook`, so the expectation was wrong, not the code — corrected to assert the safe behaviour it was actually describing.
+- Dates rendered as `26 Aug 2026` via an `Intl` locale rather than this project's `DD-MMM-YYYY`. Now formatted explicitly, matching every other date in the suite.
+
 ### Added — jobs run in parallel across tabs, with live status everywhere
 Per explicit user direction: write-ups, the ESD writer and quotes can now run at once, and you can toggle between them while their statuses keep updating.
 
