@@ -4,6 +4,23 @@ All notable changes to this project, newest session first. Item numbers refer to
 
 ## 2026-08-27
 
+### Changed — in-house scrap now consults the approved-locations list
+Per explicit user direction. The daily back-shop listing genuinely contains parts at bases PSA does not operate out of — `GNV/USSTG` appears on the live sheet — and scrapping is irreversible, so the flow now refuses rather than improvising a shop at a site we have no business creating work at.
+
+**A gate only.** The shop a part is sent to is still derived from its own base, exactly as before. `approvedLocations.ts` also knows that NQA/QRO/CKB/TUS are handled out of CLT *for order creation*, but applying that here would redirect real parts to a different physical shop than they go to today. That is a separate decision and is deliberately not taken as a side effect of adding this check.
+
+### Added — the synced SharePoint copy is found automatically
+`BackShopListing.xlsm` is now located on disk, with an upload fallback still to come (the "both" choice).
+
+- **Confirmed working against the real synced library**: `C:\Users\<user>\American Airlines, Inc\CRA - CRA Team\BackShopListing.xlsm`. Note the sync root is `American Airlines, Inc`, **not** the pre-existing `OneDrive - American Airlines, Inc`, which holds only Favorites and is a different thing. Both are searched, plus plain `OneDrive`, rather than hard-coding the one path observed today.
+- Reached as an ordinary local file — no Azure app registration, no IT admin consent, no stored credentials. Same reasoning that put this project on Outlook COM rather than Graph.
+- `BACK_SHOP_LISTING_PATH` overrides discovery for a machine that syncs somewhere unusual.
+- Not finding it is a normal answer, not a failure: the UI will fall back to letting the analyst drop the file in.
+
+**A real bug found and fixed while verifying this**: the walk used `readdirSync`'s `Dirent` flags, and **a OneDrive-synced library folder is a reparse point** — `isDirectory()` reports `false` for it, so the search skipped straight past `CRA - CRA Team` and reported the workbook missing while it was plainly sitting there. `statSync` follows the reparse point and answers the question actually being asked. Files are checked the same way, since a cloud-only placeholder is not a plain file either.
+
+**Verified end to end from the synced copy**: discovered automatically, 46 rows parsed, dated today, 32 open / 14 already handled, 8 CRAs for the filter.
+
 ### Added — daily back-shop listing: parser and row classification
 First piece of the in-house-scrap-from-a-daily-list workflow. Reads `BackShopListing.xlsm`, sheet `Today`, and decides which rows are candidates.
 

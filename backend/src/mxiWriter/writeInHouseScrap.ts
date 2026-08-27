@@ -2,6 +2,7 @@ import type { Page } from 'playwright';
 import type { MxiClient } from './mxiClient.js';
 import { clickIfPresent, enterPasswordIfPrompted, pace, repairLocationCandidates } from './scrapFlowHelpers.js';
 import { PART_DETAILS_URL_MARKER } from '../writeUps/shared/partOwnDetails.js';
+import { evaluateBaseStation } from '../writeUps/shared/approvedLocations.js';
 import {
   looksLikeDetailsTab,
   parseCurrentLocation,
@@ -383,6 +384,37 @@ export async function writeInHouseScrap(
       };
     }
     log.info({ serialNumber, currentLocation, candidates }, 'derived in-house scrap location candidates');
+
+    // APPROVED-BASE GATE (2026-08-27, explicit user direction: "In-house
+    // scrap should consult the approved locations list").
+    //
+    // The daily back-shop listing genuinely contains parts at bases PSA
+    // does not operate out of — GNV/USSTG appears on the live sheet — and
+    // scrapping is irreversible, so this refuses rather than improvising a
+    // shop at a site we have no business creating work at.
+    //
+    // A GATE only: the shop this part is sent to is still derived from its
+    // OWN base, exactly as before. approvedLocations.ts also knows that
+    // NQA/QRO/CKB/TUS are handled out of CLT for ORDER CREATION, but
+    // applying that here would redirect real parts to a different physical
+    // shop than they go to today. That is a separate decision and is
+    // deliberately not taken as a side effect of adding this check.
+    const approval = evaluateBaseStation(currentLocation);
+    if (!approval.approved) {
+      log.info(
+        { serialNumber, currentLocation, baseStation: approval.baseStation },
+        '[in-house scrap] not an approved base — skipping, nothing changed',
+      );
+      return {
+        status: 'failed',
+        stepsTaken,
+        locationUsed,
+        partDescription,
+        errorMessage:
+          `${approval.reason ?? `${currentLocation} is not an approved base.`} ` +
+          `Serial ${serialNumber} was not scrapped and nothing was changed.`,
+      };
+    }
 
     // REAL BUG FOUND AND FIXED (2026-08-25). Reported as: the flow "says
     // there's no work package, even though there is".
