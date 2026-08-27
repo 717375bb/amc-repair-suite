@@ -147,8 +147,8 @@ export const VENDOR_REGISTRY: Readonly<Record<string, VendorConfig>> = Object.fr
   '1BAY3': buildWarrantyTerminalStateVendorConfig('1BAY3', 'CSI AEROSPACE INC', { hasPartDetailsStep: true }),
   VC00524: buildWarrantyTerminalStateVendorConfig('VC00524', 'DCM GROUP INC', { hasPartDetailsStep: true }),
   // RMA vendor — see shared/rmaVendors.ts's RMA_VENDOR_IDS.
-  '8719': buildWarrantyTerminalStateVendorConfig('8719', 'DUCOMMUN TECHONOLGIES', { hasPartDetailsStep: true }),
-  '2750': buildWarrantyTerminalStateVendorConfig('2750', 'EATON CORPORATION', { hasPartDetailsStep: true }),
+  '08719': buildWarrantyTerminalStateVendorConfig('08719', 'DUCOMMUN TECHONOLGIES', { hasPartDetailsStep: true }),
+  '02750': buildWarrantyTerminalStateVendorConfig('02750', 'EATON CORPORATION', { hasPartDetailsStep: true }),
   '59875': buildWarrantyTerminalStateVendorConfig('59875', 'EATON INDUSTRIAL CORPORATION', { hasPartDetailsStep: true }),
   VC00879: buildWarrantyTerminalStateVendorConfig('VC00879', 'FIRSTMARK AEROSPACE CORPORATION', { hasPartDetailsStep: true }),
   // Real recording evidence exists for this vendor
