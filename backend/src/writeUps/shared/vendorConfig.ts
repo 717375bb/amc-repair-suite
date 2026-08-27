@@ -115,6 +115,17 @@ export interface VendorConfig {
    */
   hasPartDetailsStep?: boolean;
   /**
+   * Read the part's removal date from Historical > Additional and put
+   * "Removal date: DD-MMM-YYYY" in the Note To Vendor, directly above the
+   * times and cycles table.
+   *
+   * Aerotron (2N512) only today, per explicit user direction. A per-vendor
+   * opt-in rather than engine-wide: every other vendor's note stays
+   * byte-for-byte identical, and turning it on for another vendor later is
+   * one flag, not a code change.
+   */
+  needsRemovalDateInNotes?: boolean;
+  /**
    * Preferred-vendor check (all vendors except Aero Repair, which never
    * consumes VendorConfig at all). Broad by explicit user instruction for
    * now ("all non-Aero-Repair parts", not narrowed to multi-vendor-bid
@@ -248,7 +259,7 @@ export function buildWarrantyTerminalStateVendorConfig(
   vendorCode: string,
   displayName: string,
   overrides?: Partial<
-    Pick<VendorConfig, 'form' | 'authFlowPolicy' | 'defaultTerminalState' | 'warrantyEligible' | 'shipsetCase' | 'hasPartDetailsStep'>
+    Pick<VendorConfig, 'form' | 'authFlowPolicy' | 'defaultTerminalState' | 'warrantyEligible' | 'shipsetCase' | 'hasPartDetailsStep' | 'needsRemovalDateInNotes'>
   >,
 ): VendorConfig {
   // CLAUDE_CODE_PROMPT (CRA/vendor grouping, 2026-08-19) — every vendor in

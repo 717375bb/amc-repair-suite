@@ -488,11 +488,22 @@ export async function readUsstgLineTaskName(page: Page, linkText: string): Promi
 // ---- Notes composition (moved from 0t1y4/notes.ts, parameterized) ----
 
 /** Confirmed correct: header line + blank line + part description + Usage Parm table. */
-export function composeNotesForNormalLine(details: PartOwnDetails, notesHeader: string): string {
+export function composeNotesForNormalLine(
+  details: PartOwnDetails,
+  notesHeader: string,
+  /**
+   * Aerotron only, per explicit user direction (2026-08-27): the exact
+   * wording "Removal date: DD-MMM-YYYY", sitting directly above the times
+   * and cycles table. Undefined for every other vendor, whose note stays
+   * byte-for-byte what it was.
+   */
+  removalDateLine?: string,
+): string {
   const partLine = `${details.partDescription} (PN: ${details.partNumber}, SN: ${details.serialNumber})`;
   const tableHeader = 'Usage Parm\tTSN\tTSO\tTSI';
   const tableRows = details.usageRows.map((row) => `${row.label}\t${row.tsn}\t${row.tso}\t${row.tsi}`);
-  return [notesHeader, '', partLine, tableHeader, ...tableRows].join('\n') + '\n';
+  const middle = removalDateLine ? [partLine, removalDateLine] : [partLine];
+  return [notesHeader, '', ...middle, tableHeader, ...tableRows].join('\n') + '\n';
 }
 
 /** Confirmed correct as recorded: header-only, no description line even though PN/SN are available. */
