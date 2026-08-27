@@ -4,6 +4,24 @@ All notable changes to this project, newest session first. Item numbers refer to
 
 ## 2026-08-27
 
+### Added — Aerotron notes carry the part's removal date
+Per explicit user direction: the Note To Vendor must read `Removal date: DD-MMM-YYYY` directly above the times and cycles table.
+
+- **The rule that matters**: the event used is *not* the most recent, but **the most recent one whose NAME contains "removal"**. The real captured history for `090520025353A` proves why — it holds an `Installation` on 16-JUN-2026 that is newer than the `Removal` on 04-APR-2026. Sorting by date alone would pick confidently and wrongly.
+- **Built against the real DOM, not the recording.** `npm run diag:removal-date` captured the actual page: table `#idTableAdditionalHistory` at `&aTab=Historical.idTabAdditionalHistory`, columns `Event | Recorded By | Reason | Note | Event Date | …`.
+- **The Event Date column is located from the HEADER, not a fixed index.** This is not defensive habit — the captured data shows the **Note** column routinely contains dates of its own ("the release date has been modified from 07-NOV-2025 … to 15-APR-2026 …"), so any "first cell holding a date" approach would read the wrong column on those rows.
+- **Dates are taken verbatim off the page**, never reformatted through a date library. MXI already renders DD-MMM-YYYY, and the real removal timestamp here is `00:37 EDT` — precisely where a timezone round-trip would render the previous day.
+- **`(not found)` means one thing only.** A history that was read and genuinely holds no removal event gets the placeholder, per the user's choice. A history that could **not be read** returns a distinct `removal_date_unreadable` outcome and fails the line — otherwise a broken selector would quietly stamp `(not found)` on every Aerotron note and look exactly like a correct one.
+- **Returns the page to the Details tab before finishing.** Load-bearing, not tidying: MXI remembers the active tab per session, so leaving it on Historical would make the *next* part open there too, where `#idTableCurrentUsage` does not exist and the usage read would fail. That exact mechanism caused a real bug in the in-house scrap flow two days earlier.
+- Scoped to Aerotron by a per-vendor flag (`needsRemovalDateInNotes`); every other vendor's note is byte-for-byte unchanged, verified by rendering both.
+
+**Two real bugs caught by replaying the reader against the captured page before it ever ran live:**
+
+1. **`__name is not defined`** — const arrow helpers inside `page.evaluate` are wrapped by tsx/esbuild's `keepNames` in a helper that does not exist in the page. The same trap is already documented in `createWorkPackage.ts`, and it was walked into again; the evaluate body is now straight-line code with the constraint restated in place.
+2. **A whitespace regex silently degraded to `/s+/g`**, which replaces literal `s` characters — `"Installation of BATTERY"` became `"In tallation of BATTERY"`. It passed the first replay only because `"Removal of BATTERY, APU"` happens to contain no lowercase `s`. Verified fixed both ways.
+
+**Verified** end to end against the real captured production page: 162 event rows parsed, correct answer `27-AUG-2026`, from `Removal of BATTERY, APU (MODEL 40178-24).` — with the note rendering exactly as specified and other vendors' notes unchanged.
+
 ### Fixed — the leading-zero merge silently broke two lookups
 `ab6658e` renamed two registry ids (`8719` → `08719`, `2750` → `02750`) but left the tables keyed on the old ids.
 

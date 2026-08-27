@@ -310,6 +310,16 @@ export function vendorCodeOutcomeToLogEvent(
         orderNumber: outcome.fields.generatedOrderNumber ?? undefined,
         detail: outcome.externalReferenceNote,
       };
+    case 'removal_date_unreadable':
+      return {
+        ...base,
+        partNumber: outcome.partNumber,
+        serialNumber: outcome.serialNumber,
+        status: 'exception',
+        summary: "This vendor needs a removal date in its note, but the part's event history could not be read. Needs manual review.",
+        exceptionType: 'removal_date_unreadable',
+        detail: outcome.reason,
+      };
     case 'base_not_approved':
       return {
         ...base,

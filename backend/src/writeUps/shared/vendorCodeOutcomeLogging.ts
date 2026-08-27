@@ -87,6 +87,16 @@ export function logVendorCodeOutcome(
       );
       break;
     }
+    case 'removal_date_unreadable': {
+      dbOutcome = 'removal_date_unreadable';
+      filledFieldsJson = JSON.stringify({ serialNumber: outcome.serialNumber, reason: outcome.reason }, null, 2);
+      log.error(
+        { partNumber: outcome.partNumber, serialNumber: outcome.serialNumber, reason: outcome.reason },
+        'This vendor requires a removal date in its Note To Vendor, but the event history could not be read. Nothing filled, no order created.',
+      );
+      success = false;
+      break;
+    }
     case 'base_not_approved': {
       dbOutcome = 'base_not_approved';
       filledFieldsJson = JSON.stringify({ serialNumber: outcome.serialNumber, currentLocation: outcome.currentLocation }, null, 2);

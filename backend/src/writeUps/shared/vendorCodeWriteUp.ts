@@ -53,6 +53,8 @@ import { closePartDetailsReceivingNotes, openPartDetailsReceivingNotes, readPart
 import { isRmaVendor } from './rmaVendors.js';
 import { buildContractChargeToAccount, detectContractCode, type ContractCode } from './contractCodes.js';
 import { evaluateBaseStation } from './approvedLocations.js';
+import { readRemovalDate } from './readRemovalDate.js';
+import { composeRemovalDateLine } from './removalDate.js';
 import { captureVendorCodeGridDiagnostics } from './vendorCodeGridDiagnostics.js';
 import { createWorkPackageForLine, findNoWorkPackageRowsOnGrid } from './createWorkPackage.js';
 import { extractRemovalTaskInfo, readPreferredVendorIndicator, type PreferredVendorIndicatorState } from './removalTaskInfo.js';
@@ -577,6 +579,13 @@ export type VendorCodeWriteUpOutcome =
   | { status: 'order_created_awaiting_rma'; fields: VendorCodeWriteUpFields; externalReferenceNote: string }
   | { status: 'no_candidate_lines'; vendorCode: string }
   /**
+   * The vendor requires a removal date in its Note To Vendor, but the
+   * event history could not be READ. Distinct from a history that simply
+   * holds no removal event, which is a legitimate answer and gets the
+   * placeholder instead.
+   */
+  | { status: 'removal_date_unreadable'; partNumber: string; serialNumber: string; reason: string }
+  /**
    * The line's base is not one PSA creates repair orders out of.
    * Discovery already filters these, so reaching here means the line was
    * selected from an older snapshot — re-checked rather than trusted.
@@ -1017,6 +1026,31 @@ export async function runVendorCodeWriteUp(
     } else {
       await openPartOwnDetails(page, candidate.linkText, candidate.serialNumber);
       const partOwnDetails = await readPartOwnDetails(page, candidate.partNumber, candidate.serialNumber);
+
+      // AEROTRON REMOVAL DATE (2026-08-27) — read in this SAME visit,
+      // while the part's own details page is already open, rather than
+      // opening it a second time. readRemovalDate returns the page to the
+      // Details tab before it finishes; that is load-bearing, not tidying,
+      // because MXI remembers the active tab per session and leaving it on
+      // Historical would break the next line's usage read.
+      let removalDateLine: string | undefined;
+      if (config.needsRemovalDateInNotes) {
+        const removal = await readRemovalDate(page);
+        if (removal.status === 'unreadable') {
+          // Deliberately NOT the placeholder. "(not found)" is a real
+          // answer meaning the history holds no removal event; using it
+          // for a failed READ would make a broken selector produce notes
+          // that look correct on every line.
+          await closePartOwnDetails(page);
+          return {
+            status: 'removal_date_unreadable',
+            partNumber: candidate.partNumber,
+            serialNumber: candidate.serialNumber,
+            reason: removal.error ?? 'Could not read the event history.',
+          };
+        }
+        removalDateLine = composeRemovalDateLine(removal.formatted);
+      }
       const usageClassification = classifyUsageTable(partOwnDetails.usageRows);
 
       if (usageClassification === 'present_all_zero') {
@@ -1057,7 +1091,7 @@ export async function runVendorCodeWriteUp(
       // (a normal, non-BN line whose Note To Vendor was header-only).
       notesText = doNotShipReason || isBnFlow
         ? composeNotesForBnLine(config.form.notesHeader)
-        : composeNotesForNormalLine(partOwnDetails, config.form.notesHeader);
+        : composeNotesForNormalLine(partOwnDetails, config.form.notesHeader, removalDateLine);
       await closePartOwnDetails(page);
 
       // CLAUDE_CODE_PROMPT (#1, new vendors) — the part-level Details /
