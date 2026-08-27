@@ -1,4 +1,4 @@
-import type { Page } from 'playwright';
+import type { Page, Locator } from 'playwright';
 import type { MxiClient } from '../../mxiWriter/mxiClient.js';
 import { waitBeforeRetry } from '../aeroRepair/retryBackoff.js';
 import {
@@ -51,7 +51,8 @@ import { closePartOwnDetails, openPartOwnDetails, readPartOwnDetails, type PartO
 import { completeCreateOrderOnly, composeAwaitingRmaNote, composeDoNotShipNote, verifyExternalReferenceCommitted, ZERO_USAGE_DO_NOT_SHIP_REASON } from './createOrderOnly.js';
 import { closePartDetailsReceivingNotes, openPartDetailsReceivingNotes, readPartDetailsReceivingNotes } from './partDetailsReceivingNotes.js';
 import { isRmaVendor } from './rmaVendors.js';
-import { resolveParkerContract, type ParkerContractOutcome } from './parkerContractCodes.js';
+import { buildContractChargeToAccount, detectContractCode, type ContractCode } from './contractCodes.js';
+import { evaluateBaseStation } from './approvedLocations.js';
 import { captureVendorCodeGridDiagnostics } from './vendorCodeGridDiagnostics.js';
 import { createWorkPackageForLine, findNoWorkPackageRowsOnGrid } from './createWorkPackage.js';
 import { extractRemovalTaskInfo, readPreferredVendorIndicator, type PreferredVendorIndicatorState } from './removalTaskInfo.js';
@@ -235,6 +236,14 @@ export interface VendorCodeCandidateLine {
   /** The Removal Information Task ID paired with removalTaskName — see its docstring. */
   removalTaskId: string | null;
   /**
+   * The line's own "<STATION>/<CODE>" location, read off the grid row at
+   * discovery time. Null when the row carries no readable location token.
+   * Feeds the approved-base check (approvedLocations.ts) so a line at a
+   * base PSA does not create orders out of is skipped before it is ever
+   * offered for write-up.
+   */
+  currentLocation: string | null;
+  /**
    * True for a real USSTG inventory row that has NO work package yet (no
    * "Repair ..." link at all). Such a row used to be dropped silently by
    * findCandidateLinesForVendorCodeOnce, so the vendor resolved to "0
@@ -287,6 +296,26 @@ export interface VendorCodeCandidateLine {
  */
 const REPAIR_LINK_PATTERN = /\(PN: ([^,]+), (SN|BN): ([^)]+)\)$/;
 
+/**
+ * The "<STATION>/<CODE>" location token from a candidate's own grid row.
+ *
+ * Same row-scoped approach and same case-insensitive pattern as
+ * scheduleWorkPackageForm.ts's readCurrentLocationCode (MXI's location
+ * casing genuinely varies by site — DFW/REPAIR1/SHOP1 alongside
+ * PNS/Repair1/Shop1). Differs in one deliberate way: it returns null
+ * instead of throwing, because at DISCOVERY an unreadable location must
+ * become a visible skipped line with a reason, not an aborted vendor.
+ */
+async function readRowLocationCode(repairLink: Locator): Promise<string | null> {
+  try {
+    const rowText = await repairLink.locator('xpath=ancestor::tr[1]').innerText();
+    const match = rowText.match(/\b([A-Za-z]{3})\/([A-Za-z0-9]+)\b/);
+    return match ? `${match[1]}/${match[2]}` : null;
+  } catch {
+    return null;
+  }
+}
+
 async function findCandidateLinesForVendorCodeOnce(
   page: Page,
   todoListUrl: string,
@@ -308,6 +337,11 @@ async function findCandidateLinesForVendorCodeOnce(
 
     const removalTask = await extractRemovalTaskInfo(repairLinks.nth(i));
     const preferredVendorState = await readPreferredVendorIndicator(repairLinks.nth(i));
+    // Read off the SAME row, at the same time, so DISCOVERY can decide
+    // whether PSA even creates orders out of this base. Without it a
+    // non-approved base could only be caught at execute time, after a run
+    // slot had already been spent on the line.
+    const currentLocation = await readRowLocationCode(repairLinks.nth(i));
 
     candidates.push({
       partNumber: match[1],
@@ -317,6 +351,7 @@ async function findCandidateLinesForVendorCodeOnce(
       removalTaskName: removalTask.name,
       removalTaskId: removalTask.id,
       preferredVendorState,
+      currentLocation,
     });
   }
 
@@ -352,6 +387,7 @@ async function findCandidateLinesForVendorCodeOnce(
       // it is re-read after creation, before any decision uses it.
       preferredVendorState: 'not_found',
       needsWorkPackage: true,
+      currentLocation: row.currentLocation,
       noWorkPackageInventoryToken: row.inventoryToken,
       noWorkPackagePartDescription: row.partDescription,
     });
@@ -529,6 +565,12 @@ export type VendorCodeWriteUpOutcome =
    */
   | { status: 'order_created_awaiting_rma'; fields: VendorCodeWriteUpFields; externalReferenceNote: string }
   | { status: 'no_candidate_lines'; vendorCode: string }
+  /**
+   * The line's base is not one PSA creates repair orders out of.
+   * Discovery already filters these, so reaching here means the line was
+   * selected from an older snapshot — re-checked rather than trusted.
+   */
+  | { status: 'base_not_approved'; partNumber: string; serialNumber: string; currentLocation: string | null; reason: string }
   /**
    * CLAUDE_CODE_PROMPT (Addition 3, preferred-vendor check) — a legitimate,
    * expected business outcome, not an error: another vendor is preferred
@@ -892,6 +934,27 @@ export async function runVendorCodeWriteUp(
     // creation, proceed directly (matches the BN recording's own sequence).
 
     const currentLocation = await readCurrentLocationCode(page, candidate.linkText);
+    // APPROVED-BASE CHECK, second of two. Discovery already skipped these,
+    // but a line can be selected off a stale snapshot, so this re-reads the
+    // live location and decides again rather than trusting the earlier pass.
+    // Placed BEFORE transformReturnToLocation (routing a base PSA cannot
+    // order out of would be meaningless) and before any field is filled, so
+    // nothing is written.
+    const approval = evaluateBaseStation(currentLocation);
+    if (!approval.approved) {
+      log.info(
+        { vendorConfigId: config.id, partNumber: candidate.partNumber, serialNumber: candidate.serialNumber, currentLocation },
+        '[approved-base] line is not at an approved base — skipping, nothing changed',
+      );
+      return {
+        status: 'base_not_approved',
+        partNumber: candidate.partNumber,
+        serialNumber: candidate.serialNumber,
+        currentLocation,
+        reason: approval.reason ?? 'Not an approved base for order creation.',
+      };
+    }
+
     const returnToLocation = transformReturnToLocation(currentLocation);
 
     // CLAUDE_CODE_PROMPT ("Create Order Only" terminal state) — a single,
@@ -914,7 +977,13 @@ export async function runVendorCodeWriteUp(
      * redirect).
      */
     let effectiveAuthFlow: string = resolved.authFlow;
-    let parkerContract: ParkerContractOutcome = { contractCode: null, chargeToAccount: null };
+    /**
+     * Set once the part's receiving notes have been read. The Charge To
+     * Account itself cannot be built here — it needs the line's own
+     * CR-prefix, which is only read further down, after the Schedule Work
+     * Package form has autofilled.
+     */
+    let contractCode: ContractCode | null = null;
     let doNotShipReason: string | null = null;
     let receivingNotes: string | null = null;
     let notesText: string;
@@ -1005,16 +1074,20 @@ export async function runVendorCodeWriteUp(
         //
         // That guard stops any line whose notes mention "account", because
         // a human referring to an account means we do not know which one to
-        // use and must not guess. A recognised Parker contract code is the
+        // use and must not guess. A recognised contract code is the
         // opposite situation: it says exactly which account to use. Letting
-        // the guard fire first would stop every Parker contract line —
+        // the guard fire first would stop every contract line —
         // "Charge to account PARKERCPH" trips it — and the whole point of
         // this rule is that those lines run automatically.
         //
-        // Scoped to the Parker vendor codes only (see parkerContractCodes.ts):
-        // for any other vendor the guard still fires exactly as before.
-        parkerContract = resolveParkerContract(vendorCode, receivingNotes);
-        if (parkerContract.contractCode) {
+        // Applies to EVERY vendor in this engine, not a fixed list: the
+        // codes travel with the CONTRACT, not the vendor. (The first
+        // version scoped this to Parker, which was wrong on the facts —
+        // FOKKERPBH is Aerotron's, not Parker's.) Aero Repair is excluded
+        // structurally rather than by a check: it runs through its own
+        // engine, which never imports this module.
+        contractCode = detectContractCode(receivingNotes);
+        if (contractCode) {
           // Not warranty work — billed against the contract. Bypass the
           // warranty flow, take REPAIR authorization, and issue + dock,
           // instead of stopping at authorization-only like the rest of
@@ -1026,16 +1099,15 @@ export async function runVendorCodeWriteUp(
               vendorConfigId: config.id,
               partNumber: candidate.partNumber,
               serialNumber: candidate.serialNumber,
-              contractCode: parkerContract.contractCode,
-              chargeToAccount: parkerContract.chargeToAccount,
+              contractCode,
               authFlow: effectiveAuthFlow,
               terminalState: effectiveTerminalState,
             },
-            '[parker-contract] contract code found in receiving notes — repair flow, issue and dock',
+            '[contract-code] contract code found in receiving notes — repair flow, issue and dock',
           );
         }
 
-        if (!parkerContract.contractCode && receivingNotes && /account/i.test(receivingNotes)) {
+        if (!contractCode && receivingNotes && /account/i.test(receivingNotes)) {
           log.error(
             { vendorConfigId: config.id, partNumber: candidate.partNumber, serialNumber: candidate.serialNumber, receivingNotes },
             '[vendor-config] receiving notes mention "account" — flagging for manual review per explicit instruction rather than risk writing to the wrong Charge To Account. Nothing filled, no order created',
@@ -1113,27 +1185,30 @@ export async function runVendorCodeWriteUp(
       // module entirely and is untouched by this. See
       // chargeToAccount.ts's buildDefaultRepairChargeToAccount for the
       // "default to CR7 if no CR-prefix is present at all" rule.
-      // PARKER CONTRACT CODES — see parkerContractCodes.ts.
+      // CONTRACT CODES — see contractCodes.ts.
       //
-      // REAL BUG FOUND AND FIXED (2026-08-26): the first version of this
-      // assigned `config.form.chargeToAccountSuffix` directly. VENDOR_REGISTRY
-      // is `Object.freeze`d, but that is SHALLOW — `config.form` is a
-      // nested object and stays mutable, so the assignment permanently
-      // re-coded the registry entry for the rest of the process. Once ONE
-      // Parker line carried the code, every later line for that vendor
-      // inherited it, whether or not its own notes said so, until the
-      // server restarted. Demonstrated directly against the real registry
-      // before this rewrite, and now pinned by a regression test.
+      // Built here rather than at the notes read, because it needs THIS
+      // line's own CR-prefix, and that is only known once the Schedule Work
+      // Package form has autofilled (chargeToAccountBefore, just above).
       //
-      // The value is used verbatim, with no CR-prefix, per explicit user
-      // direction — so it deliberately bypasses BOTH of the normal
-      // charge-to-account builders rather than being routed through
-      // buildChargeToAccountWithSuffix (which would produce "CR7PARKERCPH"
-      // and, worse, THROWS on any autofilled value that is not exactly
-      // "<CR-prefix>ROUTINE+NONROUTINE" — a shape already seen to vary
-      // live, e.g. "CR7HMV").
-      if (parkerContract.chargeToAccount) {
-        chargeToAccountAfter = parkerContract.chargeToAccount;
+      // CORRECTED 2026-08-27, per explicit user direction: "these accounts
+      // DO need the CR7/9 prefix just like normal." The first version wrote
+      // the bare code with no prefix.
+      //
+      // Uses contractCodes.ts's own lenient prefix extraction rather than
+      // buildChargeToAccountWithSuffix: that one requires the autofilled
+      // value to be exactly "<CR-prefix>ROUTINE+NONROUTINE" and THROWS
+      // otherwise — and that value is already known to vary live (a real
+      // "CR7HMV" was hit). Throwing there would fail a contract line over
+      // the shape of a value being overwritten anyway.
+      //
+      // REAL BUG FIXED (2026-08-26) and still worth knowing: the original
+      // prototype assigned `config.form.chargeToAccountSuffix` directly.
+      // VENDOR_REGISTRY is `Object.freeze`d, but that freeze is SHALLOW —
+      // `config.form` stays mutable — so it permanently re-coded the
+      // registry for the rest of the process. Nothing here mutates config.
+      if (contractCode) {
+        chargeToAccountAfter = buildContractChargeToAccount(chargeToAccountBefore, contractCode);
       } else {
         chargeToAccountAfter =
           config.form.chargeToAccountSuffix === WARRANTY_TERMINAL_STATE_CHARGE_TO_ACCOUNT_SUFFIX

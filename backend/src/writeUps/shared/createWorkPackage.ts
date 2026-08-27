@@ -174,6 +174,13 @@ export interface NoWorkPackageRow {
   inventoryToken: string;
   /** Everything before the Part No token — the Work Package name's description. */
   partDescription: string;
+  /**
+   * The row's own "<STATION>/<CODE>" location, or null if the row carries
+   * no readable token. Needed because these rows never have a repair link
+   * for the normal grid reader to hang off, yet still have to pass the
+   * approved-base check like any other line.
+   */
+  currentLocation: string | null;
 }
 
 /**
@@ -212,7 +219,7 @@ export async function findNoWorkPackageRowsOnGrid(page: Page): Promise<NoWorkPac
     // of this change is that the package's NAME does not decide whether it
     // exists.
     const repairLinkRe = /\(PN: .*, SN: [^)]+\)$/;
-    const out: { partNumber: string; serialNumber: string; inventoryToken: string; partDescription: string }[] = [];
+    const out: { partNumber: string; serialNumber: string; inventoryToken: string; partDescription: string; currentLocation: string | null }[] = [];
 
     // NOTE — the Work Package lookup below is written as straight-line code
     // with NO named helper functions, on purpose. tsx/esbuild compiles this
@@ -290,11 +297,16 @@ export async function findNoWorkPackageRowsOnGrid(page: Page): Promise<NoWorkPac
       if (!partNumber || !serialNumber) continue;
 
       const pnPos = text.indexOf(partNumber);
+      // Same location token every other reader in this suite matches, and
+      // case-insensitive for the same reason: MXI's location casing varies
+      // by site (DFW/REPAIR1/SHOP1 alongside PNS/Repair1/Shop1).
+      const locationMatch = text.match(/\b([A-Za-z]{3})\/([A-Za-z0-9]+)\b/);
       out.push({
         partNumber,
         serialNumber,
         inventoryToken,
         partDescription: pnPos > 0 ? text.slice(0, pnPos).trim() : '',
+        currentLocation: locationMatch ? `${locationMatch[1]}/${locationMatch[2]}` : null,
       });
     }
     return out;

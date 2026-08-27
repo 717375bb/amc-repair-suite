@@ -1,4 +1,5 @@
 import type { Page } from 'playwright';
+import { extractBaseStation, routeBaseStation } from './approvedLocations.js';
 import { createLogger } from '../../logging/logger.js';
 
 const log = createLogger('writeup');
@@ -106,23 +107,21 @@ export async function readCurrentLocationCode(page: Page, linkText: string): Pro
  * "<CODE>/..." shape.
  */
 export function transformReturnToLocation(currentLocation: string): string {
-  const match: RegExpMatchArray | null = currentLocation.trim().match(/^([A-Z0-9]+)\//);
-  if (!match) {
+  const base = extractBaseStation(currentLocation);
+  if (!base) {
     throw new Error(
       `Could not extract a station code from return-to-location value "${currentLocation}" — expected a "<CODE>/..." shape.`,
     );
   }
-  let location = match[1].toString();
-  switch (location){
-    case 'NQA':
-    case 'QRO':
-    case 'CKB':
-    case 'TUC':
-    case 'PHL':
-      location = "CLT";
-      break;
-  }
-  return `${location}/DOCK`;
+  // Routing lives in approvedLocations.ts, which is also what the
+  // discovery-time approval check uses — one source of truth, so the base
+  // a line is ACCEPTED for can never disagree with the base its order is
+  // actually created against.
+  //
+  // Two changes from the inline switch this replaces, both confirmed with
+  // the user on 2026-08-27: TUC was a typo for TUS, and PHL now routes to
+  // ITSELF rather than to CLT.
+  return `${routeBaseStation(base)}/DOCK`;
 }
 
 /** `Schedule Work Package` link on the To Do List / order-line view. */

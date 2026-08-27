@@ -2,6 +2,39 @@
 
 All notable changes to this project, newest session first. Item numbers refer to the numbered work list agreed with the user (e.g. `[#4a]`).
 
+## 2026-08-27
+
+### Fixed — the leading-zero merge silently broke two lookups
+`ab6658e` renamed two registry ids (`8719` → `08719`, `2750` → `02750`) but left the tables keyed on the old ids.
+
+- **Ducommun stopped being treated as an RMA vendor.** `RMA_VENDOR_IDS` still held `8719`, so `isRmaVendor` returned false for `08719` and those lines would have run the ordinary flow instead of stopping for an RMA.
+- **Both vendors lost their CRA purchasing contact**, falling back to the global default `717375` instead of Matthew Fascenda's `238784` — a wrong value written into a real MXI field. Both tables now use the corrected ids.
+
+### Added — vendor 2N512, AEROTRON AIR POWER INC
+Same warranty template as the Parker family, with the part-details step. Its CRA row (Matthew Fascenda, `238784`) already existed, so only the registry entry was missing. Now 47 selectable vendors.
+
+### Changed — contract codes apply to every vendor, and carry the CR-prefix
+Per explicit user direction: "I don't want this to be done per vendor. I want for each line found within non-aero repair vendors to read the part details notes, and ANY part that sees the whole string FOKKERPBH or PARKERCPH to use that account code."
+
+- **The vendor is no longer consulted at all.** `parkerContractCodes.ts` keyed on a fixed list of Parker codes, which was wrong on the facts — **FOKKERPBH is Aerotron's, not Parker's**. The codes travel with the *contract*, so `contractCodes.ts` replaces it and matches on the notes alone.
+- "Non-aero repair vendors" is satisfied **structurally, not by a check**: this module is only ever imported by the vendor-code engine. Aero Repair runs through a separate engine that never touches it.
+- **CORRECTED: the account now carries the line's own CR-prefix** — `CR7PARKERCPH`, `CR9FOKKERPBH` — per "a mistake I made yesterday, these accounts DO need the CR7/9 prefix just like normal." It uses the lenient prefix extraction rather than `buildChargeToAccountWithSuffix`, which **throws** on any autofilled value that isn't exactly `<CR-prefix>ROUTINE+NONROUTINE`; a real `CR7HMV` has been seen live, and failing a contract line over the shape of a value being overwritten anyway would be wrong.
+- The flow change is unchanged and still applies: contract lines take REPAIR authorization and are issued + moved to dock, rather than stopping at authorization-only.
+
+### Added — approved-base registry, and lines from other bases are skipped
+Per explicit user direction: "Sometimes, parts come off at maintenance bases that don't belong to PSA... if a line is from a base other than these, I want that line to be skipped."
+
+- **16 approved bases** in one place (`approvedLocations.ts`): CAK, DCA, PHL, PNS, CVG, DAY, SAV, CLT, DFW, GSP, ORF, TYS route to themselves; **NQA, QRO, CKB, TUS** are handled out of CLT.
+- **Skipped at discovery, and reported.** A non-approved base is never offered for write-up and never spends a run slot, but still appears with its reason — so it is visibly different from a line that was simply never found. The location is read off the same grid row the candidate already comes from, so this costs no extra navigation.
+- **Re-checked independently at execute time**, before any field is filled, since a line can be selected off a stale snapshot. Reaching that check is itself a signal, and it returns a distinct `base_not_approved` outcome rather than a generic error.
+- **An unreadable location is NOT approved.** "We could not tell which base this is" must never become "create the order anyway".
+- **Two corrections to yesterday's merged routing**, both confirmed with the user: **TUC → TUS** (TUC is Tucumán, Argentina; TUS is Tucson International), and **PHL now routes to itself** rather than to CLT. The second is a real change to where PHL parts are sent.
+- `transformReturnToLocation` now reads its routing from the same registry, so the base a line is *accepted* for can never disagree with the base its order is *created against* — pinned by a test that walks all 16.
+
+**Aero Repair needed no change**: its own 12-station routing table already treats anything outside it as an exception, and all 12 of its stations are on the approved list, so it is already stricter than this rule.
+
+**19 new unit tests, 70 total.**
+
 ## 2026-08-26
 
 ### Changed — ESD Finder runs from the Vendor OOR file alone

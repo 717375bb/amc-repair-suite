@@ -87,6 +87,16 @@ export function logVendorCodeOutcome(
       );
       break;
     }
+    case 'base_not_approved': {
+      dbOutcome = 'base_not_approved';
+      filledFieldsJson = JSON.stringify({ serialNumber: outcome.serialNumber, currentLocation: outcome.currentLocation }, null, 2);
+      log.info(
+        { partNumber: outcome.partNumber, serialNumber: outcome.serialNumber, currentLocation: outcome.currentLocation },
+        'Line is not at a base PSA creates repair orders out of — skipped. Nothing filled, no order created.',
+      );
+      success = false;
+      break;
+    }
     case 'no_candidate_lines': {
       dbOutcome = 'no_candidate_lines';
       log.info({ vendorCode: outcome.vendorCode }, 'No candidate lines found for vendor code');

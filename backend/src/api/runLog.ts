@@ -310,6 +310,16 @@ export function vendorCodeOutcomeToLogEvent(
         orderNumber: outcome.fields.generatedOrderNumber ?? undefined,
         detail: outcome.externalReferenceNote,
       };
+    case 'base_not_approved':
+      return {
+        ...base,
+        partNumber: outcome.partNumber,
+        serialNumber: outcome.serialNumber,
+        status: 'skipped',
+        summary: outcome.reason,
+        exceptionType: 'base_not_approved',
+        detail: outcome.currentLocation ? `Line location: ${outcome.currentLocation}` : undefined,
+      };
     case 'no_candidate_lines':
       return { ...base, status: 'exception', summary: 'No lines currently found for this vendor. Needs manual review.', exceptionType: 'no_candidate_lines' };
     case 'vendor_not_preferred':

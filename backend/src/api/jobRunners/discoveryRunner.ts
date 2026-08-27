@@ -4,6 +4,7 @@ import { createReadyMxiClient } from '../../mxiWriter/cliMxiClient.js';
 import type { MxiEnv } from '../../mxiWriter/config.js';
 import { discoverEligibleLines } from '../../writeUps/aeroRepair/batchDiscovery.js';
 import { findCandidateLinesForVendorCode } from '../../writeUps/shared/vendorCodeWriteUp.js';
+import { evaluateBaseStation } from '../../writeUps/shared/approvedLocations.js';
 import { getVendorConfig } from '../../writeUps/shared/vendorRegistry.js';
 import { AERO_REPAIR_VENDOR_ID, listVendors } from '../vendors.js';
 import { discoveredLineToLogEvent, type RunLogEvent } from '../runLog.js';
@@ -73,18 +74,48 @@ async function runVendorCodeDiscovery(client: MxiClient, vendorId: string, vendo
   const candidates = await findCandidateLinesForVendorCode(page, client.todoListUrl, vendorCode);
 
   for (const candidate of candidates) {
+    const base = {
+      seq: seqRef.seq++,
+      timestamp: new Date().toISOString(),
+      vendorId,
+      vendorDisplayName,
+      partNumber: candidate.partNumber,
+      serialNumber: candidate.serialNumber,
+      description: candidate.partNumber,
+    };
+
+    // APPROVED-BASE CHECK (2026-08-27, explicit user direction): "if a line
+    // is from a base other than these, I want that line to be skipped."
+    //
+    // Enforced HERE, at discovery, so a non-approved base is never offered
+    // for write-up and never spends a run slot — but still reported, with
+    // its reason, so a skipped line is visibly different from one that was
+    // simply never found. runVendorCodeWriteUp re-checks independently,
+    // since a line can be selected from an older snapshot.
+    const approval = evaluateBaseStation(candidate.currentLocation);
+    if (!approval.approved) {
+      emit({
+        type: 'line',
+        event: {
+          ...base,
+          status: 'skipped',
+          summary: approval.reason ?? 'Not an approved base for order creation.',
+          exceptionType: 'base_not_approved',
+          detail: candidate.currentLocation ? `Line location: ${candidate.currentLocation}` : undefined,
+        },
+      });
+      continue;
+    }
+
     emit({
       type: 'line',
       event: {
-        seq: seqRef.seq++,
-        timestamp: new Date().toISOString(),
-        vendorId,
-        vendorDisplayName,
-        partNumber: candidate.partNumber,
-        serialNumber: candidate.serialNumber,
-        description: candidate.partNumber,
+        ...base,
         status: 'completed', // discovery-time "found, selectable" — this family has no discovery-time exception classification
-        summary: 'Ready to write up.',
+        summary:
+          approval.routedTo && approval.routedTo !== approval.baseStation
+            ? `Ready to write up — ${approval.baseStation} routes to ${approval.routedTo}.`
+            : 'Ready to write up.',
       },
     });
   }

@@ -611,6 +611,7 @@ export interface WriteUpActionInsert {
     // shared/rmaVendors.ts.
     | 'order_created_awaiting_rma'
     | 'no_candidate_lines'
+    | 'base_not_approved'
     // CLAUDE_CODE_PROMPT (Addition 3, preferred-vendor check) — a
     // legitimate, expected business-outcome skip: another vendor is
     // preferred for this part, so this vendor's bid was skipped before any

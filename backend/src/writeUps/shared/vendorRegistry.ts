@@ -182,6 +182,7 @@ export const VENDOR_REGISTRY: Readonly<Record<string, VendorConfig>> = Object.fr
   '67365': buildWarrantyTerminalStateVendorConfig('67365', 'WOODWARD INC', { hasPartDetailsStep: true }),
   '19710': buildWarrantyTerminalStateVendorConfig('19710', 'WOODWARD MPC', { hasPartDetailsStep: true }),
   '67KR8': buildWarrantyTerminalStateVendorConfig('67KR8', 'VANGUARD AEROSPACE LLC', { hasPartDetailsStep: true }),
+  '2N512': buildWarrantyTerminalStateVendorConfig('2N512', 'AEROTRON AIR POWER INC', { hasPartDetailsStep: true }),
   '3H889': buildWarrantyTerminalStateVendorConfig('3H889', 'PARKER AERO - CA', { hasPartDetailsStep: true }),
   '26433': buildWarrantyTerminalStateVendorConfig('26433', 'PARKER AERO - OH', { hasPartDetailsStep: true }),
   '99321': buildWarrantyTerminalStateVendorConfig('99321', 'PARKER HANNIFIN - FL', { hasPartDetailsStep: true }),
