@@ -1,6 +1,5 @@
 import { createLogger } from '../../logging/logger.js';
 import { resolvePurchasingContactForVendorCode } from './craAssignments.js';
-
 const log = createLogger('writeup');
 
 /**
