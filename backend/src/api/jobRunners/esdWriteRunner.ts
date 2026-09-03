@@ -63,14 +63,36 @@ interface EsdInferenceRowForWrite {
   flag: string;
 }
 
-function parseArgs(): { env: MxiEnv; dbRunId: number; orderNumbers: string[] } {
+/**
+ * An analyst's typed correction for one order, from the review table.
+ *
+ * Both fields are optional and independent: correcting a misread ESD does
+ * not force a note edit, and vice versa. An absent or blank field means
+ * "leave this one alone" — never "write a blank", which would clear a real
+ * value in MXI.
+ */
+export interface EsdWriteOverride {
+  /** ISO YYYY-MM-DD. Already validated and normalised server-side. */
+  esd?: string;
+  /** Replaces the vendor-notes text inside the composed note entry. */
+  note?: string;
+}
+
+function parseArgs(): {
+  env: MxiEnv;
+  dbRunId: number;
+  orderNumbers: string[];
+  overrides: Record<string, EsdWriteOverride>;
+} {
   const args = process.argv.slice(2);
   const envIdx = args.indexOf('--env');
   const runIdIdx = args.indexOf('--esd-run-id');
   const ordersIdx = args.indexOf('--order-numbers');
+  const overridesIdx = args.indexOf('--overrides');
   const rawEnv = envIdx >= 0 ? args[envIdx + 1] : undefined;
   const rawRunId = runIdIdx >= 0 ? args[runIdIdx + 1] : undefined;
   const rawOrders = ordersIdx >= 0 ? args[ordersIdx + 1] : undefined;
+  const rawOverrides = overridesIdx >= 0 ? args[overridesIdx + 1] : undefined;
 
   if (rawEnv !== 'stage' && rawEnv !== 'production') {
     throw new Error(`--env must be exactly "stage" or "production", got: ${rawEnv}`);
@@ -84,11 +106,13 @@ function parseArgs(): { env: MxiEnv; dbRunId: number; orderNumbers: string[] } {
   if (!Array.isArray(orderNumbers) || orderNumbers.length === 0) {
     throw new Error('--order-numbers must be a non-empty JSON array.');
   }
-  return { env: rawEnv, dbRunId, orderNumbers };
+  // Absent is normal — an untouched review table sends none.
+  const overrides = rawOverrides ? (JSON.parse(rawOverrides) as Record<string, EsdWriteOverride>) : {};
+  return { env: rawEnv, dbRunId, orderNumbers, overrides };
 }
 
 async function main(): Promise<void> {
-  const { env, dbRunId, orderNumbers } = parseArgs();
+  const { env, dbRunId, orderNumbers, overrides } = parseArgs();
   const db = new Database(path.join('data', 'audit.db'));
 
   // CLAUDE_CODE_PROMPT (ESD writer changes, A4) — broadened from
@@ -184,10 +208,24 @@ async function main(): Promise<void> {
       // set on the esd_write branch, never merely omitted-but-computed. A
       // future edit to this function can't accidentally push an ESD onto
       // a note-only row without touching this exact branch.
+      // The analyst's own corrections, typed in the review table. Applied
+      // here rather than by rewriting the stored inference, so the audit
+      // record still shows what the pipeline concluded AND the write shows
+      // what the human decided — the two stay distinguishable.
+      const override = overrides[row.order_number] ?? {};
+      const effectiveEsd = override.esd ?? row.inferred_esd;
+      const effectiveNotes = override.note ?? row.vendor_notes;
+      if (override.esd || override.note) {
+        log.info(
+          { orderNumber: row.order_number, esdOverridden: !!override.esd, noteOverridden: !!override.note },
+          'applying analyst correction from the review table',
+        );
+      }
+
       let writeUpdate: { esd?: string; noteText?: string };
       let mxiWriteAction: 'approved_write' | 'approved_note_only_write';
       if (row.actionType === 'esd_write') {
-        if (!row.inferred_esd) {
+        if (!effectiveEsd) {
           // Invariant violated: classifyRowAction() only returns
           // 'esd_write' for flag === 'ok', and applyInferenceRules.ts
           // never leaves inferred_esd null while flag stays 'ok'. Fail
@@ -200,12 +238,18 @@ async function main(): Promise<void> {
           // The ESD FIELD still gets the buffered date (inferred_esd) —
           // unchanged. Only the NOTE changes, to state the vendor's own
           // pre-buffer assumed date instead (corrected 2026-08-20).
-          esd: toMxiDateFormat(row.inferred_esd),
-          noteText: assembleNoteText(row.vendor_notes, row.extracted_base_date) ?? undefined,
+          //
+          // An analyst-typed ESD replaces the inferred one outright: a
+          // human correcting a misread is the more reliable source, and it
+          // is written exactly as typed rather than re-buffered, since they
+          // are stating the ship date they want, not a vendor's raw promise.
+          esd: toMxiDateFormat(effectiveEsd),
+          noteText:
+            assembleNoteText(effectiveNotes, override.esd ?? row.extracted_base_date) ?? undefined,
         };
         mxiWriteAction = 'approved_write';
       } else {
-        writeUpdate = { noteText: assembleNoteText(row.vendor_notes, null) ?? undefined };
+        writeUpdate = { noteText: assembleNoteText(effectiveNotes, null) ?? undefined };
         mxiWriteAction = 'approved_note_only_write';
       }
 

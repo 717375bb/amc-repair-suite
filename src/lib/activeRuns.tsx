@@ -23,6 +23,7 @@ export type RunKey =
   | '/email-quotes'
   | '/scrapped-parts'
   | '/invoice-price-writer'
+  | '/backshop-repairs'
 
 export interface RunActivity {
   /** Present and running. Absent from the map entirely when idle. */

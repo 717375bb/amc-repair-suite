@@ -30,7 +30,14 @@ export async function clickIfPresent(
   } catch {
     return false;
   }
-  await locator.first().click();
+  // The click is bounded too, as of 2026-08-28. It used to run with
+  // Playwright's 30s default even when the caller asked for a short
+  // timeout, so an element that was visible but never became actionable
+  // hung the whole flow for half a minute before throwing — which is
+  // exactly what stalled a real vendor scrap on the receive step's OK
+  // button (#idButtonOK: found, resolved, never clickable). A failed click
+  // still throws; it is a real failure, not something to swallow.
+  await locator.first().click({ timeout: timeoutMs });
   await pace(page);
   return true;
 }

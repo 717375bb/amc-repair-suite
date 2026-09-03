@@ -2,6 +2,7 @@ import { addDays, differenceInCalendarDays, formatISO, isBefore, parseISO, start
 import type { EsdClassification, EsdFlag, InferenceRecord, MatchedOrder, MatchFlag, RunSummary } from '../types.js';
 import { PARTS_PENDING_FALLBACK_DAYS, QUOTE_BUFFER_DAYS, SHIPPING_BUFFER_DAYS } from './constants.js';
 import { parseFlexibleDate } from './dateUtils.js';
+import { resolveExtractedDateYear } from './bareDateYear.js';
 import type { EsdInferenceProvider } from './types.js';
 
 interface BaseFields {
@@ -120,9 +121,39 @@ async function processOrder(
     vendorNotes: base.vendorNotes,
   });
 
+  // Step 2b — the AI could not be reached. Reported as its own outcome, not
+  // folded into "no ESD found": nothing was read, so we know nothing about
+  // this order's notes and must not imply otherwise. See EsdFlag.
+  if (aiResult.providerError) {
+    return finalizeRecord(
+      base,
+      {
+        classification: null,
+        extractedBaseDate: null,
+        bufferDaysApplied: null,
+        usedFallback: false,
+        confidence: null,
+        reasoningNote: aiResult.reasoningNote,
+        inferredEsd: null,
+        aiCallMade: true,
+      },
+      order.flag,
+      todayStart,
+      'inference_unavailable',
+    );
+  }
+
   // Step 3 — apply the offset deterministically, in code.
+  //
+  // The YEAR is decided here too when the vendor never wrote one. Real EQD
+  // notes are bare month/day ("EQD 8/26"), so the model has to invent a
+  // year to return ISO — and it invented 2024 on real runs, putting every
+  // EQD's computed date in the past and rejecting it as stale. Same
+  // principle as the buffer constants: the model reports what the text
+  // says, code decides what it means. See bareDateYear.ts.
+  const yearResolution = resolveExtractedDateYear(base.vendorNotes, aiResult.extractedBaseDate, todayStart);
   const extractedBaseDate = aiResult.extractedBaseDate
-    ? parseFlexibleDate(aiResult.extractedBaseDate)
+    ? parseFlexibleDate(yearResolution.reanchored ? yearResolution.iso : aiResult.extractedBaseDate)
     : null;
 
   let inferredEsd: Date | null = null;
@@ -190,9 +221,20 @@ function finalizeRecord(
   computed: ComputedFields,
   matchFlag: MatchFlag,
   todayStart: Date,
+  /**
+   * Forces a specific outcome regardless of Step 4's date reasoning. Used
+   * only for 'inference_unavailable', where there is no computed date to
+   * reason about and calling it "no ESD found" would misreport the order.
+   * An orphan flag still wins — an orphaned row was never inferable.
+   */
+  overrideFlag?: EsdFlag,
 ): InferenceRecord {
   let flag: EsdFlag = matchFlag;
   let inferredEsdIso: string | null = null;
+
+  if (overrideFlag && matchFlag === 'ok') {
+    return buildRecord(base, computed, overrideFlag, null, null);
+  }
 
   if (computed.inferredEsd) {
     // Step 4 — sanity check regardless of source: a stale computed date is
@@ -217,6 +259,17 @@ function finalizeRecord(
     }
   }
 
+  return buildRecord(base, computed, flag, inferredEsdIso, deltaDaysVsMxi);
+}
+
+/** Assembles the audit record. Extracted so the override path above shares it. */
+function buildRecord(
+  base: BaseFields,
+  computed: ComputedFields,
+  flag: EsdFlag,
+  inferredEsdIso: string | null,
+  deltaDaysVsMxi: number | null,
+): InferenceRecord {
   return {
     ...base,
     classification: computed.classification,

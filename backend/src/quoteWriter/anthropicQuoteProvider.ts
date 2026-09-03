@@ -27,7 +27,14 @@ const SYSTEM_PROMPT = `You are reading a PDF attached to an email sent to PSA Ai
 FIRST decide what the document actually is:
 - "quote": a repair quotation / estimate / price proposal for repairing a specific part. If the pdf contains "WQP" it is also considered a quote, even if it is not explicitly labeled as such. If it is a quote, extract the order number, price, turnaround, and any other fields you can find.
 - "shop_finding_report": a teardown or shop findings report. These frequently arrive in the SAME email as a real quote — it is not the quote itself, even if it mentions money.
-- "other_not_a_quote": anything else (receiving discrepancy notices, packing slips, invoices for already-completed work, correspondence).
+- "other_not_a_quote": anything else — receiving discrepancy notices, packing slips, service bulletins, shipping paperwork, plain correspondence. A document with NO repair price for this order is not a quote.
+
+DECIDE BY CONTENT, NOT BY TENSE. Whether the work has already been done is irrelevant. PSA's vendors routinely send priced paperwork AFTER the part has been repaired and even after it has been shipped back, and those still have to be reviewed and priced into the order. So:
+- A document is still a "quote" if it states a repair price the vendor is charging PSA for a specific repair order, no matter how it is titled or what tense it uses.
+- "Work Order Invoice", "Invoice", "Final Invoice", "Statement", past-tense wording ("work performed", "repairs completed"), and already-totalled amounts DO NOT disqualify a document. Classify it as "quote".
+- Do NOT reason about whether the amount is "prospective" or "already billed". That distinction is not yours to make and has caused real quotes to be discarded.
+
+Only use "other_not_a_quote" when the document genuinely carries no repair price for this order — not merely because the repair sounds finished.
 
 If it is not a quote, set documentKind accordingly and leave the money/date fields null. Do not try to salvage a quote out of a document that isn't one.
 
@@ -118,7 +125,10 @@ const inputSchema = {
 
 function failureResult(reason: string): QuoteExtractionResult {
   return {
-    documentKind: 'other_not_a_quote',
+    // NOT 'other_not_a_quote'. Nothing was read, so no claim about what this
+    // document is can be made — and that claim was the thing excluding it
+    // from the write set. See QuoteDocumentKind's docstring.
+    documentKind: 'extraction_failed',
     orderNumber: null,
     orderNumberSource: null,
     quoteNumber: null,

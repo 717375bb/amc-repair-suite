@@ -16,6 +16,12 @@ import {
   cancelInvoicePriceRun,
   type InvoicePriceRunStatusResponse,
 } from './invoicePriceWriterApi'
+import {
+  getActiveBackShopJob,
+  getBackShopRun,
+  cancelBackShopRun,
+  type BackShopRunStatusResponse,
+} from './backShopApi'
 import { createTrackedRun } from './trackedRun'
 
 /**
@@ -41,6 +47,15 @@ export const ScrapRun = createTrackedRun<ScrapRunStatusResponse>('/scrapped-part
   // The in-house path takes several serials at once, so "N of M" is real
   // information here rather than a spinner.
   progressOf: (run) => ({ done: run.results?.length, total: run.totalRequested }),
+})
+
+export const BackShopRun = createTrackedRun<BackShopRunStatusResponse>('/backshop-repairs', 'BackShop', {
+  getActive: getActiveBackShopJob,
+  getRun: getBackShopRun,
+  cancelRun: cancelBackShopRun,
+  // A whole day's list is checked one part at a time, so "N of M" is real
+  // information rather than a spinner.
+  progressOf: (run) => ({ done: run.findings?.length, total: run.totalRequested }),
 })
 
 export const InvoicePriceRun = createTrackedRun<InvoicePriceRunStatusResponse>(

@@ -111,16 +111,33 @@ async function main(): Promise<void> {
       });
 
       const isQuote = extraction.documentKind === 'quote';
+      const extractionFailed = extraction.documentKind === 'extraction_failed';
       const esd = isQuote ? resolveQuoteEsd(extraction) : null;
 
       // A vendor-stated non-repairable auto-excludes: no repair means no
       // repair to price. A human can still override it back to pending.
-      const disposition = isQuote ? initialDisposition(extraction.vendorSaysNonRepairable) : 'excluded_other';
+      //
+      // A FAILED EXTRACTION IS NOT AN EXCLUSION (2026-08-28). It used to
+      // land here as 'other_not_a_quote' and be excluded outright, which
+      // quietly dropped five real quote PDFs when the API call failed on a
+      // TLS error. Left pending so it stays in front of the analyst; it
+      // cannot be written regardless, because it has no order number and no
+      // price, and it is flagged for review below.
+      const disposition = isQuote
+        ? initialDisposition(extraction.vendorSaysNonRepairable)
+        : extractionFailed
+          ? 'pending'
+          : 'excluded_other';
 
       // Every reason a row can't be auto-trusted, surfaced explicitly
       // rather than collapsed into one opaque boolean — the reviewer needs
       // to know WHY, not just that something's off.
       const reviewReasons: string[] = [];
+      // Stated first and in plain terms: this document was never read, so
+      // nothing below it is a finding about the document itself.
+      if (extractionFailed) {
+        reviewReasons.push(`Could not read this PDF — it has NOT been assessed. ${extraction.reasoningNote}`);
+      }
       if (isQuote && !extraction.orderNumber) reviewReasons.push('No order number found');
       if (isQuote && extraction.unitPrice === null) reviewReasons.push('No price found');
       if (isQuote && extraction.confidence === 'low') reviewReasons.push('Low extraction confidence');

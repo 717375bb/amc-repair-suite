@@ -201,7 +201,19 @@ function LogRow({ event }: { event: RunLogEvent }) {
   const [draftState, setDraftState] = useState<'idle' | 'drafting' | 'drafted'>('idle')
   const [draftError, setDraftError] = useState<string | null>(null)
   const { icon: Icon, className, border } = statusVisual(event.status)
-  const showEmailDraft = event.exceptionType === 'zero_usage' && !!event.usageRows?.length
+  // Keyed off the usage rows being present, NOT off the exception type.
+  //
+  // REAL BUG FIXED (2026-08-28): this used to require
+  // exceptionType === 'zero_usage'. The "Create Order Only" feature routes
+  // every zero-usage USSTG line to 'order_created_do_not_ship' instead, and
+  // effectively every line is USSTG — so no zero_usage event has fired
+  // since 2026-08-07 and this button silently stopped appearing. The parts
+  // still had zero times and cycles; Records just never got told.
+  //
+  // The rows are what the draft is built from, so their presence is the
+  // honest condition. A future third path that carries them gets the button
+  // for free instead of quietly losing it again.
+  const showEmailDraft = !!event.usageRows?.length
 
   // Creates the draft in the analyst's own Outlook Drafts via the backend.
   // Nothing is sent — the send path exists server-side but is off, and the

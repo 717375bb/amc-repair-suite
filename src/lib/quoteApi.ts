@@ -12,7 +12,8 @@ export interface QuoteExtractionRow {
   subject: string | null
   senderName: string | null
   fileName: string
-  documentKind: 'quote' | 'shop_finding_report' | 'other_not_a_quote'
+  /** 'extraction_failed' means the PDF was never read - not a claim about what it is. */
+  documentKind: 'quote' | 'shop_finding_report' | 'other_not_a_quote' | 'extraction_failed'
   orderNumber: string | null
   orderNumberSource: string | null
   quoteNumber: string | null

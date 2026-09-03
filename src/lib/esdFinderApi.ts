@@ -16,7 +16,7 @@ export type EsdClassification =
   | 'not_esd_relevant'
   | 'quote_sent_reference'
   | 'none'
-export type EsdFlag = 'ok' | 'no_esd_found' | 'orphaned_vendor_row' | 'orphaned_cra_row'
+export type EsdFlag = 'ok' | 'no_esd_found' | 'inference_unavailable' | 'orphaned_vendor_row' | 'orphaned_cra_row'
 // CLAUDE_CODE_PROMPT (ESD writer changes, A4) — mirrors backend's
 // classifyRowAction.ts RowActionType.
 export type EsdRowActionType = 'esd_write' | 'note_only_reissue' | 'skipped_no_commentary'
@@ -179,8 +179,26 @@ export function getEsdRunStatus(runId: string): Promise<EsdRunStatusResponse> {
   return jsonRequest(`/api/esd/runs/${encodeURIComponent(runId)}`)
 }
 
-export function startWrite(runId: string, orderNumbers: string[], env: MxiEnv): Promise<{ runId: string; env: MxiEnv }> {
-  return jsonPostRequest('/api/esd/write', { runId, orderNumbers, env })
+/**
+ * An analyst's typed correction for one order, from the review table.
+ *
+ * Both fields optional and independent; blank means "leave it alone", never
+ * "write a blank". The server re-validates and normalises the date, and
+ * refuses the whole request if one cannot be read — a garbage date must
+ * never reach a real order.
+ */
+export interface EsdWriteOverride {
+  esd?: string
+  note?: string
+}
+
+export function startWrite(
+  runId: string,
+  orderNumbers: string[],
+  env: MxiEnv,
+  overrides: Record<string, EsdWriteOverride> = {},
+): Promise<{ runId: string; env: MxiEnv }> {
+  return jsonPostRequest('/api/esd/write', { runId, orderNumbers, env, overrides })
 }
 
 /** CLAUDE_CODE_PROMPT (cancel button) — cancels whichever ESD Finder run (compare or write) this runId refers to. */

@@ -14,7 +14,21 @@
  * quotations — one email legitimately carries several PDFs where only one
  * is the quote.
  */
-export type QuoteDocumentKind = 'quote' | 'shop_finding_report' | 'other_not_a_quote';
+/**
+ * `extraction_failed` added 2026-08-28, and it is NOT a kind of document —
+ * it means the document was never read.
+ *
+ * REAL BUG THIS FIXES: on a failed extraction the provider returned
+ * `other_not_a_quote`, which the ingest turns into `excluded_other`, so the
+ * row is dropped from the write set entirely. That is an assertion about a
+ * document nobody looked at. Five real PDFs on 2026-08-26 — including files
+ * literally named "Work Order Quote #WQP1147030" — were excluded that way
+ * after the TLS certificate failure killed the API call. Same silent
+ * degradation as the ESD side's `inference_unavailable`, and fixed the same
+ * way: an unreadable thing gets its own state, and that state is never an
+ * exclusion.
+ */
+export type QuoteDocumentKind = 'quote' | 'shop_finding_report' | 'other_not_a_quote' | 'extraction_failed';
 
 export interface QuoteExtractionInput {
   /** Absolute path to the PDF on local disk. */

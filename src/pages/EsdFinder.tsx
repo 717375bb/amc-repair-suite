@@ -13,6 +13,7 @@ import {
   type EsdCompareResultRow,
   type EsdRunStatusResponse,
   type EsdWriteOrderResult,
+  type EsdWriteOverride,
   type MxiEnv,
 } from '../lib/esdFinderApi'
 import { useEsdFinderRun } from '../lib/esdFinderRun'
@@ -192,8 +193,92 @@ function formatRawDate(value: string | null): string {
   return isoMatch ? isoMatch[1] : value
 }
 
-function flagBadgeTone(flag: EsdCompareResultRow['flag']): 'success' | 'warning' | 'neutral' {
+/**
+ * A table cell you can click and type into.
+ *
+ * Added 2026-08-28 so an analyst can correct a misread ESD or note without
+ * leaving the review table. Deliberately OPTIONAL everywhere: an untouched
+ * cell sends nothing, a cleared cell reverts to the inferred value, and a
+ * blank stays blank. Typing here never becomes a requirement for writing.
+ *
+ * The typed value is only ever an instruction for THIS write — the stored
+ * inference is left alone, so the audit trail keeps showing what the
+ * pipeline concluded next to what the human decided.
+ */
+function EditableCell({
+  value,
+  override,
+  placeholder,
+  disabled,
+  onCommit,
+}: {
+  /** What the pipeline produced. Shown when there is no override. */
+  value: string | null
+  /** The analyst's typed value, if any. */
+  override: string | undefined
+  placeholder: string
+  disabled: boolean
+  onCommit: (next: string) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+
+  const shown = override ?? value ?? ''
+  const isOverridden = override !== undefined && override !== ''
+
+  if (disabled) {
+    return <span className={isOverridden ? 'text-text' : 'text-muted'}>{shown || '—'}</span>
+  }
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          setDraft(override ?? value ?? '')
+          setEditing(true)
+        }}
+        title="Click to type a correction"
+        className={`w-full rounded px-1 py-0.5 text-left hover:bg-bg hover:ring-1 hover:ring-border ${
+          isOverridden ? 'font-medium text-accent' : 'text-text'
+        }`}
+      >
+        {shown || <span className="text-muted">{placeholder}</span>}
+        {isOverridden && <span className="ml-1 text-xs text-muted">(edited)</span>}
+      </button>
+    )
+  }
+
+  return (
+    <input
+      autoFocus
+      value={draft}
+      placeholder={placeholder}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => {
+        onCommit(draft.trim())
+        setEditing(false)
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          onCommit(draft.trim())
+          setEditing(false)
+        } else if (e.key === 'Escape') {
+          // Abandons the edit without committing — the existing value stands.
+          setEditing(false)
+        }
+      }}
+      className="w-full rounded border border-accent bg-surface px-1 py-0.5 text-sm text-text outline-none"
+    />
+  )
+}
+
+function flagBadgeTone(flag: EsdCompareResultRow['flag']): 'success' | 'warning' | 'danger' | 'neutral' {
   if (flag === 'ok') return 'success'
+  // Danger, not warning: the AI was never reached, so nothing is known
+  // about this order's notes. Distinct from 'no_esd_found', which is a real
+  // finding about the text.
+  if (flag === 'inference_unavailable') return 'danger'
   if (flag === 'no_esd_found') return 'warning'
   return 'neutral'
 }
@@ -276,6 +361,10 @@ export default function EsdFinder() {
 
   const [reviewScreen, setReviewScreen] = useState<ReviewScreen>('actionable')
   const [removedOrderNumbers, setRemovedOrderNumbers] = useState<Set<string>>(new Set())
+  // Analyst corrections typed into the review table, keyed by order number.
+  // Cleared implicitly by starting a new compare run (this whole component
+  // remounts its review state), so a correction can never leak across runs.
+  const [overrides, setOverrides] = useState<Record<string, EsdWriteOverride>>({})
   const [env, setEnv] = useState<MxiEnv>('production')
   const [showCancelConfirm, setShowCancelConfirm] = useState(false)
   const [cancelling, setCancelling] = useState(false)
@@ -352,7 +441,14 @@ export default function EsdFinder() {
     if (!runStatus || orderNumbers.length === 0) return
     setLoadError(null)
     try {
-      const { runId: newWriteRunId } = await startWrite(runStatus.runId, orderNumbers, env)
+      // Only the corrections for orders actually being written — the
+      // server rejects an override for anything outside that set.
+      const sending: Record<string, EsdWriteOverride> = {}
+      for (const orderNumber of orderNumbers) {
+        const o = overrides[orderNumber]
+        if (o && (o.esd || o.note)) sending[orderNumber] = o
+      }
+      const { runId: newWriteRunId } = await startWrite(runStatus.runId, orderNumbers, env, sending)
       startWriteTracking(newWriteRunId)
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
@@ -453,6 +549,18 @@ export default function EsdFinder() {
           runStatus={runStatus}
           reviewScreen={reviewScreen}
           onChangeScreen={setReviewScreen}
+          overrides={overrides}
+          onSetOverride={(orderNumber, field, value) =>
+            setOverrides((prev) => {
+              const next = { ...prev }
+              const entry = { ...(next[orderNumber] ?? {}) }
+              if (value) entry[field] = value
+              else delete entry[field]
+              if (entry.esd || entry.note) next[orderNumber] = entry
+              else delete next[orderNumber]
+              return next
+            })
+          }
           removedOrderNumbers={removedOrderNumbers}
           onToggleRemoved={(orderNumber) =>
             setRemovedOrderNumbers((prev) => {
@@ -508,6 +616,8 @@ function ReviewState({
   runStatus,
   reviewScreen,
   onChangeScreen,
+  overrides,
+  onSetOverride,
   removedOrderNumbers,
   onToggleRemoved,
   onBulkSetRemoved,
@@ -523,6 +633,8 @@ function ReviewState({
   runStatus: EsdRunStatusResponse
   reviewScreen: ReviewScreen
   onChangeScreen: (screen: ReviewScreen) => void
+  overrides: Record<string, EsdWriteOverride>
+  onSetOverride: (orderNumber: string, field: keyof EsdWriteOverride, value: string) => void
   removedOrderNumbers: Set<string>
   onToggleRemoved: (orderNumber: string) => void
   /** Bulk version of onToggleRemoved — `removed: true` excludes every listed order, `false` restores them. */
@@ -730,11 +842,27 @@ function ReviewState({
                       <td className="px-5 py-3 text-muted">{row.partNumber ?? '—'}</td>
                       <td className="px-5 py-3 text-muted">{row.serialNumber ?? '—'}</td>
                       <td className="px-5 py-3 text-muted">{formatRawDate(row.roEsdRaw)}</td>
-                      <td className="px-5 py-3 text-text">{row.inferredEsd ?? '—'}</td>
+                      <td className="px-5 py-3 text-text">
+                        <EditableCell
+                          value={row.inferredEsd}
+                          override={overrides[row.orderNumber]?.esd}
+                          placeholder="type an ESD"
+                          disabled={excluded || hasWriteRun}
+                          onCommit={(next) => onSetOverride(row.orderNumber, 'esd', next)}
+                        />
+                      </td>
                       <td className="px-5 py-3">
                         <Badge tone={flagBadgeTone(row.flag)}>{row.confidence ?? '—'}</Badge>
                       </td>
-                      <td className="px-5 py-3 text-muted">{row.notesToReceiverPreview ?? '—'}</td>
+                      <td className="px-5 py-3 text-muted">
+                        <EditableCell
+                          value={row.notesToReceiverPreview}
+                          override={overrides[row.orderNumber]?.note}
+                          placeholder="type a note"
+                          disabled={excluded || hasWriteRun}
+                          onCommit={(next) => onSetOverride(row.orderNumber, 'note', next)}
+                        />
+                      </td>
                       {hasWriteRun && (
                         <td className="px-5 py-3">
                           {excluded ? (

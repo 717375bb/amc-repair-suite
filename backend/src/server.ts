@@ -17,6 +17,22 @@ import { isKnownVendorId, listCraGroupsForKnownVendors } from './api/vendors.js'
 import { applyQuoteDisposition, cancelQuoteJob, getActiveQuoteJob, getQuoteJob, startQuoteIngestJob, startQuoteWriteJob } from './api/quoteWriter/quoteJobManager.js';
 import { isHumanSettableDisposition } from './quoteWriter/quoteDisposition.js';
 import { cancelScrapJob, getActiveScrapJob, getScrapJob, parseSerialList, startScrapOutJob } from './api/scrapWriter/scrapJobManager.js';
+import {
+  cancelBackShopJob,
+  getActiveBackShopJob,
+  getBackShopJob,
+  startBackShopDiscoveryJob,
+} from './api/backShop/backShopJobManager.js';
+import { fileModifiedAt, findSyncedBackShopListing } from './backShop/backShopListingLocation.js';
+import { parseBackShopListing } from './backShop/backShopListingParser.js';
+import {
+  craOptions,
+  eligibilityOf,
+  exclusionReason,
+  judgeFreshness,
+  splitByEligibility,
+  type BackShopRow,
+} from './backShop/backShopRows.js';
 import { cancelEsdJob, getActiveEsdJob, getEsdJob, startEsdCompareJob, startEsdWriteJob } from './api/esdFinder/esdFinderJobManager.js';
 import { MissingHeadersError, peekEsdFinderFile, validateHeadersOnly } from './api/esdFinder/ingestion.js';
 import {
@@ -32,6 +48,9 @@ import {
 } from './api/invoicePriceWriter/ingestion.js';
 import { registerAuthRoutes, requireSession, type AuthedRequest } from './api/authRoutes.js';
 import { createMaintenanceRecordsDraft } from './writeUps/shared/maintenanceRecordsDraft.js';
+import { reportCorporateCaCert } from './security/corporateCaCert.js';
+import { parseFlexibleDate } from './inference/dateUtils.js';
+import { formatISO } from 'date-fns';
 import { getMxiCredentialForUser } from './auth/authService.js';
 import { getOptionalSecret, getSecretProvider } from './security/secretProvider.js';
 import { createLogger } from './logging/logger.js';
@@ -527,9 +546,49 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
       return;
     }
 
+    // Analyst corrections typed into the review table. Optional throughout:
+    // an untouched table sends none, and a blank field means "leave it
+    // alone" rather than "write a blank", which would clear a real value.
+    const rawOverrides = (req.body?.overrides ?? {}) as Record<string, { esd?: unknown; note?: unknown }>;
+    const overrides: Record<string, { esd?: string; note?: string }> = {};
+    const requested = new Set(orderNumbers);
+
+    for (const [orderNumber, value] of Object.entries(rawOverrides)) {
+      if (!requested.has(orderNumber)) {
+        res.status(400).json({
+          error: `An override was supplied for "${orderNumber}", which is not among the orders being written.`,
+        });
+        return;
+      }
+      const entry: { esd?: string; note?: string } = {};
+
+      const rawEsd = typeof value?.esd === 'string' ? value.esd.trim() : '';
+      if (rawEsd) {
+        // Accepts what a person actually types (9/15/26, 15-SEP-2026,
+        // 2026-09-15) and normalises it once, here. An unparseable date is
+        // refused outright — writing a garbage date into a real order is
+        // the failure this whole validation exists to prevent, and it is
+        // the exact class of bug that put 10-JUL-2020 into a live record
+        // earlier in this project.
+        const parsed = parseFlexibleDate(rawEsd);
+        if (!parsed) {
+          res.status(400).json({
+            error: `The ESD typed for ${orderNumber} ("${rawEsd}") is not a date I can read. Try 09/15/2026 or 15-SEP-2026. Nothing was written.`,
+          });
+          return;
+        }
+        entry.esd = formatISO(parsed, { representation: 'date' });
+      }
+
+      const rawNote = typeof value?.note === 'string' ? value.note.trim() : '';
+      if (rawNote) entry.note = rawNote;
+
+      if (entry.esd || entry.note) overrides[orderNumber] = entry;
+    }
+
     const session = (req as AuthedRequest).session!;
     const mxiCredential = getMxiCredentialForUser(authDb, session.userId);
-    const result = startEsdWriteJob(env, compareJob.result.dbRunId, orderNumbers, mxiCredential, runId);
+    const result = startEsdWriteJob(env, compareJob.result.dbRunId, orderNumbers, mxiCredential, runId, overrides);
     if (!result.ok) {
       res.status(409).json({ error: 'An ESD Finder job is already running.', activeRunId: result.conflictRunId });
       return;
@@ -945,6 +1004,136 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
     res.json({ ok: true });
   });
 
+  // -------------------------------------------------------------------
+  // Back Shop tab — the daily in-house scrap listing.
+  //
+  // Two steps on purpose, never one. This section READS: it locates the
+  // day's sheet and (via a separate discovery job) reads each part's note
+  // in MXI to say which are scrap candidates. Actually scrapping them is
+  // the existing POST /api/scrap/start with kind "in_house", started only
+  // after a human has reviewed the candidates and confirmed a selection.
+  // Nothing here can start an irreversible action.
+  // -------------------------------------------------------------------
+  const backShopUpload = multer({ dest: path.join('data', 'backshop-uploads-tmp') });
+
+  /** Shared by the synced-path and upload endpoints so both answer identically. */
+  const describeListing = async (filePath: string, source: 'synced' | 'upload') => {
+    const { sheetDate, rows, skippedIncomplete } = await parseBackShopListing(filePath);
+    const freshness = judgeFreshness(sheetDate);
+    const { open, alreadyHandled } = splitByEligibility(rows);
+    return {
+      source,
+      filePath: source === 'synced' ? filePath : null,
+      syncedAt: source === 'synced' ? (fileModifiedAt(filePath)?.toISOString() ?? null) : null,
+      sheetDate: freshness.sheetDate?.toISOString() ?? null,
+      isToday: freshness.isToday,
+      // Never suppressed: running yesterday's list would scrap the wrong
+      // parts, so a stale or unreadable date always reaches the analyst.
+      warning: freshness.warning,
+      craOptions: craOptions(rows),
+      open,
+      alreadyHandled: alreadyHandled.map((row) => ({ ...row, exclusionReason: exclusionReason(row) })),
+      skippedIncomplete,
+    };
+  };
+
+  app.get('/api/backshop/listing', requireSession, async (_req, res) => {
+    const located = findSyncedBackShopListing();
+    if (!located) {
+      // Not an error: the UI's upload fallback covers a machine where the
+      // SharePoint library isn't synced.
+      res.json({ found: false, listing: null });
+      return;
+    }
+    try {
+      // Both 'synced' and the BACK_SHOP_LISTING_PATH override are local
+      // files the analyst did not have to hand over, so both read as
+      // 'synced' to the UI; only a manual upload is different.
+      res.json({ found: true, listing: await describeListing(located.filePath, 'synced') });
+    } catch (err) {
+      res.status(400).json({ error: `Could not read ${located.filePath}: ${err instanceof Error ? err.message : String(err)}` });
+    }
+  });
+
+  app.post('/api/backshop/listing', requireSession, backShopUpload.single('listing'), async (req, res) => {
+    if (!req.file) {
+      res.status(400).json({ error: 'A BackShopListing workbook file is required.' });
+      return;
+    }
+    try {
+      res.json({ found: true, listing: await describeListing(req.file.path, 'upload') });
+    } catch (err) {
+      res.status(400).json({ error: `Could not read that workbook: ${err instanceof Error ? err.message : String(err)}` });
+    } finally {
+      fs.rm(req.file.path, { force: true }, () => {});
+    }
+  });
+
+  app.post('/api/backshop/discover', requireSession, (req, res) => {
+    const env = parseRequiredEnv(req, res);
+    if (!env) return;
+
+    const rows = Array.isArray(req.body?.rows) ? (req.body.rows as BackShopRow[]) : [];
+    if (rows.length === 0) {
+      res.status(400).json({ error: 'At least one row is required to check.' });
+      return;
+    }
+    // Re-checked server-side rather than trusting the client: a row the
+    // sheet already marks as scrapped must not be re-offered as a candidate
+    // just because a stale browser tab still listed it.
+    const checkable = rows.filter((row) => eligibilityOf(row) === 'open');
+    if (checkable.length === 0) {
+      res.status(400).json({ error: 'Every row given is already marked as handled on the sheet.' });
+      return;
+    }
+
+    const session = (req as AuthedRequest).session!;
+    const mxiCredential = getMxiCredentialForUser(authDb, session.userId);
+    const result = startBackShopDiscoveryJob({ env, rows: checkable }, mxiCredential);
+    if (!result.ok) {
+      if (result.conflictRunId) {
+        res.status(409).json({ error: 'A back-shop discovery job is already running.', activeRunId: result.conflictRunId });
+      } else {
+        res.status(400).json({ error: result.error });
+      }
+      return;
+    }
+    res.status(202).json({ runId: result.runId, env, totalRequested: checkable.length });
+  });
+
+  app.get('/api/backshop/active-job', requireSession, (_req, res) => {
+    const job = getActiveBackShopJob();
+    res.json({ activeRunId: job?.runId ?? null });
+  });
+
+  app.get('/api/backshop/runs/:runId', requireSession, (req, res) => {
+    const job = getBackShopJob(req.params.runId);
+    if (!job) {
+      res.status(404).json({ error: `No back-shop run found for runId "${req.params.runId}".` });
+      return;
+    }
+    res.json({
+      runId: job.runId,
+      status: job.status,
+      startedAt: job.startedAt,
+      completedAt: job.completedAt,
+      fatalError: job.fatalError,
+      phase: job.phase,
+      env: job.env,
+      findings: job.findings,
+      totalRequested: job.totalRequested,
+    });
+  });
+
+  app.post('/api/backshop/runs/:runId/cancel', requireSession, (req, res) => {
+    const ok = cancelBackShopJob(req.params.runId);
+    if (!ok) {
+      res.status(400).json({ error: `Run "${req.params.runId}" is not cancellable (not found or already finished).` });
+      return;
+    }
+    res.json({ ok: true });
+  });
+
   app.get('/pending-esd-updates', requireAutomationKey, (_req, res) => {
     const rows = getPendingEsdUpdates(db);
     res.json(
@@ -1068,6 +1257,11 @@ async function main(): Promise<void> {
   // 127.0.0.1 only, never 0.0.0.0 — this now also serves the Order
   // Write-Ups job-spawning endpoints, which is not something to expose on
   // the network even accidentally.
+  // Says plainly at startup whether Node trusts the corporate TLS root.
+  // Without this the only symptom of a missing CA is every AI-classified
+  // order coming back unclassified, several layers away from the cause.
+  reportCorporateCaCert();
+
   const httpServer = app.listen(port, '127.0.0.1', () => {
     log.info({ port, mxiEnv: config.env }, 'ESD approval API listening');
   });

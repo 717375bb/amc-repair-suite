@@ -83,6 +83,10 @@ export class AnthropicEsdProvider implements EsdInferenceProvider {
           suggestedPartsPendingOffsetDays: null,
           confidence: 'low',
           reasoningNote: `AI inference failed after retry: ${message}`,
+          // Distinguishes "we could not ask" from "the notes said nothing".
+          // Without this the caller cannot tell them apart, and 241 real
+          // orders were reported as "No ESD Found" after a TLS failure.
+          providerError: message,
         };
       }
     }

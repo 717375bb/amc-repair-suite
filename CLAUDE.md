@@ -874,3 +874,371 @@ npx playwright codegen --load-storage=data/mxi-stage-storage-state.json -o disco
 
 `--db` and `--out-dir` (CLI) default to `data/audit.db` and `data/`.
 `MXI_DB_PATH` and `PORT` (server) default to `data/audit.db` and `3001`.
+
+## Back Shop tab — the daily in-house scrap list (2026-08-27)
+
+The analyst's daily list of parts that have no vendor and often need an
+in-house scrap. Three deliberately separate steps, because the last one is
+irreversible and NOT idempotent:
+
+1. **Load the day's sheet.** `BackShopListing.xlsm`, sheet `Today`, synced
+   from SharePoint via OneDrive. Confirmed real path:
+   `C:\Users\<user>\American Airlines, Inc\CRA - CRA Team\BackShopListing.xlsm`
+   — note the sync root is `American Airlines, Inc`, NOT the pre-existing
+   `OneDrive - American Airlines, Inc` (that one holds only Favorites).
+   `BACK_SHOP_LISTING_PATH` overrides discovery; an upload fallback in the
+   UI covers a machine that isn't synced. Cell A1 holds the sheet's date;
+   a sheet that isn't today's WARNS (never blocks, per explicit choice) and
+   the warning is never suppressed — running yesterday's list would scrap
+   the wrong parts.
+2. **Read each part's note in MXI** (`npm run diag:backshop` to do this from
+   the CLI, or the tab's own read-only discovery job). Never writes.
+3. **Review and confirm**, which hands the selection to the *existing*
+   Scrap tab in-house job (`POST /api/scrap/start`, `kind: "in_house"`).
+   That job remains the one authority on scrapping, with its own
+   already-scrapped and approved-base guards. Discovery never flows
+   straight into a write.
+
+### The note is on the PART record, not the inventory record
+
+From one inventory search result row, clicking the **serial** opens the
+physical item (`InventoryDetails.jsp`); clicking the **part number** opens
+the part (`PartDetails.jsp`). The scrap wording lives on the latter, in
+`#idCellPartNote` — part-NUMBER level, so every serial of a part number
+shares it. `openPartDetailsBySerial` / `openInventoryBySerial`
+(`mxiWriter/openInventoryBySerial.ts`) are the two openers; they share one
+search implementation so they cannot drift.
+
+This was found the hard way and is worth not re-learning: a first discovery
+run read the *inventory* record's Notes/Receiver Note and found no scrap
+wording on **any** of 32 real parts — those fields hold only system-generated
+Merlin tags (`CCN:… USSN:… merlin position:…`). The analyst's recording
+(`discovery-part-detail-scrap-recording.ts`) showed the real path.
+
+### Three real false positives, all caught before anything ran for real
+
+- **Every inventory details page** contains "scrap" — the action bar has a
+  `Scrap Inventory` button.
+- **Every part details page** contains "scrap" — the Reliability section
+  states `Scrap Rate: 100%`.
+- **A note can mention scrapping only to forbid it.** Part
+  `GG436-2004-1MT`'s real note reads "…Repairs do not scrap. 07/27".
+
+The first two are handled by SCOPE, not by cleverness: only `#idCellPartNote`
+is ever searched. The third is handled by per-occurrence, clause-bounded
+negation detection in `backShop/scrapNoteJudgement.ts` — and the window is
+deliberately narrow because part `DK120`'s real note reads "…OEM DOES NOT
+WANT THIS SENT IN. SCRAP IN-HOUSE.", a genuine instruction that a wider
+negation check would have suppressed. Both notes are pinned as tests.
+
+Outcomes are `scrap_recommended` / `scrap_negated` / `no_scrap_note` /
+`unreadable`, and `unreadable` is deliberately its own category: a part we
+could not read must never be presented as a part with nothing to say.
+
+### Only an explicit "scrap" counts — BER/NREP/non-repairable was reverted
+
+Recognising conclusion-words that imply a scrap without saying it (`BER`,
+`NREP`, `NON-REP`, `non-repairable`) was implemented and then **reverted the
+same day (2026-08-27) on the analyst's instruction** — scrapping is
+permanent, and those words sit on real parts that are not to be scrapped.
+Measured against the live list, the broadening moved 5 more parts into the
+**pre-selected** set, including all three serials of `WE3876352-1`, whose
+note is about test-only handling and pricing rather than disposition.
+
+This is a deliberate limit, not a gap, and it is pinned by a test that
+asserts those wordings stay unrecommended. Do not re-add it without the
+analyst asking for it explicitly. Softer wording is a judgement for the
+human reading the quoted note — the note is shown in full in the UI.
+
+### A real race in the inventory search was found and fixed
+
+`openInventoryBySerial` used to click Search, `pace()`, then count matching
+links — so a results page that had not rendered yet became a confident
+"No inventory item found for serial X". A discovery run over 32 real parts
+produced that for **four serials that had opened fine five minutes earlier
+in the same session**; re-searching one directly showed MXI answering
+"1 inventory item was found." It now waits for MXI to actually STATE an
+outcome (`mxiWriter/inventorySearchVerdict.ts` parses both real phrasings —
+`"0 of 0 inventory items were found."` and `"1 inventory item was found."`),
+so `not_found` can only come from the page positively saying zero. Anything
+else reports as the fault it is (`search_not_rendered`, `row_not_clickable`,
+`details_not_reached`). Re-running the same 32 rows afterward: 32/32 read,
+0 unreadable. `writeInHouseScrap` calls the same helper, so it got the fix
+too.
+
+### Verified against real production data
+
+`npm run diag:backshop -- --limit 32 --env production` over the whole live
+list: 9 scrap-recommended, 1 correctly reclassified as "note forbids
+scrapping", 22 with no scrap note, 0 unreadable. The discovery runner was
+then exercised directly on a 4-row set covering all four outcomes,
+including a deliberately nonexistent serial.
+
+**Still untested live:** the tab's own UI end to end (the job, the API, and
+the classification are all exercised; the React page is typechecked and
+builds, but has not been clicked through), and the hand-off from a
+confirmed selection into a real in-house scrap.
+
+**Files:** `backend/src/backShop/` (listing location/parser/rows,
+`scrapNoteJudgement.ts`, `readPartScrapNote.ts`),
+`backend/src/api/backShop/backShopJobManager.ts`,
+`backend/src/api/jobRunners/backShopDiscoveryRunner.ts`,
+`backend/src/cli/backShopProbeCli.ts`, `src/pages/BackshopRepairs.tsx`,
+`src/lib/backShopApi.ts`.
+
+## Five real bugs found and fixed (2026-08-28)
+
+All five were diagnosed from real audit data and live pages, not from
+reading code. Each fix is noted at its own definition; this is the map.
+
+### 1. The ESD writer reported every note write as a failure
+
+`updateNoteToReceiver` was changed on 2026-08-24 (commit `752d764`, by
+hand) to put the newest entry FIRST. `writeEsdAndNotes`' verification still
+compared the re-read field to `${previousNote}\n\n${newEntry}` — the
+opposite order — so from that date every order that already had note
+history compared against a string that cannot occur.
+
+Measured: **all 28 failed ESD writes since 2026-08-24 were this**, and each
+one's own error message shows the note had been written correctly. Each
+also burned ~30s on a self-heal attempt that then timed out.
+
+No data was damaged: every one of the 28 self-heal attempts threw while
+waiting for the Details tab, so none of them wrote the entry a second time.
+That was luck, not design — the self-heal was one working click away from
+duplicating a note on 28 real orders.
+
+Fixed in `mxiWriter/noteVerification.ts`: verification now checks the two
+things that are actually true of a correct write — the new entry is
+present, and prior history survived — in any order and whatever the
+whitespace. Byte-exact comparison of an accumulating log was never going to
+hold. Unit-tested against the real note shapes, including both orderings.
+
+### 2. EQD always produced "No ESD Found" — two independent causes
+
+**a. The AI was never reached.** Run 31 had **241 of 2002 orders** fail
+with `unable to verify the first certificate` — corporate SSL inspection
+re-signs HTTPS with an internal root Node does not trust (browsers use the
+Windows cert store; Node does not). `anthropicProvider` degraded to
+`classification: 'none'`, which `applyInferenceRules` turned into
+`no_esd_found` — a statement about the vendor's notes, when nothing had
+been read at all.
+
+Now: `EsdInferenceResult.providerError` carries the failure, and a new
+`EsdFlag` value `inference_unavailable` reports it as its own outcome
+(rendered `danger`, not `warning`). Set `NODE_EXTRA_CA_CERTS` to the
+corporate root in PEM form; `security/corporateCaCert.ts` reports at
+startup whether it loaded and documents how to export one.
+
+**b. Bare month/day dates got an invented year.** Real EQD notes are
+`EQD 8/26`, `EQD 9/2` — no year. The model has to supply one for ISO, and
+on run 19 it supplied **2024**, so +14 days landed two years in the past
+and Step 4 rejected it as stale.
+
+`inference/bareDateYear.ts` now decides the year in code when the note
+states none: the nearest occurrence of that month/day, which may be
+slightly past (an EQD from last week reads as last week). Same principle
+that keeps the buffer constants out of the prompt.
+
+### 3. Editable ESD and note cells in the ESD Finder review table
+
+Click either cell and type. Entirely optional — an untouched cell sends
+nothing, a cleared cell reverts to the inferred value, blanks stay blank.
+The typed value is an instruction for that write only; the stored inference
+is untouched, so the audit trail keeps what the pipeline concluded next to
+what the analyst decided. The server re-parses the typed date and refuses
+the whole request if it cannot read one.
+
+### 4. The vendor scrap could not finish, and stopped in the worst place
+
+Two real failures on 2026-08-28, both leaving an order part-processed:
+
+**a. It searched for the certificate's serial.** On `P000BESE` the
+certificate said `PEL01531` while the item MXI actually received is batch
+`BN 397522` — and the receipt line's own description carried a third value
+(`BN 396273`). With batch-numbered parts these routinely disagree. It now
+takes the inventory shown on the inventory receipt line, exactly as the
+original recording did, located structurally as the one
+`InventoryDetails.jsp` link inside `#idTableInventoryReceipts`. Verified
+read-only against both stuck orders. More than one received line refuses
+rather than guesses — scrapping is irreversible. The audit trail records
+the item actually opened whenever it differs from the certificate.
+
+**b. It could not resume.** `P000BESC`'s receive-dialog OK click hung 30s
+and threw; the retry then refused because the shipment HAD been received.
+The receive step is now judged by whether the item actually arrived
+(Receipt & Returns), not by whether every click resolved, so re-running a
+part-processed order picks up where it stopped. `clickIfPresent` also
+bounded its click — it was passing the caller's timeout to the *wait* only,
+leaving the click on Playwright's 30s default.
+
+**Still not resumable:** the cancel-tasks and complete-work-package steps.
+Making those safe needs a real order observed in each state; their failure
+messages now say exactly where they stopped.
+
+### 5. The zero-times-and-cycles email draft stopped appearing
+
+The Outlook draft mechanism works — verified by creating a real draft. The
+button simply never appeared: **no `zero_usage` outcome has fired since
+2026-08-07**. The "Create Order Only" feature routes zero-usage lines to
+`order_created_do_not_ship` instead, but only on USSTG lines — which is
+effectively all of them. The MXI behaviour was intended; it silently took
+the Maintenance Records notification with it.
+
+`zeroUsageRows` now rides along on that outcome, and the button keys off
+the usage rows being present rather than the exception type — so a future
+third path carrying them gets the button instead of quietly losing it.
+
+**What to do in MXI and who to tell about bad data are separate concerns.**
+A redirect should only ever have changed the first.
+
+### The line locator's "USSTG" click was hitting the Dock checkbox (2026-08-28)
+
+Symptom: discovery finds a vendor's lines, a later pass reports **"No lines
+currently found for this vendor"** — while the lines are plainly still in
+MXI. Intermittent, across many vendors, for weeks.
+
+`navigateToVendorCodeGrid` clicked
+`getByRole('cell', { name: 'When selected, items at USSTG' }).nth(1)`, and
+the docstring asserted that was the USSTG control — deliberately not reusing
+aeroRepair's ID-based `resetOptionsFilters()` because "nothing confirms the
+two are the same underlying control."
+
+They are the same controls, and the cell click was on the wrong one. MXI
+puts the identical `title` text on the adjacent DOCK checkbox's cell, so two
+cells carry that accessible name and `.nth(1)` is the second. Probed live:
+
+```
+dialog opens     USSTG=true   Dock=false
+Reset Filters    USSTG=true   Dock=TRUE
+.nth(1) click    USSTG=true   Dock=FALSE   <- only Dock moved
+```
+
+The step meant to guarantee "show USSTG items" never touched USSTG. It is a
+blind TOGGLE, so its effect depends on the session state it starts from —
+and that state persists per session. A run starting with USSTG off searched
+with USSTG off, found nothing, and blamed the vendor.
+
+Now uses the same idempotent `resetOptionsFilters()` (`.check()` /
+`.uncheck()` by element id) that aeroRepair has always used — same end
+state, asserted rather than toggled into, and identical between discovery
+and execute. Verified live: with USSTG deliberately turned OFF first, the
+locator recovers all 6 of 0T1Y4's lines and leaves the box checked.
+
+**Lesson worth keeping: an accessible name is not an identity.** Two
+different controls shared one title string, and a `.nth(i)` index over that
+name silently addressed the wrong one for weeks. Prefer the element id when
+one exists; when using a name, verify how many things carry it.
+
+Three supporting changes, from the analyst's requirement that finding lines
+succeed 100% of the time even when nothing can be done with the lines:
+
+- **Silent-drop guard.** If the grid shows real inventory rows but no
+  candidate could be read from any of them, that now throws with the row
+  text and a captured grid, instead of reporting an empty vendor. "The grid
+  was empty" and "we could not read the grid" are different facts.
+- **The empty-state text is only believed when the grid also has zero rows.**
+  It was a bare substring test over the whole body.
+- **`MAX_ATTEMPTS` restored from 1 to 3.** It had been set to 1, leaving the
+  retry loop and its backoff as dead code. A genuine empty is now captured
+  to `data/diagnostics/` before being reported.
+
+### "Timeout waiting for getByRole('link', ...)" — the whole class (2026-08-28)
+
+Reported as "the writer is having a hard time identifying the buttons, even
+though they are present on the screen." Measured across the real
+`write_up_actions` error history, the top locator failures were all the same
+shape — a bare `page.getByRole('link', { name: X }).click()`:
+
+```
+7x  Timeout 30000ms  waiting for getByRole('link', { name: 'Unassigned' })
+6x  strict mode violation: 'L00158' resolved to 2 elements
+5x  Timeout 30000ms  waiting for getByRole('link', { name: 'SE75558' })
+4x  Timeout 30000ms  waiting for getByRole('link', { name: 'Request Authorization' })
+```
+
+Three separate defects behind them, now fixed:
+
+**1. Absence was being treated as a fault.** An order that is ALREADY
+authorized shows no "Request Authorization" action at all — real behaviour
+the analyst confirmed on 2026-08-21 and which `mxiWriter/priceLineSelectors.ts`
+has handled ever since ("that run should count as a success"). The write-up
+path never did: it waited the full 30s for a correctly-absent control, then
+failed a line that was fine. `clickRequestAuthorization` now returns
+`requested | already_authorized`, reading the order's real Authorization
+Status to decide, and every caller skips the Auth Flow / confirm steps on
+the already-authorized path — otherwise the timeout just moves one step
+along.
+
+**2. Ambiguity was fatal.** MXI shows the same order number twice on one
+page, so a perfectly correct link name threw a strict-mode violation.
+`clickActionLink` resolves duplicates, preferring an EXACT text match over
+DOM order — which matters because `'Unassigned'` is a substring that also
+matches the `'Unassigned Tasks'` tab beside it, and blind `.first()` there
+would click the wrong tab.
+
+**3. The error named only what it wanted.** "Waiting for X" with no mention
+of what WAS on the page is precisely why this reads as "the button is right
+there and it can't see it". Failures now list the links actually present and
+call out near matches — "Authorization" being present while "Request
+Authorization" is not IS the already-authorized explanation.
+
+Applied at the three sites those errors came from: `authFlow.ts`,
+`unassignedTasks.ts`, `scheduleWorkPackageForm.ts`'s `openGeneratedOrder`.
+`describeMissingLink` is pure and unit-tested against a real captured
+order-page action bar.
+
+`MAX_ATTEMPTS` for the vendor-grid search was also set to 2 (from 3) —
+3 was too slow in practice.
+
+### Quote writer: two fixes (2026-08-28)
+
+**1. A real quote was excluded for being "already completed work".**
+
+`P000BE8G` — email subject `[EXTERNAL] QUOTE P000BE8G`, attachment
+`QUOTE P000BE8G.pdf` — was classified `other_not_a_quote` because the model
+reasoned it was "an invoice for work already performed... not a prospective
+quotation but a billing document for completed repair work."
+
+That reasoning came straight from the prompt, which listed "invoices for
+already-completed work" as a `other_not_a_quote` example. Per the analyst:
+**vendors routinely send priced paperwork after the part has been repaired
+and even after it has been shipped back**, and those still have to be
+reviewed and priced into the order. The prompt now says to decide by
+CONTENT, not by TENSE — a document carrying a repair price for a PSA order
+is a quote however it is titled, and "Work Order Invoice", past-tense
+wording and already-totalled amounts explicitly do not disqualify it.
+
+Deliberately unchanged: a document with no repair price at all is still not
+a quote. The Honeywell Service Bulletin correctly excluded on 2026-08-26
+stays excluded.
+
+**2. A failed extraction was being recorded as a claim about the document.**
+
+`failureResult()` returned `documentKind: 'other_not_a_quote'`, and
+`quoteIngestRunner` turns any non-quote into `excluded_other` — dropping the
+row from the write set. So when the API call failed, the row was excluded as
+"not a quote" although nothing had been read. Five real PDFs went that way
+on 2026-08-26 after the TLS certificate error, including files named
+`Work Order Quote #WQP1147030`.
+
+New `QuoteDocumentKind` value `extraction_failed`, which is not a kind of
+document — it means the document was never read. It stays `pending` rather
+than excluded, carries a review reason saying so first, renders in the UI as
+"Could not be read — not assessed", and the write runner skips it with the
+same wording. It still cannot be written (no order number, no price), so the
+change is visibility, not permission. Same silent-degradation class as the
+ESD side's `inference_unavailable`, fixed the same way.
+
+**3. Two locator timeouts on the same order (`P000BEJY`).**
+
+- `locator.fill: Timeout ... waiting for getByRole('textbox', { name:
+  'Password:' })`. `performReauthorization` filled the password
+  UNCONDITIONALLY. The prompt is intermittent — already known, already
+  handled everywhere else by `enterPasswordIfPrompted`, which the scrap
+  flow has used from the start. This path simply never adopted it.
+- `locator.click: Timeout ... waiting for getByRole('link', { name:
+  'Edit Lines' })`. `findOrderByNumber` now confirms a selectable order
+  line exists before checking it (an absent line is the likelier real
+  cause, and "Edit Lines" is unusable without one) and clicks through
+  `clickActionLink`, so a failure names what was on the page.

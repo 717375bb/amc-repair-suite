@@ -2,6 +2,7 @@ import type { Page } from 'playwright';
 import { extractBaseStation, routeBaseStation } from './approvedLocations.js';
 import { createLogger } from '../../logging/logger.js';
 
+import { clickActionLink } from './clickActionLink.js';
 const log = createLogger('writeup');
 
 const CLICK_DELAY_MS = 750;
@@ -196,9 +197,23 @@ export async function confirmScheduleWorkPackage(page: Page): Promise<void> {
   await pace(page);
 }
 
-/** Clicks the newly-generated order number link to navigate into it. */
+/**
+ * Clicks the newly-generated order number link to navigate into it.
+ *
+ * REAL FAILURES FIXED (2026-08-28): this bare click produced the top two
+ * locator errors in the whole write-up history — a strict-mode violation
+ * when MXI shows the same order number twice on one page (6 occurrences,
+ * e.g. "'L00158' resolved to 2 elements"), and a bare 30s timeout naming
+ * only what it wanted (5 occurrences, e.g. 'SE75558'). Both read to an
+ * analyst as "the link is right there and it can't see it".
+ *
+ * clickActionLink resolves duplicates to the first match — every observed
+ * duplicate was the same order number rendered twice on one page, pointing
+ * at the same order — and, when it finds none, reports which links were
+ * actually present instead of only which one it wanted.
+ */
 export async function openGeneratedOrder(page: Page, orderNumber: string): Promise<void> {
-  await page.getByRole('link', { name: orderNumber, exact: true }).click();
+  await clickActionLink(page, orderNumber, { exact: true, label: `order ${orderNumber}` });
   await pace(page);
 }
 

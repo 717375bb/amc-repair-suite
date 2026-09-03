@@ -1,4 +1,5 @@
 import type { Page } from 'playwright';
+import { clickActionLink } from '../writeUps/shared/clickActionLink.js';
 
 /**
  * Fixed pause after every click/check action. Added after real production
@@ -89,9 +90,28 @@ export async function findOrderByNumber(page: Page, orderNumber: string, todoLis
   await page.locator('#idBarcodeSearchInput').fill(orderNumber);
   await page.locator('#idBarcodeSearchInput').press('Enter');
   await pace(page);
-  await page.locator('input[name="aPurchaseOrderLine"]').first().check();
+  // REAL FAILURE FIXED (2026-08-28): a quote write on P000BEJY failed with
+  // `locator.click: Timeout 30000ms ... waiting for getByRole('link', {
+  // name: 'Edit Lines' })`. The bare click reported only what it wanted,
+  // never what was on the page — so there was no way to tell whether the
+  // order had no selectable line, had moved to a state that offers no Edit
+  // Lines, or simply had not rendered.
+  //
+  // The line checkbox is also confirmed present before checking it, rather
+  // than assumed: "Edit Lines" is unusable without a selected line, so an
+  // absent checkbox is the more likely real cause and is worth saying so.
+  const lineCheckbox = page.locator('input[name="aPurchaseOrderLine"]');
+  try {
+    await lineCheckbox.first().waitFor({ state: 'visible', timeout: 15_000 });
+  } catch {
+    throw new Error(
+      `Order ${orderNumber} shows no selectable order line (no input[name="aPurchaseOrderLine"] on the page), ` +
+        `so "Edit Lines" cannot be opened. The order may be closed, cancelled, or not yet rendered.`,
+    );
+  }
+  await lineCheckbox.first().check();
   await pace(page);
-  await page.getByRole('link', { name: 'Edit Lines' }).click();
+  await clickActionLink(page, 'Edit Lines', { label: `Edit Lines on ${orderNumber}` });
   await pace(page);
 }
 
@@ -342,8 +362,18 @@ export async function readNoteToReceiver(page: Page): Promise<string | null> {
  * `newEntryText` is just the one new entry (already formatted
  * "M.D.YY - <text>" by the caller, see server.ts's assembleNoteText) — this
  * function reads whatever is currently in the field first, and if it's
- * non-blank, combines it as `${existing}\n\n${newEntryText}`; if the field
+ * non-blank, combines it as `${newEntryText}\n\n${existing}`; if the field
  * was blank, writes just `newEntryText` with no leading separator.
+ *
+ * **NEWEST ENTRY FIRST**, changed 2026-08-24 (commit 752d764) so the most
+ * recent note is at the top of the field. The paragraph above used to say
+ * entries were appended at the END, and that stale sentence caused a real
+ * bug: writeEsdAndNotes' verification was written against it and compared
+ * the re-read field to `${existing}\n\n${newEntryText}`, which can never
+ * occur — so from that date every note write onto an order with existing
+ * history was reported as FAILED, and the self-heal then wrote the same
+ * entry a second time. Verification no longer depends on the order at all
+ * (see noteVerification.ts), but keep this sentence honest regardless.
  *
  * The very first version of this function used `.fill(noteText)` directly
  * with no read-first step, which would have silently destroyed any real

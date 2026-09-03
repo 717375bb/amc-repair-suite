@@ -1,5 +1,6 @@
 import type { Page } from 'playwright';
 import { createLogger } from '../../logging/logger.js';
+import { clickActionLink } from './clickActionLink.js';
 
 const log = createLogger('writeup');
 
@@ -39,9 +40,19 @@ export const NO_UNASSIGNED_TASKS_TEXT =
  * checked, including ones with genuine assigned work.
  */
 export async function navigateToUnassignedTasksView(page: Page): Promise<void> {
-  await page.getByRole('link', { name: 'Unassigned' }).click();
+  // REAL FAILURE FIXED (2026-08-28): the most frequent locator error in the
+  // write-up history was a bare 30s timeout here — 7 occurrences of
+  // "waiting for getByRole('link', { name: 'Unassigned' })". Note also that
+  // 'Unassigned' is a SUBSTRING match that "Unassigned Tasks" also
+  // satisfies, so both of these clicks can match both tabs; resolving to
+  // the first match keeps that from becoming a strict-mode failure too.
+  //
+  // clickActionLink reports which links were actually on the page when it
+  // finds none, so the next occurrence says why rather than just what it
+  // wanted.
+  await clickActionLink(page, 'Unassigned', { label: 'Unassigned tab' });
   await pace(page);
-  await page.getByRole('link', { name: 'Unassigned Tasks' }).click();
+  await clickActionLink(page, 'Unassigned Tasks', { label: 'Unassigned Tasks sub-tab' });
   await pace(page);
 }
 

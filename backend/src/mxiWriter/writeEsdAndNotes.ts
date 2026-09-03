@@ -11,6 +11,10 @@ import {
   updateEsdField,
   updateNoteToReceiver,
 } from './selectors.js';
+import { verifyNoteWrite } from './noteVerification.js';
+import { createLogger } from '../logging/logger.js';
+
+const log = createLogger('mxi');
 
 export interface EsdAndNotesUpdate {
   esd?: string;
@@ -135,10 +139,28 @@ export async function writeEsdAndNotes(
       try {
         await navigateToOrder(page!, orderNumber, client.todoListUrl);
         const confirmedNote = await readNoteToReceiver(page!);
-        const expectedNote = previousNote ? `${previousNote}\n\n${update.noteText}` : update.noteText;
-        noteOk = confirmedNote === expectedNote;
-        if (!noteOk) {
-          problems.push(`Note re-read as "${confirmedNote ?? '(blank)'}", expected "${expectedNote}"`);
+
+        // Checks the two properties that are actually true of a correct
+        // write — the new entry is present, and prior history survived —
+        // rather than comparing the whole accumulated log byte for byte.
+        //
+        // The old exact comparison expected `${previousNote}\n\n${newEntry}`
+        // while updateNoteToReceiver has written `${newEntry}\n\n${previousNote}`
+        // since 2026-08-24, so it could never match on an order with
+        // history: every such order was reported failed, and the self-heal
+        // below then wrote the entry a second time. See noteVerification.ts.
+        const verdict = verifyNoteWrite(previousNote, update.noteText, confirmedNote);
+        noteOk = verdict.entryPresent && verdict.historyPreserved;
+        problems.push(...verdict.problems);
+
+        // A duplicate means the entry landed twice — real damage worth
+        // seeing, but not a failed write, and NOT something to "fix" by
+        // writing it again.
+        if (verdict.occurrences > 1) {
+          log.warn(
+            { orderNumber, occurrences: verdict.occurrences },
+            '[esd writer] note entry appears more than once in Notes to Receiver — check the order by hand',
+          );
         }
       } catch (verifyErr) {
         noteOk = false;

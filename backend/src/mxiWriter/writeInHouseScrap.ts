@@ -1,7 +1,7 @@
 import type { Page } from 'playwright';
 import type { MxiClient } from './mxiClient.js';
 import { clickIfPresent, enterPasswordIfPrompted, pace, repairLocationCandidates } from './scrapFlowHelpers.js';
-import { PART_DETAILS_URL_MARKER } from '../writeUps/shared/partOwnDetails.js';
+import { openInventoryBySerial } from './openInventoryBySerial.js';
 import { evaluateBaseStation } from '../writeUps/shared/approvedLocations.js';
 import {
   looksLikeDetailsTab,
@@ -232,30 +232,16 @@ export async function writeInHouseScrap(
       if (other !== page) await closePopupQuietly(other);
     }
 
-    await page.goto(client.todoListUrl);
-    await pace(page);
-
-    // --- Inventory Search by serial ---
-    await page.locator('#idMenuButton').click();
-    await pace(page);
-    // REAL BUG CAUGHT IN PRE-FLIGHT (2026-08-23): a bare
-    // /Unserviceable Staging Clerk/i matches TWO menu entries — the clerk
-    // role itself AND "Unserviceable Staging Clerk Reports" — which
-    // Playwright's strict mode rejects outright. Anchored so only the role
-    // menu matches: the accessible name normalises to
-    // "Unserviceable Staging Clerk >", while the Reports entry has a word
-    // between the name and the chevron.
-    await page.getByRole('link', { name: /^Unserviceable Staging Clerk\s*>/i }).click();
-    await pace(page);
-    await page.getByRole('link', { name: 'Inventory Search' }).click();
-    await pace(page);
-
-    await page.locator('input[name="aSerialNo_SERIAL"]').fill(serialNumber);
-    await page.getByRole('link', { name: 'Search' }).click();
-    await pace(page);
-
-    const hit = page.getByRole('link', { name: serialNumber, exact: true });
-    if ((await hit.count()) === 0) {
+    // Search for the serial and open its inventory details page.
+    //
+    // EXTRACTED (2026-08-27) into openInventoryBySerial so the back-shop
+    // discovery pass reaches a part through the EXACT same navigation this
+    // write does. Two implementations would be free to drift, and a
+    // discovery pass that opened a different record than the write would
+    // recommend scrapping one part and then scrap another. Every comment
+    // explaining why each step looks the way it does moved with the code.
+    const opened = await openInventoryBySerial(page, client.todoListUrl, serialNumber);
+    if (opened.status === 'not_found') {
       return {
         status: 'failed',
         stepsTaken,
@@ -264,68 +250,24 @@ export async function writeInHouseScrap(
         errorMessage: `No inventory item found for serial "${serialNumber}". Nothing was changed.`,
       };
     }
-    await hit.first().click();
     stepsTaken.push(`found inventory for serial ${serialNumber}`);
 
-    // REAL BUG FIXED (2026-08-23, first live run): this read the page after
-    // a flat 750ms pace() and got nothing, failing with "could not read a
-    // base station" — while a read-only pre-flight using a 2500ms wait read
-    // "PNS/USSTG" from the same page without trouble. It was never a
-    // parsing problem, just reading before the detail page had rendered.
-    //
-    // Waits for the location pattern itself to appear rather than guessing
-    // a longer sleep — same content-aware-wait discipline as
-    // waitForUnassignedTasksSectionResolved.
-    // REAL BUG FOUND AND FIXED (2026-08-25), reported as: running several
-    // serials scraps the FIRST one and fails every one after it, always
-    // with "could not read a base station ... (not found)" — and the same
-    // serial succeeds when it is first in the list. Nothing was wrong with
-    // the parts; the read was landing on the wrong page.
-    //
-    // The old wait polled the whole body for a bare `XXX/YYY` token and
-    // SWALLOWED its own timeout. Two ways that goes wrong, both live here:
-    //   - it is satisfied by any page carrying a location-shaped token,
-    //     including the search results grid, so it could stop waiting while
-    //     still on the wrong page;
-    //   - when it genuinely timed out it fell through silently and reported
-    //     "not found", which reads like the item has no location rather
-    //     than "we were never on the item's page".
-    //
-    // Replaced with the same positive page-identity check proven for the
-    // usage-table read: the URL must actually be the inventory details page
-    // (PART_DETAILS_URL_MARKER — confirmed across 523 captured reads), the
-    // document must be COMPLETE (a server-rendered JSP has nothing further
-    // coming), and the page must show THIS serial, which also rules out
-    // having landed on a different item.
-    let onDetailsPage = false;
-    try {
-      await page.waitForFunction(
-        ({ marker, sn }) =>
-          window.location.href.includes(marker) &&
-          document.readyState === 'complete' &&
-          (document.body?.innerText ?? '').includes(sn),
-        { marker: PART_DETAILS_URL_MARKER, sn: serialNumber },
-        { timeout: 30_000, polling: 250 },
-      );
-      onDetailsPage = true;
-    } catch {
-      /* reported explicitly below, with the URL actually landed on */
-    }
-
-    if (!onDetailsPage) {
-      const landedOn = page.url();
+    // Every other non-'opened' status is a FAULT rather than an answer about
+    // the part (search never rendered, results stated but no clickable row,
+    // details page never loaded). Handled as one branch on purpose: a new
+    // status added to openInventoryBySerial must never fall through here and
+    // be treated as a successfully opened part.
+    if (opened.status !== 'opened') {
       log.warn(
-        { serialNumber, landedOn, stepsTaken },
-        '[in-house scrap] never reached the inventory details page after clicking the serial',
+        { serialNumber, status: opened.status, landedOn: opened.url, stepsTaken },
+        '[in-house scrap] could not open the inventory details page for this serial',
       );
       return {
         status: 'failed',
         stepsTaken,
         locationUsed,
         partDescription,
-        errorMessage:
-          `Clicking serial ${serialNumber} never landed on its inventory details page (still on "${landedOn}" ` +
-          `after 30s). Its location was never actually looked for, so nothing was changed.`,
+        errorMessage: `${opened.error} Its location was never actually looked for, so nothing was changed.`,
       };
     }
 

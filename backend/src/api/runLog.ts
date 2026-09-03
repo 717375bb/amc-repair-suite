@@ -34,10 +34,18 @@ export interface RunLogEvent {
   detail?: string;
   /**
    * CLAUDE_CODE_PROMPT (email-maintenance-records button, 2026-08-14) —
-   * only ever set on exceptionType 'zero_usage' events, for the frontend's
-   * "Email Maintenance Records" draft button. Structured (not folded into
-   * `detail`) so the frontend can build a clean plain-text table rather
-   * than parsing it back out of a free-text technical-details blob.
+   * set for the frontend's "Email Maintenance Records" draft button.
+   * Structured (not folded into `detail`) so the frontend can build a clean
+   * plain-text table rather than parsing it back out of a free-text
+   * technical-details blob.
+   *
+   * Set on 'zero_usage' events AND, since 2026-08-28, on
+   * 'order_created_do_not_ship' events whose reason is zero times and
+   * cycles. The "Create Order Only" redirect sends every USSTG zero-usage
+   * line down that second path, and because this field was documented and
+   * treated as zero_usage-only, the draft button silently stopped
+   * appearing — no zero_usage event has fired since 2026-08-07. The button
+   * should key off THIS FIELD being present, not off the exception type.
    */
   usageRows?: UsageParmRow[];
 }
@@ -299,6 +307,12 @@ export function vendorCodeOutcomeToLogEvent(
         exceptionType: 'order_created_do_not_ship',
         orderNumber: outcome.fields.generatedOrderNumber ?? undefined,
         detail: outcome.externalReferenceNote,
+        // Present only on the zero-times-and-cycles redirect, and what
+        // brings the Maintenance Records draft button back for these lines
+        // — see the outcome type's zeroUsageRows docstring for why it went
+        // missing on 2026-08-07.
+        serialNumber: outcome.fields.serialNumber ?? undefined,
+        usageRows: outcome.zeroUsageRows,
       };
     case 'order_created_awaiting_rma':
       return {

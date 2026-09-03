@@ -165,6 +165,12 @@ async function main(): Promise<void> {
         continue;
       }
 
+      if (row.document_kind === 'extraction_failed') {
+        // Deliberately worded as a fault of ours, not a finding about the
+        // document — nothing was ever read from it. See QuoteDocumentKind.
+        skip('This PDF could not be read, so it was never assessed. Re-run the ingest, or review it by hand.');
+        continue;
+      }
       if (row.document_kind !== 'quote') {
         skip(`Not a quote (${row.document_kind}).`);
         continue;

@@ -47,6 +47,7 @@ import {
   detectUnassignedTaskState,
 } from './unassignedTasks.js';
 import { isNoTasksAssignedException } from '../aeroRepair/noTaskException.js';
+import { resetOptionsFilters } from '../aeroRepair/partDetails.js';
 import { closePartOwnDetails, openPartOwnDetails, readPartOwnDetails, type PartOwnDetails, type UsageParmRow } from './partOwnDetails.js';
 import { completeCreateOrderOnly, composeAwaitingRmaNote, composeDoNotShipNote, verifyExternalReferenceCommitted, ZERO_USAGE_DO_NOT_SHIP_REASON } from './createOrderOnly.js';
 import { closePartDetailsReceivingNotes, openPartDetailsReceivingNotes, readPartDetailsReceivingNotes } from './partDetailsReceivingNotes.js';
@@ -113,21 +114,51 @@ async function pace(page: Page): Promise<void> {
 
 /**
  * Real, from discovery-0t1y4-warranty-recording.ts: Options... -> Reset
- * Filters -> the "When selected, items at USSTG" cell (confirmed REQUIRED
- * for every vendor-code search, not vendor-optional) -> #idVendorShop fill
- * -> OK. Deliberately NOT reusing aeroRepair/partDetails.ts's
- * resetOptionsFilters() — that function checks/unchecks two DIFFERENT,
- * ID-based checkboxes than this recording's own cell-based click, and
- * nothing confirms the two are the same underlying control.
+ * Filters -> location filters -> #idVendorShop fill -> OK.
+ *
+ * REAL BUG FOUND AND FIXED (2026-08-28) — the cause of "No lines currently
+ * found for this vendor" on lines that are plainly still in MXI.
+ *
+ * This used to click `getByRole('cell', { name: 'When selected, items at
+ * USSTG' }).nth(1)`, and the docstring here claimed that was the USSTG
+ * control, deliberately NOT reused from aeroRepair's ID-based
+ * resetOptionsFilters() because "nothing confirms the two are the same
+ * underlying control."
+ *
+ * They are the same controls, and the cell click was hitting the WRONG one.
+ * Probed live against production: MXI puts the identical `title` text
+ * ("When selected, items at USSTG type locations will be shown.") on the
+ * adjacent DOCK checkbox's cell, so two cells carry that accessible name
+ * and `.nth(1)` is the second — `aShowInvDockLocations`
+ * (#idCheckboxShowOtherLocations), not USSTG. Observed state through the
+ * real sequence:
+ *
+ *   dialog opens     USSTG=true   Dock=false
+ *   Reset Filters    USSTG=true   Dock=TRUE
+ *   .nth(1) click    USSTG=true   Dock=FALSE   <- only the Dock box moved
+ *
+ * So the step that was supposed to guarantee "show USSTG items" never
+ * touched USSTG at all. It worked only because USSTG happened to already
+ * be on. It is a blind TOGGLE, so its result depends entirely on the state
+ * the dialog was already in — and that state persists per session. Any run
+ * that started with USSTG off searched with USSTG off, found zero rows,
+ * and reported `no_candidate_lines` for a vendor whose lines were sitting
+ * right there. That is exactly the intermittency: discovery finds the
+ * lines, a later pass does not.
+ *
+ * Now uses the same idempotent, ID-based helper aeroRepair has always
+ * used. `.check()`/`.uncheck()` state the intent instead of toggling, so
+ * the end state is identical every time regardless of what came before —
+ * and identical between discovery and execute, which is what stops the two
+ * from disagreeing.
  */
 async function navigateToVendorCodeGrid(page: Page, todoListUrl: string, vendorCode: string): Promise<void> {
   await page.goto(todoListUrl);
   await page.getByRole('link', { name: 'Options...' }).click();
   await pace(page);
-  await page.getByRole('link', { name: 'Reset Filters' }).click();
-  await pace(page);
-  await page.getByRole('cell', { name: 'When selected, items at USSTG' }).nth(1).click();
-  await pace(page);
+  // Same end state the cell click produced on a good run (USSTG shown, Dock
+  // hidden) — but asserted rather than toggled into.
+  await resetOptionsFilters(page);
   await page.locator('#idVendorShop').click();
   await pace(page);
   await page.locator('#idVendorShop').fill(vendorCode);
@@ -325,8 +356,18 @@ async function findCandidateLinesForVendorCodeOnce(
 ): Promise<VendorCodeCandidateLine[]> {
   await navigateToVendorCodeGrid(page, todoListUrl, vendorCode);
 
+  // How many real inventory lines the grid is actually showing. Read FIRST,
+  // and kept, so a zero-candidate result can be judged against it below:
+  // "the grid was empty" and "the grid had rows we failed to read" are
+  // different facts and must never collapse into the same report.
+  const realRowCount = await page.locator('input[name="aInventory"]').count();
+
+  // The empty-state text is only believed when the grid also genuinely has
+  // no rows. It used to be a bare substring test over the whole body, which
+  // would return "no lines" for a page that had real rows AND that phrase
+  // somewhere in it.
   const bodyText = await page.locator('body').innerText();
-  if (bodyText.includes('no inventory')) return [];
+  if (bodyText.includes('no inventory') && realRowCount === 0) return [];
 
   const repairLinks = page.getByRole('link', { name: REPAIR_LINK_PATTERN });
   const count = await repairLinks.count();
@@ -401,6 +442,28 @@ async function findCandidateLinesForVendorCodeOnce(
     );
   }
 
+  // THE SILENT-DROP GUARD, per the analyst's requirement that finding lines
+  // succeed 100% of the time even when nothing can be done with them.
+  //
+  // Rows exist on the grid but neither extractor produced a candidate: the
+  // repair-link suffix did not match and the row did not read as
+  // work-package-less. That is OUR failure to read the grid, not an empty
+  // vendor — and reporting it as "No lines currently found" tells the
+  // analyst something false about MXI. Captured with evidence so the next
+  // occurrence is diagnosable instead of anecdotal.
+  if (candidates.length === 0 && realRowCount > 0) {
+    const rowText = await page
+      .locator('tr:has(input[name="aInventory"])')
+      .allInnerTexts()
+      .catch(() => [] as string[]);
+    await captureVendorCodeGridDiagnostics(page, `${vendorCode}-unreadable-rows`);
+    throw new Error(
+      `Vendor "${vendorCode}" grid shows ${realRowCount} real inventory row(s), but none could be read as a ` +
+        `candidate line. This is a locator failure, not an empty vendor — the lines are in MXI. First row text: ` +
+        `${JSON.stringify(rowText[0]?.replace(/\s+/g, ' ').trim().slice(0, 220) ?? '(unreadable)')}`,
+    );
+  }
+
   return candidates;
 }
 
@@ -419,13 +482,31 @@ export async function findCandidateLinesForVendorCode(
   todoListUrl: string,
   vendorCode: string,
 ): Promise<VendorCodeCandidateLine[]> {
-  const MAX_ATTEMPTS = 1;
+  // Restored to 2 on 2026-08-28 (3 was too slow in practice). It had been set to 1, which left the
+  // retry loop and its backoff as dead code — a vendor whose grid answered
+  // slowly got exactly one chance and then reported "no lines found". The
+  // search is read-only and idempotent, so re-running it costs nothing but
+  // time and removes a whole class of one-shot timing failures.
+  const MAX_ATTEMPTS = 2;
   let lastResult: VendorCodeCandidateLine[] = [];
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     lastResult = await findCandidateLinesForVendorCodeOnce(page, todoListUrl, vendorCode);
     if (lastResult.length > 0) return lastResult;
-    if (attempt < MAX_ATTEMPTS) await waitBeforeRetry(page, attempt);
+    if (attempt < MAX_ATTEMPTS) {
+      log.info({ vendorCode, attempt }, '[vendor-grid] no candidates found — re-running the search before believing it');
+      await waitBeforeRetry(page, attempt);
+    }
   }
+
+  // Every attempt came back empty AND the grid positively said so each
+  // time. Believable, but still captured: "this vendor genuinely has no
+  // open lines" is a claim about real work, and the analyst has been
+  // burned by it being wrong.
+  log.warn(
+    { vendorCode, attempts: MAX_ATTEMPTS },
+    '[vendor-grid] vendor reported empty after every attempt — capturing the grid for review',
+  );
+  await captureVendorCodeGridDiagnostics(page, `${vendorCode}-reported-empty`);
   return lastResult;
 }
 
@@ -567,7 +648,29 @@ export type VendorCodeWriteUpOutcome =
    * shared/createOrderOnly.ts) so the audit trail and the real MXI field
    * can never drift apart.
    */
-  | { status: 'order_created_do_not_ship'; fields: VendorCodeWriteUpFields; reason: string; externalReferenceNote: string }
+  | {
+      status: 'order_created_do_not_ship';
+      fields: VendorCodeWriteUpFields;
+      reason: string;
+      externalReferenceNote: string;
+      /**
+       * The part's usage table, carried ONLY when the reason is zero times
+       * and cycles.
+       *
+       * REAL GAP THIS CLOSES (2026-08-28). When "Create Order Only" was
+       * added, a zero-usage line on a USSTG line stopped returning the
+       * `zero_usage` outcome and started returning this one instead. That
+       * was the intended MXI behaviour — but it silently took the
+       * Maintenance Records email draft with it, because the draft button
+       * is offered on zero-usage events and needs these rows. `zero_usage`
+       * has not fired since 2026-08-07, and effectively every line here is
+       * USSTG, so the notification simply stopped happening.
+       *
+       * What to do in MXI and who to tell about bad data are separate
+       * concerns; the redirect should only ever have changed the first.
+       */
+      zeroUsageRows?: UsageParmRow[];
+    }
   /**
    * CLAUDE_CODE_PROMPT (#1, RMA framework) — a genuinely distinct terminal
    * state from order_created_do_not_ship above: gated on vendor MEMBERSHIP
@@ -1005,6 +1108,8 @@ export async function runVendorCodeWriteUp(
      */
     let contractCode: ContractCode | null = null;
     let doNotShipReason: string | null = null;
+    /** Populated only on the zero-times-and-cycles redirect. See the outcome type. */
+    let zeroUsageRows: UsageParmRow[] | undefined;
     let receivingNotes: string | null = null;
     let notesText: string;
     if (shipset) {
@@ -1062,6 +1167,10 @@ export async function runVendorCodeWriteUp(
         if (isUsstgLine) {
           doNotShipReason = ZERO_USAGE_DO_NOT_SHIP_REASON;
           effectiveTerminalState = 'CREATE_ORDER_ONLY';
+          // Kept so the Maintenance Records draft is still offered for this
+          // part. The redirect changes what happens in MXI; it should never
+          // have changed whether Records gets told the data is wrong.
+          zeroUsageRows = partOwnDetails.usageRows;
           log.info(
             { vendorConfigId: config.id, partNumber: candidate.partNumber, serialNumber: candidate.serialNumber, doNotShipReason },
             '[create-order-only] zero usage detected on a USSTG line — routing to CREATE_ORDER_ONLY instead of the Zero Usage exception',
@@ -1367,6 +1476,7 @@ export async function runVendorCodeWriteUp(
         fields: doNotShipFields,
         reason: doNotShipReason,
         externalReferenceNote: note,
+        zeroUsageRows,
       };
     }
 
@@ -1388,9 +1498,16 @@ export async function runVendorCodeWriteUp(
       let approved = false;
       realAuthStatus = null;
       for (let attempt = 1; attempt <= MAX_AUTH_ATTEMPTS; attempt++) {
-        await clickRequestAuthorization(page);
-        await selectAuthFlow(page, effectiveAuthFlow);
-        await confirmAuthorizationRequest(page);
+        // An order that is already authorized shows no "Request
+        // Authorization" action, and therefore no Auth Flow dropdown and no
+        // confirmation either — pressing on would just move the 30s timeout
+        // from one step to the next. The real status is re-read below and
+        // decides the outcome regardless of which path got us here.
+        const authResult = await clickRequestAuthorization(page);
+        if (authResult.status === 'requested') {
+          await selectAuthFlow(page, effectiveAuthFlow);
+          await confirmAuthorizationRequest(page);
+        }
 
         const attemptState = await readOrderRealState(page, generatedOrderNumber, client.todoListUrl);
         realAuthStatus = attemptState.authorizationStatus;
@@ -1409,8 +1526,12 @@ export async function runVendorCodeWriteUp(
         };
       }
     } else {
-      await clickRequestAuthorization(page);
-      await confirmAuthorizationRequest(page);
+      // Same reasoning as the REPAIR branch above: no request action means
+      // there is nothing to confirm either.
+      const authResult = await clickRequestAuthorization(page);
+      if (authResult.status === 'requested') {
+        await confirmAuthorizationRequest(page);
+      }
 
       const state = await readOrderRealState(page, generatedOrderNumber, client.todoListUrl);
       realAuthStatus = state.authorizationStatus;

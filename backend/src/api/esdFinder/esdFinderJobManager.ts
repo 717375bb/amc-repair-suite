@@ -180,6 +180,8 @@ export function startEsdWriteJob(
   orderNumbers: string[],
   mxiCredential: MxiCredential,
   sourceCompareRunId: string,
+  /** Per-order analyst corrections typed in the review table. See EsdWriteOverride. */
+  overrides: Record<string, { esd?: string; note?: string }> = {},
 ): StartEsdJobResult {
   if (activeRunId) return { ok: false, conflictRunId: activeRunId };
 
@@ -204,7 +206,16 @@ export function startEsdWriteJob(
 
   job.process = spawnRunner(
     'src/api/jobRunners/esdWriteRunner.ts',
-    ['--env', env, '--esd-run-id', String(dbRunId), '--order-numbers', JSON.stringify(orderNumbers)],
+    [
+      '--env',
+      env,
+      '--esd-run-id',
+      String(dbRunId),
+      '--order-numbers',
+      JSON.stringify(orderNumbers),
+      '--overrides',
+      JSON.stringify(overrides),
+    ],
     (envelope) => {
       const e = envelope as { type: string; orderNumber?: string; status?: EsdWriteOrderResult['status']; errorMessage?: string | null; message?: string };
       if (e.type === 'order-result' && e.orderNumber && e.status) {

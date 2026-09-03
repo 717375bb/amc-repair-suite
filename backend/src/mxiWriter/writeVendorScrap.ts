@@ -32,6 +32,44 @@ export interface VendorScrapResult {
 }
 
 /**
+ * The one link in the Inventory Receipts table that points at an inventory
+ * record — i.e. the item this order actually received back.
+ *
+ * Located structurally rather than by its text, because that text varies:
+ * on real order P000BESE it read "BN 397522" while the scrap certificate
+ * said "PEL01531" and the receipt line's own description said "BN 396273".
+ * Confirmed against the live page on 2026-08-28.
+ */
+const RECEIVED_ITEM_LINK = '#idTableInventoryReceipts a[href*="InventoryDetails.jsp"]';
+
+/**
+ * Whether this order has an inventory item on its Receipt & Returns tab.
+ *
+ * This is the real signal that a shipment was received — truer than whether
+ * the "Receive Shipment" link is gone, and truer than whether a dialog's OK
+ * button clicked cleanly. Leaves the browser back on the order's own page
+ * so the caller can carry on with the next step.
+ */
+async function confirmShipmentReceived(page: Page, orderNumber: string, todoListUrl: string): Promise<boolean> {
+  const tab = page.getByRole('link', { name: 'Receipt & Returns' });
+  if ((await tab.count()) === 0) return false;
+  await tab.first().click();
+  await pace(page);
+  const found = (await page.locator(RECEIVED_ITEM_LINK).count()) > 0;
+
+  // Back to the order's default view — the steps after this expect the
+  // task list, not the Receipt & Returns tab. MXI also remembers the active
+  // tab per session, so leaving it here would affect the next order too.
+  await page.goto(todoListUrl);
+  await page.locator('#idBarcodeSearchInput').click();
+  await page.locator('#idBarcodeSearchInput').fill(orderNumber);
+  await page.locator('#idBarcodeSearchInput').press('Enter');
+  await pace(page);
+
+  return found;
+}
+
+/**
  * The full vendor-scrap flow, from `discovery-full-scrap-recording.ts`.
  *
  * Receives the shipment, cancels the repair task as SCRAPVEN, completes and
@@ -59,6 +97,9 @@ export async function writeVendorScrap(
   const stepsTaken: string[] = [];
   let certAttached = false;
   let page: Page | undefined;
+  // The receive dialog's own buttons. Short on purpose: an unresponsive
+  // button here is a fault to report in seconds, not to wait 30s on.
+  const RECEIVE_CLICK_TIMEOUT_MS = 8000;
 
   try {
     page = await client.getAuthenticatedPage();
@@ -70,26 +111,52 @@ export async function writeVendorScrap(
     await pace(page);
 
     // --- Receive the shipment back from the vendor ---
+    //
+    // RESUMABLE AS OF 2026-08-28. Two real failures on 2026-08-28 left
+    // orders stuck here: P000BESC's "OK" click timed out after 30s (the
+    // button was found but never became actionable), the run reported
+    // failure, and a retry then refused outright because the shipment HAD
+    // been received in the meantime. The order sat received-but-nothing-else
+    // with no way forward but by hand.
+    //
+    // So: the receive is judged by whether the item actually arrived, not by
+    // whether every click resolved — the same discipline that fixed the ESD
+    // note verification. An already-received order resumes instead of
+    // refusing, which is what makes a partially-processed order recoverable
+    // by simply running it again.
     const receive = page.getByRole('link', { name: 'Receive Shipment' });
-    if ((await receive.count()) === 0) {
+    if ((await receive.count()) > 0) {
+      await receive.first().click();
+      await pace(page);
+
+      const qty = page.locator('input[name="aReceivedQty_1"]');
+      if ((await qty.count()) > 0) {
+        await qty.first().fill('1');
+        await pace(page);
+      }
+      // Bounded, and a timeout here is no longer fatal on its own: the
+      // verification below decides whether the receive really happened.
+      // #idButtonOK is the id the failing run's own error log showed this
+      // link resolving to.
+      await clickIfPresent(page, page.locator('#idButtonOK'), RECEIVE_CLICK_TIMEOUT_MS);
+      await clickIfPresent(page, page.getByRole('link', { name: 'Close' }), RECEIVE_CLICK_TIMEOUT_MS);
+    }
+
+    // Independently confirm the item is on the order, whether we just
+    // received it or a previous run did.
+    const received = await confirmShipmentReceived(page, orderNumber, client.todoListUrl);
+    if (!received) {
       return {
         status: 'failed',
         stepsTaken,
         certAttached,
-        errorMessage: `"Receive Shipment" is not available on ${orderNumber} — it may already have been received. Check the order by hand before retrying.`,
+        errorMessage:
+          `${orderNumber} has no received inventory item after the receive step, and "Receive Shipment" is ` +
+          `${(await receive.count()) > 0 ? 'still offered' : 'not offered'} — the shipment was not received. ` +
+          `Nothing further was attempted.`,
       };
     }
-    await receive.first().click();
-    await pace(page);
-    stepsTaken.push('received shipment');
-
-    const qty = page.locator('input[name="aReceivedQty_1"]');
-    if ((await qty.count()) > 0) {
-      await qty.first().fill('1');
-      await pace(page);
-    }
-    await clickIfPresent(page, page.getByRole('link', { name: 'OK' }));
-    await clickIfPresent(page, page.getByRole('link', { name: 'Close' }));
+    stepsTaken.push('shipment received (confirmed on Receipt & Returns)');
 
     // --- Cancel the repair task as vendor-scrapped ---
     // The recording's link text is part-specific ("Repair CARTRIDGE, BOOST
@@ -137,19 +204,74 @@ export async function writeVendorScrap(
     await page.getByRole('link', { name: 'Receipt & Returns' }).click();
     await pace(page);
 
-    const serialLink = page.getByRole('link', { name: serialNumber, exact: true });
-    if ((await serialLink.count()) === 0) {
+    // --- Open the item that was actually received ---
+    //
+    // REAL BUG FIXED (2026-08-28). This used to look for a link whose text
+    // equalled the serial from the scrap certificate, and refused to
+    // continue when it found none — leaving the order received, cancelled,
+    // and work-package-complete but not scrapped, which is the worst place
+    // to stop. It failed on real order P000BESE, and the page shows exactly
+    // why: the certificate's serial was PEL01531, while the item MXI
+    // actually received is batch BN 397522. They are different identifiers
+    // for the same physical return, and with batch-numbered parts they
+    // routinely disagree — the vendor returns a different batch than the
+    // one that was sent, and the receipt line's own description even
+    // carried a third value (BN 396273).
+    //
+    // Per the analyst's instruction: take the inventory shown on the
+    // inventory receipt line, exactly as the original recording did (it
+    // clicked "D19181", which was that order's received item, not its
+    // certificate serial). Located structurally — the one link in the
+    // Inventory Receipts table that points at an inventory record —
+    // rather than by text, so nothing depends on how the item is named.
+    const receiptItems = page.locator(RECEIVED_ITEM_LINK);
+    const receiptItemCount = await receiptItems.count();
+
+    if (receiptItemCount === 0) {
       return {
         status: 'failed',
         stepsTaken,
         certAttached,
         errorMessage:
-          `Work package completed for ${orderNumber}, but serial "${serialNumber}" was not found under Receipt & ` +
-          `Returns. Refusing to guess which item to scrap. The order is PARTIALLY processed — check it by hand.`,
+          `Work package completed for ${orderNumber}, but its Receipt & Returns tab shows no received inventory ` +
+          `item to scrap. The order is PARTIALLY processed — check it by hand.`,
       };
     }
-    await serialLink.first().click();
+
+    // More than one received line is a genuine ambiguity about which
+    // physical item to destroy, and scrapping is irreversible. Refusing is
+    // correct; guessing is not.
+    if (receiptItemCount > 1) {
+      const names = await receiptItems.allInnerTexts();
+      return {
+        status: 'failed',
+        stepsTaken,
+        certAttached,
+        errorMessage:
+          `Work package completed for ${orderNumber}, but its Receipt & Returns tab lists ${receiptItemCount} ` +
+          `received inventory items (${names.map((n) => n.trim()).join(', ')}). Refusing to guess which one to ` +
+          `scrap. The order is PARTIALLY processed — scrap the right item by hand.`,
+      };
+    }
+
+    const receivedItemName = (await receiptItems.first().innerText()).trim();
+    await receiptItems.first().click();
     await pace(page);
+
+    // Recorded because the item scrapped is no longer assumed to be the
+    // certificate's serial. When they differ, the audit trail must show
+    // both, so a reviewer can see what was actually destroyed.
+    stepsTaken.push(
+      receivedItemName === serialNumber
+        ? `opened received inventory ${receivedItemName}`
+        : `opened received inventory ${receivedItemName} (certificate serial was ${serialNumber})`,
+    );
+    if (receivedItemName !== serialNumber) {
+      log.info(
+        { orderNumber, certificateSerial: serialNumber, receivedItem: receivedItemName },
+        'vendor scrap: received item differs from the certificate serial — using the receipt line, per batch-number handling',
+      );
+    }
 
     await page.getByRole('link', { name: 'Inspect as Unserviceable' }).click();
     await pace(page);

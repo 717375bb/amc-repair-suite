@@ -659,10 +659,15 @@ export async function runAeroRepairWriteUp(
 
       const MAX_AUTH_ATTEMPTS = 2;
       for (let attempt = 1; attempt <= MAX_AUTH_ATTEMPTS; attempt++) {
-        await clickRequestAuthorization(page);
-        await selectAuthFlow(page, AUTH_FLOW);
-        authFlow = AUTH_FLOW;
-        await confirmAuthorizationRequest(page);
+        // An already-authorized order shows no "Request Authorization"
+        // action, and so has no Auth Flow dropdown to select and nothing to
+        // confirm. The real status is re-read below either way.
+        const authResult = await clickRequestAuthorization(page);
+        if (authResult.status === 'requested') {
+          await selectAuthFlow(page, AUTH_FLOW);
+          authFlow = AUTH_FLOW;
+          await confirmAuthorizationRequest(page);
+        }
 
         const realState = await readOrderRealState(page, generatedOrderNumber, client.todoListUrl);
         if (realState.authorizationStatus === 'APPROVED') {

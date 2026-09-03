@@ -3,7 +3,7 @@ import { useAuth } from '../lib/authContext'
 import { OrderWriteUpsRunProvider } from '../lib/orderWriteUpsRun'
 import { EsdFinderRunProvider } from '../lib/esdFinderRun'
 import { ActiveRunsProvider } from '../lib/activeRuns'
-import { InvoicePriceRun, QuoteRun, ScrapRun } from '../lib/tabRuns'
+import { BackShopRun, InvoicePriceRun, QuoteRun, ScrapRun } from '../lib/tabRuns'
 
 /**
  * Gates every real workflow route behind a valid session. 'loading' (the
@@ -42,7 +42,9 @@ export function RequireAuth() {
           <QuoteRun.Provider>
             <ScrapRun.Provider>
               <InvoicePriceRun.Provider>
-                <Outlet />
+                <BackShopRun.Provider>
+                  <Outlet />
+                </BackShopRun.Provider>
               </InvoicePriceRun.Provider>
             </ScrapRun.Provider>
           </QuoteRun.Provider>

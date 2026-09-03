@@ -1,4 +1,8 @@
 import type { Page } from 'playwright';
+import { enterPasswordIfPrompted } from './scrapFlowHelpers.js';
+import { createLogger } from '../logging/logger.js';
+
+const log = createLogger('mxi');
 
 /**
  * Invoice Price Writer — new selectors, built from two real
@@ -97,9 +101,21 @@ export async function performReauthorization(page: Page, password: string): Prom
   await pace(page);
   await page.getByRole('link', { name: 'OK' }).click();
   await pace(page);
-  await page.getByRole('textbox', { name: 'Password:' }).fill(password);
-  await pace(page);
-  await page.getByRole('button', { name: 'OK' }).click();
+
+  // REAL FAILURE FIXED (2026-08-28): this filled the password
+  // UNCONDITIONALLY, so when MXI did not prompt for it the run sat for 30s
+  // on `locator.fill: Timeout ... waiting for getByRole('textbox', { name:
+  // 'Password:' })` and failed the quote (order P000BEJY, 15:46).
+  //
+  // The prompt is intermittent — that is already known and already handled
+  // everywhere else in this codebase by enterPasswordIfPrompted, which the
+  // scrap flow has used from the start. This path simply never adopted it.
+  // It also clicks the confirming OK itself, so the unconditional click
+  // below went too.
+  const prompted = await enterPasswordIfPrompted(page, password);
+  if (!prompted) {
+    log.info({}, '[price] no password prompt appeared during reauthorization — continuing');
+  }
   await pace(page);
 }
 

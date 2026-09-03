@@ -797,8 +797,12 @@ export default function VendorQuotes() {
                     <FileText size={15} className="shrink-0 text-muted" />
                     <div className="min-w-0">
                       <p className="truncate text-sm text-text">{r.fileName}</p>
-                      <p className="truncate text-xs text-muted">
-                        {r.documentKind.replace(/_/g, ' ')} — {r.reasoningNote}
+                      {/* An unreadable PDF is called out as our failure, not
+                          described as though we looked at it and judged it. */}
+                      <p className={`truncate text-xs ${r.documentKind === 'extraction_failed' ? 'text-danger' : 'text-muted'}`}>
+                        {r.documentKind === 'extraction_failed'
+                          ? `Could not be read — not assessed. ${r.reasoningNote}`
+                          : `${r.documentKind.replace(/_/g, ' ')} — ${r.reasoningNote}`}
                       </p>
                     </div>
                   </div>

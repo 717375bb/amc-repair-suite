@@ -51,7 +51,21 @@ export type EsdClassification =
   | 'quote_sent_reference'
   | 'none';
 
-export type EsdFlag = 'ok' | 'no_esd_found' | 'orphaned_vendor_row' | 'orphaned_cra_row';
+/**
+ * `inference_unavailable` added 2026-08-28. It means the AI could not be
+ * reached at all, and it is deliberately NOT folded into `no_esd_found`:
+ * that flag is a statement about the vendor's notes, and using it for a
+ * failed request tells the analyst something untrue about the order. Run 31
+ * had 241 orders in exactly that state (corporate TLS inspection breaking
+ * the API call) presented as though their notes had been read and found
+ * empty.
+ */
+export type EsdFlag =
+  | 'ok'
+  | 'no_esd_found'
+  | 'inference_unavailable'
+  | 'orphaned_vendor_row'
+  | 'orphaned_cra_row';
 
 export interface InferenceRecord {
   orderNumber: string;
