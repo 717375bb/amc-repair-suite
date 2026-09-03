@@ -89,7 +89,7 @@ export const CHARGE_TO_ACCOUNT_REPLACEMENT = 'WHEELSBRAKES';
  * trailing punctuation) — confirmed twice in the recording (a standalone
  * fill, then as the literal prefix of the final combined fill).
  */
-export const NOTES_HEADER_TEXT = 'INSPECT AND SERVICE AS REQUIRED';
+export const NOTES_HEADER_TEXT = 'Inspect and service as required. Provide estimate for approval. Provide new 8130 with times and cycles and SFR. Provide new certificate and test data sheet.';
 
 /**
  * Confirmed via a live .innerText() read of the real "Assigned Tasks" tab

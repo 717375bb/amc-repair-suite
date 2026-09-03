@@ -101,7 +101,7 @@ export const VENDOR_REGISTRY: Readonly<Record<string, VendorConfig>> = Object.fr
       // with Delta 5 separately gating the dock-move sub-step below.
       terminalState: 'ISSUE_AND_DOCK',
       // Delta 3 — fixed, exact literal. Never composed from usage/part data.
-      notesText: 'INSPECT AND SERVICE AS REQUIRED',
+      notesText: 'Inspect and service as required. Provide estimate for approval. Provide new 8130 with times and cycles and SFR. Provide new certificate and test data sheet.',
       // Delta 5 — temporary safety measure for initial production runs;
       // flip to true to re-enable Move to Dock, no code change needed.
       moveToDockOnInitialRun: false,
