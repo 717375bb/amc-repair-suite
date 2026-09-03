@@ -72,7 +72,7 @@ async function handle<T>(response: Response, path: string): Promise<T> {
     }
     throw new ApiError(response.status, message, activeRunId)
   }
-  return response.json() as Promise<T>
+  return await response.json() as Promise<T>
 }
 
 export interface StartVendorScrapOptions {

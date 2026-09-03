@@ -692,6 +692,10 @@ function SelectState({
             >
               Deselect all
             </SecondaryButton>
+            <SecondaryButton onClick={onRun} disabled={!canRun}>
+              <PlayCircle size={16} />
+              Run
+            </SecondaryButton>
           </div>
         }
       />

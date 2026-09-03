@@ -766,6 +766,13 @@ export async function runVendorCodeWriteUp(
   let knownSerialNumber: string | null = preferredSerialNumber ?? null;
   /** True once this line's missing work package was created and verified in this same pass. */
   let workPackageWasCreated = false;
+  let receivingNotes: string | null = null;
+  function setWaiveTimes(receivingNotes: string | null): boolean {
+
+    return (receivingNotes ?? '').includes(
+        'UNIT CAN BE SENT OUT WITH 0 TIMES AND CYCLES'
+    );
+  }
 
   try {
     const page: Page = await client.getAuthenticatedPage();
@@ -781,7 +788,7 @@ export async function runVendorCodeWriteUp(
       candidate = candidates.find((c) => c.serialNumber === preferredSerialNumber);
       if (!candidate) {
         throw new Error(
-          `Preferred serial number "${preferredSerialNumber}" was not found among ${candidates.length} candidate ` +
+            `Preferred serial number "${preferredSerialNumber}" was not found among ${candidates.length} candidate ` +
             `line(s) for vendor ${vendorCode} — refusing to silently process a different line instead.`,
         );
       }
@@ -886,6 +893,7 @@ export async function runVendorCodeWriteUp(
           matchedOverrideId: shipset.id,
         }
       : resolveAuthFlowPolicy(candidate.serialNumber, config);
+
     const isBnFlow = resolved.matchedOverrideId === BN_OVERRIDE_ID;
     /**
      * True once a genuine unassigned task was assigned and independently
@@ -1108,9 +1116,12 @@ export async function runVendorCodeWriteUp(
      */
     let contractCode: ContractCode | null = null;
     let doNotShipReason: string | null = null;
+<<<<<<< HEAD
     /** Populated only on the zero-times-and-cycles redirect. See the outcome type. */
     let zeroUsageRows: UsageParmRow[] | undefined;
     let receivingNotes: string | null = null;
+=======
+>>>>>>> 962f0f0fd60a1ef16b5245dcce5c58c23435ebd1
     let notesText: string;
     if (shipset) {
       // CLAUDE_CODE_PROMPT (vendor 7A9Y2 "shipset" case, Deltas 3 & 4) —
@@ -1129,6 +1140,69 @@ export async function runVendorCodeWriteUp(
       );
       notesText = shipset.notesText;
     } else {
+      if (config.hasPartDetailsStep) {
+        await openPartDetailsReceivingNotes(page, candidate.linkText, candidate.partNumber);
+        receivingNotes = await readPartDetailsReceivingNotes(page);
+        log.info(
+            { vendorConfigId: config.id, partNumber: candidate.partNumber, serialNumber: candidate.serialNumber, receivingNotes: receivingNotes ?? null },
+            '[vendor-config] part-level receiving notes',
+        );
+        if (setWaiveTimes(receivingNotes)) {
+          resolved.usageTableExpectation = 'expectedAbsent';
+        }
+        await closePartDetailsReceivingNotes(page);
+
+        // PARKER CONTRACT CODES — resolved here, BEFORE the "account"
+        // guard below, and deliberately so.
+        //
+        // That guard stops any line whose notes mention "account", because
+        // a human referring to an account means we do not know which one to
+        // use and must not guess. A recognised contract code is the
+        // opposite situation: it says exactly which account to use. Letting
+        // the guard fire first would stop every contract line —
+        // "Charge to account PARKERCPH" trips it — and the whole point of
+        // this rule is that those lines run automatically.
+        //
+        // Applies to EVERY vendor in this engine, not a fixed list: the
+        // codes travel with the CONTRACT, not the vendor. (The first
+        // version scoped this to Parker, which was wrong on the facts —
+        // FOKKERPBH is Aerotron's, not Parker's.) Aero Repair is excluded
+        // structurally rather than by a check: it runs through its own
+        // engine, which never imports this module.
+        contractCode = detectContractCode(receivingNotes);
+        if (contractCode) {
+          // Not warranty work — billed against the contract. Bypass the
+          // warranty flow, take REPAIR authorization, and issue + dock,
+          // instead of stopping at authorization-only like the rest of
+          // this vendor family.
+          effectiveAuthFlow = AUTH_FLOW_REPAIR;
+          effectiveTerminalState = 'ISSUE_AND_DOCK';
+          log.info(
+              {
+                vendorConfigId: config.id,
+                partNumber: candidate.partNumber,
+                serialNumber: candidate.serialNumber,
+                contractCode,
+                authFlow: effectiveAuthFlow,
+                terminalState: effectiveTerminalState,
+              },
+              '[contract-code] contract code found in receiving notes — repair flow, issue and dock',
+          );
+        }
+
+        if (!contractCode && receivingNotes && /account/i.test(receivingNotes)) {
+          log.error(
+              { vendorConfigId: config.id, partNumber: candidate.partNumber, serialNumber: candidate.serialNumber, receivingNotes },
+              '[vendor-config] receiving notes mention "account" — flagging for manual review per explicit instruction rather than risk writing to the wrong Charge To Account. Nothing filled, no order created',
+          );
+          return {
+            status: 'receiving_notes_flagged_account',
+            partNumber: candidate.partNumber,
+            serialNumber: candidate.serialNumber,
+            receivingNotes,
+          };
+        }
+      }
       await openPartOwnDetails(page, candidate.linkText, candidate.serialNumber);
       const partOwnDetails = await readPartOwnDetails(page, candidate.partNumber, candidate.serialNumber);
 
@@ -1158,7 +1232,7 @@ export async function runVendorCodeWriteUp(
       }
       const usageClassification = classifyUsageTable(partOwnDetails.usageRows);
 
-      if (usageClassification === 'present_all_zero') {
+      if (usageClassification === 'present_all_zero' && !setWaiveTimes(receivingNotes)) {
         // CLAUDE_CODE_PROMPT ("Create Order Only") — the single allowlisted
         // redirect. Confirmed scope: USSTG lines only. currentLocation was
         // already read above in the exact "<STATION>/<CODE>" shape every
@@ -1214,66 +1288,7 @@ export async function runVendorCodeWriteUp(
       // and BEFORE the recheck below — not the other way around. The
       // read value is now consumed: see the "account" flag check right
       // below (CLAUDE_CODE_PROMPT, new vendor batch, 2026-08-14).
-      if (config.hasPartDetailsStep) {
-        await openPartDetailsReceivingNotes(page, candidate.linkText, candidate.partNumber);
-        receivingNotes = await readPartDetailsReceivingNotes(page);
-        log.info(
-          { vendorConfigId: config.id, partNumber: candidate.partNumber, serialNumber: candidate.serialNumber, receivingNotes: receivingNotes ?? null },
-          '[vendor-config] part-level receiving notes',
-        );
-        await closePartDetailsReceivingNotes(page);
 
-        // PARKER CONTRACT CODES — resolved here, BEFORE the "account"
-        // guard below, and deliberately so.
-        //
-        // That guard stops any line whose notes mention "account", because
-        // a human referring to an account means we do not know which one to
-        // use and must not guess. A recognised contract code is the
-        // opposite situation: it says exactly which account to use. Letting
-        // the guard fire first would stop every contract line —
-        // "Charge to account PARKERCPH" trips it — and the whole point of
-        // this rule is that those lines run automatically.
-        //
-        // Applies to EVERY vendor in this engine, not a fixed list: the
-        // codes travel with the CONTRACT, not the vendor. (The first
-        // version scoped this to Parker, which was wrong on the facts —
-        // FOKKERPBH is Aerotron's, not Parker's.) Aero Repair is excluded
-        // structurally rather than by a check: it runs through its own
-        // engine, which never imports this module.
-        contractCode = detectContractCode(receivingNotes);
-        if (contractCode) {
-          // Not warranty work — billed against the contract. Bypass the
-          // warranty flow, take REPAIR authorization, and issue + dock,
-          // instead of stopping at authorization-only like the rest of
-          // this vendor family.
-          effectiveAuthFlow = AUTH_FLOW_REPAIR;
-          effectiveTerminalState = 'ISSUE_AND_DOCK';
-          log.info(
-            {
-              vendorConfigId: config.id,
-              partNumber: candidate.partNumber,
-              serialNumber: candidate.serialNumber,
-              contractCode,
-              authFlow: effectiveAuthFlow,
-              terminalState: effectiveTerminalState,
-            },
-            '[contract-code] contract code found in receiving notes — repair flow, issue and dock',
-          );
-        }
-
-        if (!contractCode && receivingNotes && /account/i.test(receivingNotes)) {
-          log.error(
-            { vendorConfigId: config.id, partNumber: candidate.partNumber, serialNumber: candidate.serialNumber, receivingNotes },
-            '[vendor-config] receiving notes mention "account" — flagging for manual review per explicit instruction rather than risk writing to the wrong Charge To Account. Nothing filled, no order created',
-          );
-          return {
-            status: 'receiving_notes_flagged_account',
-            partNumber: candidate.partNumber,
-            serialNumber: candidate.serialNumber,
-            receivingNotes,
-          };
-        }
-      }
     }
 
     await recheckCandidateForSchedule(page, candidate);

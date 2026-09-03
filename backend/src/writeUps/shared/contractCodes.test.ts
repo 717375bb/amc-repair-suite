@@ -26,7 +26,7 @@ describe('detectContractCode', () => {
   });
 
   it('returns null for notes with no code, and for empty input', () => {
-    assert.equal(detectContractCode('Inspect and service as required.'), null);
+    assert.equal(detectContractCode('Inspect and service as required. Provide estimate for approval. Provide new 8130 with times and cycles and SFR. Provide new certificate and test data sheet.'), null);
     assert.equal(detectContractCode(''), null);
     assert.equal(detectContractCode(null), null);
     assert.equal(detectContractCode(undefined), null);
@@ -71,7 +71,7 @@ describe('resolveContract', () => {
   });
 
   it('does nothing for a line with no code', () => {
-    assert.deepEqual(resolveContract('Inspect and service as required.', 'CR7ROUTINE+NONROUTINE'), {
+    assert.deepEqual(resolveContract('Inspect and service as required. Provide estimate for approval. Provide new 8130 with times and cycles and SFR. Provide new certificate and test data sheet.', 'CR7ROUTINE+NONROUTINE'), {
       contractCode: null,
       chargeToAccount: null,
     });

@@ -144,7 +144,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw new ApiError(res.status, message, activeRunId)
   }
-  return res.json() as Promise<T>
+  return await res.json() as Promise<T>
 }
 
 export function getVendors(): Promise<VendorListEntry[]> {

@@ -83,6 +83,7 @@ export function ActiveRunsProvider({ children }: { children: ReactNode }) {
   return <ActiveRunsContext.Provider value={value}>{children}</ActiveRunsContext.Provider>
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function useActiveRuns(): ActiveRunsContextValue {
   const ctx = useContext(ActiveRunsContext)
   if (!ctx) throw new Error('useActiveRuns must be used within ActiveRunsProvider')
@@ -97,6 +98,7 @@ export function useActiveRuns(): ActiveRunsContextValue {
  * logout unmounts them all at once. Without it the sidebar would keep
  * showing jobs as running against a session that no longer exists.
  */
+// eslint-disable-next-line react-refresh/only-export-components
 export function useReportRunActivity(key: RunKey, activity: RunActivity | null): void {
   const { report } = useActiveRuns()
   const running = activity?.running ?? false
