@@ -685,7 +685,7 @@ export async function runVendorCodeWriteUp(
       candidate = candidates.find((c) => c.serialNumber === preferredSerialNumber);
       if (!candidate) {
         throw new Error(
-          `Preferred serial number "${preferredSerialNumber}" was not found among ${candidates.length} candidate ` +
+            `Preferred serial number "${preferredSerialNumber}" was not found among ${candidates.length} candidate ` +
             `line(s) for vendor ${vendorCode} — refusing to silently process a different line instead.`,
         );
       }

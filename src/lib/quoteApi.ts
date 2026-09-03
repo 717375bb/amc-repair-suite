@@ -142,7 +142,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
     throw new ApiError(response.status, message, activeRunId)
   }
-  return response.json() as Promise<T>
+  return await response.json() as Promise<T>
 }
 
 export interface StartIngestOptions {

@@ -40,7 +40,7 @@ async function authRequest<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw new AuthApiError(res.status, message)
   }
-  return res.json() as Promise<T>
+  return await res.json() as Promise<T>
 }
 
 export function register(username: string, password: string): Promise<{ username: string }> {
