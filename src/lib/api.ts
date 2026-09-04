@@ -63,8 +63,10 @@ export interface RunLogEvent {
   routedTo?: string
   exceptionType?: string
   detail?: string
-  /** Only ever set on exceptionType 'zero_usage' events — for the "Email Maintenance Records" draft button. */
+  /** Set whenever the Maintenance Records draft can be offered — see the backend's RunLogEvent. */
   usageRows?: UsageParmRow[]
+  /** The part's Barcode, rendered above the table in the records email. */
+  barcode?: string | null
 }
 
 export interface DiscoveredLineSummary {
@@ -201,6 +203,10 @@ export function draftMaintenanceRecordsEmail(input: {
   partNumber: string
   serialNumber: string
   usageRows: UsageParmRow[]
+  /** Rendered above the table. Omitted from the email entirely when absent. */
+  barcode?: string | null
+  /** Rendered below the table. Omitted from the email entirely when absent. */
+  orderNumber?: string | null
 }): Promise<MaintenanceRecordsDraftResponse> {
   return request('/api/writeups/maintenance-records-draft', { method: 'POST', body: JSON.stringify(input) })
 }

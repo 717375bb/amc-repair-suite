@@ -45,12 +45,25 @@ echo.
 echo Starting backend in its own window...
 start "AMC Repair Suite - Backend" /D "%~dp0backend" cmd /k npm run server
 
+REM Wait for the backend to actually be listening before going any further.
+REM This used to be a flat 6-second sleep for BOTH servers started at once,
+REM and a cold backend (two SQLite opens plus a Playwright client) regularly
+REM takes longer than that - so the browser opened against a backend that
+REM wasn't up, and the app looked broken rather than early.
+echo.
+node scripts\wait-for-server.cjs http://127.0.0.1:3001/health "Backend" 120
+if errorlevel 1 goto :backendfailed
+
+echo.
 echo Starting frontend in its own window...
 start "AMC Repair Suite - Frontend" /D "%~dp0" cmd /k npm run dev
 
-echo Waiting for the frontend to be ready...
-timeout /t 6 /nobreak >nul
+REM Same treatment for Vite: poll it rather than guess.
+echo.
+node scripts\wait-for-server.cjs http://127.0.0.1:5173 "Frontend" 120
+if errorlevel 1 goto :frontendfailed
 
+echo.
 echo Opening the app in your browser...
 start http://localhost:5173
 
@@ -62,6 +75,21 @@ echo.
 echo You can close this window now.
 pause
 goto :eof
+
+:backendfailed
+echo.
+echo The backend never started, so the app was NOT opened - it would have
+echo failed every request. Look at the "AMC Repair Suite - Backend" window,
+echo which is still open, for the real error.
+pause
+exit /b 1
+
+:frontendfailed
+echo.
+echo The backend is running, but the frontend never came up. Look at the
+echo "AMC Repair Suite - Frontend" window for the real error.
+pause
+exit /b 1
 
 :error
 echo.

@@ -273,10 +273,12 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
    * to. Draft only: nothing leaves the mailbox.
    */
   app.post('/api/writeups/maintenance-records-draft', requireSession, async (req, res) => {
-    const { partNumber, serialNumber, usageRows } = (req.body ?? {}) as {
+    const { partNumber, serialNumber, usageRows, barcode, orderNumber } = (req.body ?? {}) as {
       partNumber?: unknown;
       serialNumber?: unknown;
       usageRows?: unknown;
+      barcode?: unknown;
+      orderNumber?: unknown;
     };
 
     if (typeof partNumber !== 'string' || !partNumber.trim()) {
@@ -308,6 +310,11 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
       partNumber: partNumber.trim(),
       serialNumber: serialNumber.trim(),
       usageRows: rows,
+      // Both optional and both omitted from the message when absent, so a
+      // non-string or missing value simply produces the original body
+      // rather than a "Barcode: undefined" line in a real email.
+      barcode: typeof barcode === 'string' ? barcode.trim() || null : null,
+      orderNumber: typeof orderNumber === 'string' ? orderNumber.trim() || null : null,
     });
 
     if (!result.ok) {

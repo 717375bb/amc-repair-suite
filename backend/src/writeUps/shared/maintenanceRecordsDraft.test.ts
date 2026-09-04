@@ -48,6 +48,55 @@ describe('composeMaintenanceRecordsBody', () => {
     );
   });
 
+  it('places the barcode above the table and the order number below it', () => {
+    // The layout the analyst specified on 2026-09-04: barcode immediately
+    // before the table, order number after it behind a blank line so it
+    // cannot read as another data row.
+    assert.equal(
+      composeMaintenanceRecordsBody({
+        ...REAL_INPUT,
+        barcode: 'IRFKE00070C2',
+        orderNumber: 'P000BFXN',
+      }),
+      [
+        'Good morning Maintenance Records team!',
+        '',
+        'This part is showing with zero times and cycles. Can you please have this corrected? Thank you!',
+        '',
+        'PN: D21344-195    SN: L903140',
+        'Barcode: IRFKE00070C2',
+        'Usage Parm\tTSN\tTSO\tTSI',
+        'CYCLES\t0\t0\t0',
+        'HOURS\t0\t0\t0',
+        '',
+        'Order Number: P000BFXN',
+      ].join('\n'),
+    );
+  });
+
+  // Per the analyst: omit, never "(not found)". A placeholder the records
+  // team cannot act on is noise in a message they have to read.
+  it('omits either line entirely when the value is unavailable', () => {
+    const noBarcode = composeMaintenanceRecordsBody({ ...REAL_INPUT, orderNumber: 'P000BFXN' });
+    assert.ok(!noBarcode.includes('Barcode'), 'no Barcode line when there is no barcode');
+    assert.ok(noBarcode.includes('Order Number: P000BFXN'));
+
+    const noOrder = composeMaintenanceRecordsBody({ ...REAL_INPUT, barcode: 'IRFKE00070C2' });
+    assert.ok(!noOrder.includes('Order Number'), 'no Order Number line when there is no order');
+    assert.ok(noOrder.includes('Barcode: IRFKE00070C2'));
+
+    // Blank/whitespace values are treated as absent, not printed empty.
+    const blank = composeMaintenanceRecordsBody({ ...REAL_INPUT, barcode: '   ', orderNumber: '' });
+    assert.ok(!blank.includes('Barcode'));
+    assert.ok(!blank.includes('Order Number'));
+  });
+
+  it('still produces the original message when neither is supplied', () => {
+    // The pre-2026-09-04 shape, unchanged — proof this addition is additive.
+    const body = composeMaintenanceRecordsBody(REAL_INPUT);
+    assert.ok(body.endsWith('HOURS\t0\t0\t0'));
+  });
+
   it('REGRESSION: names the part IN THE BODY', () => {
     // The subject is now fixed at "Times and Cycles" for every one of
     // these. The old mailto: version carried PN/SN in the SUBJECT and

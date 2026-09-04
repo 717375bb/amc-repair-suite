@@ -313,7 +313,7 @@ export default function BackshopRepairs() {
           {isDiscovering && (
             <p className="flex items-center gap-2 text-sm text-text">
               <Loader2 size={16} className="animate-spin" />
-              {run?.phase ?? 'Working...'}
+              {run?.phase ?? 'Starting...'}
             </p>
           )}
           {!isDiscovering && findings.length === 0 && (

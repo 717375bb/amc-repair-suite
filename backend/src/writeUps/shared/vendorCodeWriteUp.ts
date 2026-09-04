@@ -48,6 +48,7 @@ import {
 } from './unassignedTasks.js';
 import { isNoTasksAssignedException } from '../aeroRepair/noTaskException.js';
 import { resetOptionsFilters } from '../aeroRepair/partDetails.js';
+import { isAwaitingRequestedAuthorization, parseRowOrderState, readRowCellTexts } from './rowOrderAuthorization.js';
 import { closePartOwnDetails, openPartOwnDetails, readPartOwnDetails, type PartOwnDetails, type UsageParmRow } from './partOwnDetails.js';
 import { completeCreateOrderOnly, composeAwaitingRmaNote, composeDoNotShipNote, verifyExternalReferenceCommitted, ZERO_USAGE_DO_NOT_SHIP_REASON } from './createOrderOnly.js';
 import { closePartDetailsReceivingNotes, openPartDetailsReceivingNotes, readPartDetailsReceivingNotes } from './partDetailsReceivingNotes.js';
@@ -215,7 +216,31 @@ export async function waitForVendorCodeGridResolved(page: Page, vendorCode: stri
   try {
     await page.waitForFunction(
       () => {
-        const hasRealRow = document.querySelectorAll('input[name="aInventory"]').length > 0;
+        // REAL BUG FOUND AND FIXED (2026-09-04) — the cause of "the read is
+        // only picking up a couple of lines".
+        //
+        // MXI ships this grid with the table styled `visibility: hidden` and
+        // reveals it from a jQuery ready handler:
+        //
+        //   jQuery('#idTableUnserviceableStaging_encapsulatingTable')
+        //     .css('visibility','visible');
+        //
+        // The rows are in the DOM BEFORE that runs. This predicate used to
+        // require only that `input[name="aInventory"]` existed, so it could
+        // return during that window — and the caller then read the grid with
+        // getByRole, which matches the ACCESSIBILITY TREE and excludes
+        // anything `visibility: hidden`. Net effect: a CSS count of 8 real
+        // rows alongside 0 findable repair links, i.e. lines silently
+        // missing from the read while sitting plainly in MXI.
+        //
+        // Measured live: at the moment of submit the table reads
+        // visibility=hidden with 0 accessible links; ~500ms later it is
+        // visible with all 8. Waiting for the table to actually be shown
+        // closes that window at its source, rather than each reader
+        // compensating for it.
+        const table = document.querySelector('#idTableUnserviceableStaging_encapsulatingTable');
+        const tableShown = !table || getComputedStyle(table).visibility !== 'hidden';
+        const hasRealRow = document.querySelectorAll('input[name="aInventory"]').length > 0 && tableShown;
         const bodyText = document.body?.innerText ?? '';
         return hasRealRow || bodyText.includes('no inventory');
       },
@@ -373,10 +398,23 @@ async function findCandidateLinesForVendorCodeOnce(
   const count = await repairLinks.count();
 
   const candidates: VendorCodeCandidateLine[] = [];
+  /** Lines skipped because an order already exists and is awaiting authorization. */
+  const excludedAwaitingAuthorization: string[] = [];
   for (let i = 0; i < count; i++) {
     const linkText = (await repairLinks.nth(i).innerText()).trim();
     const match = linkText.match(REPAIR_LINK_PATTERN);
     if (!match) continue;
+
+    // Per the analyst (2026-09-04): a line that already has an order whose
+    // authorization is still only REQUESTED is not a candidate — the order
+    // exists and is waiting on someone else, so writing it up again would
+    // duplicate work already in flight. Both conditions are required; see
+    // rowOrderAuthorization.ts.
+    const orderState = parseRowOrderState(await readRowCellTexts(repairLinks.nth(i)));
+    if (isAwaitingRequestedAuthorization(orderState)) {
+      excludedAwaitingAuthorization.push(`${match[1]}/${match[3]} (${orderState.orderNumber})`);
+      continue;
+    }
 
     const removalTask = await extractRemovalTaskInfo(repairLinks.nth(i));
     const preferredVendorState = await readPreferredVendorIndicator(repairLinks.nth(i));
@@ -451,7 +489,17 @@ async function findCandidateLinesForVendorCodeOnce(
   // vendor — and reporting it as "No lines currently found" tells the
   // analyst something false about MXI. Captured with evidence so the next
   // occurrence is diagnosable instead of anecdotal.
-  if (candidates.length === 0 && realRowCount > 0) {
+  if (excludedAwaitingAuthorization.length > 0) {
+    log.info(
+      { vendorCode, count: excludedAwaitingAuthorization.length, lines: excludedAwaitingAuthorization },
+      '[vendor-grid] lines skipped — an order already exists and its authorization is still REQUESTED',
+    );
+  }
+
+  // The excluded count is subtracted deliberately: a vendor whose every row
+  // is legitimately awaiting authorization is NOT a locator failure, and
+  // throwing there would turn a correct, expected outcome into an error.
+  if (candidates.length === 0 && excludedAwaitingAuthorization.length === 0 && realRowCount > 0) {
     const rowText = await page
       .locator('tr:has(input[name="aInventory"])')
       .allInnerTexts()
@@ -670,6 +718,8 @@ export type VendorCodeWriteUpOutcome =
        * concerns; the redirect should only ever have changed the first.
        */
       zeroUsageRows?: UsageParmRow[];
+      /** The part's Barcode, carried alongside zeroUsageRows for the records email. */
+      zeroUsageBarcode?: string | null;
     }
   /**
    * CLAUDE_CODE_PROMPT (#1, RMA framework) — a genuinely distinct terminal
@@ -1116,12 +1166,10 @@ export async function runVendorCodeWriteUp(
      */
     let contractCode: ContractCode | null = null;
     let doNotShipReason: string | null = null;
-<<<<<<< HEAD
     /** Populated only on the zero-times-and-cycles redirect. See the outcome type. */
     let zeroUsageRows: UsageParmRow[] | undefined;
+    let zeroUsageBarcode: string | null | undefined;
     let receivingNotes: string | null = null;
-=======
->>>>>>> 962f0f0fd60a1ef16b5245dcce5c58c23435ebd1
     let notesText: string;
     if (shipset) {
       // CLAUDE_CODE_PROMPT (vendor 7A9Y2 "shipset" case, Deltas 3 & 4) —
@@ -1245,6 +1293,7 @@ export async function runVendorCodeWriteUp(
           // part. The redirect changes what happens in MXI; it should never
           // have changed whether Records gets told the data is wrong.
           zeroUsageRows = partOwnDetails.usageRows;
+          zeroUsageBarcode = partOwnDetails.barcode;
           log.info(
             { vendorConfigId: config.id, partNumber: candidate.partNumber, serialNumber: candidate.serialNumber, doNotShipReason },
             '[create-order-only] zero usage detected on a USSTG line — routing to CREATE_ORDER_ONLY instead of the Zero Usage exception',
@@ -1492,6 +1541,7 @@ export async function runVendorCodeWriteUp(
         reason: doNotShipReason,
         externalReferenceNote: note,
         zeroUsageRows,
+        zeroUsageBarcode,
       };
     }
 

@@ -44,6 +44,18 @@ export interface PartOwnDetails {
    * callers must never treat these two as the same state.
    */
   usageTableFound: boolean;
+  /**
+   * The inventory record's Barcode, from `#idCellBarcode` (its label cell is
+   * `#idCellBarcodeLabel`, reading "Barcode:"). Confirmed live on a real
+   * production part: `IRFKE00070C2`, matching the format in the analyst's
+   * own discovery-barcode-recording.ts.
+   *
+   * Read HERE because this function is already standing on
+   * InventoryDetails.jsp to read the usage table — the barcode is on that
+   * same page, so it costs no extra navigation. Null when the cell is
+   * genuinely absent; never guessed.
+   */
+  barcode: string | null;
   /** Full raw text of the page at the moment of reading — the reliable field for cross-checking. */
   rawText: string;
 }
@@ -435,12 +447,28 @@ export async function readPartOwnDetails(
     .map((line) => line.trim())
     .find((line) => line.includes(partNumber) && line.includes(serialNumber));
 
+  // Read off the page we are already standing on. Absence is reported as
+  // null rather than throwing: the barcode is an addition to a notification
+  // email, and failing a whole write-up line over it would be wildly
+  // disproportionate.
+  const barcode = await page
+    .locator('#idCellBarcode')
+    .first()
+    .innerText()
+    .then((t) => t.replace(/\s+/g, ' ').trim() || null)
+    .catch(() => null);
+
+  if (!barcode) {
+    log.info({ partNumber, serialNumber }, '[part-details] no #idCellBarcode on this page — barcode omitted');
+  }
+
   return {
     partDescription: extractCleanPartDescription(descriptionLine, partNumber, serialNumber),
     partNumber,
     serialNumber,
     usageRows: usageTableResult.rows,
     usageTableFound: usageTableResult.tableFound,
+    barcode,
     rawText,
   };
 }

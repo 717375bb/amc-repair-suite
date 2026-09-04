@@ -48,6 +48,12 @@ export interface RunLogEvent {
    * should key off THIS FIELD being present, not off the exception type.
    */
   usageRows?: UsageParmRow[];
+  /**
+   * The part's Barcode, carried with usageRows for the Maintenance Records
+   * draft. Read off InventoryDetails.jsp at the same time as the usage
+   * table (see partOwnDetails.ts). Absent when the cell was not on the page.
+   */
+  barcode?: string | null;
 }
 
 /**
@@ -313,6 +319,7 @@ export function vendorCodeOutcomeToLogEvent(
         // missing on 2026-08-07.
         serialNumber: outcome.fields.serialNumber ?? undefined,
         usageRows: outcome.zeroUsageRows,
+        barcode: outcome.zeroUsageBarcode,
       };
     case 'order_created_awaiting_rma':
       return {

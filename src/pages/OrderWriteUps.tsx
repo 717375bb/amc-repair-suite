@@ -183,14 +183,20 @@ const MAINTENANCE_RECORDS_SUBJECT = 'Times and Cycles'
  */
 function buildMaintenanceRecordsEmailDraft(event: RunLogEvent): { subject: string; body: string } {
   const tableRows = (event.usageRows ?? []).map((row) => `${row.label}\t${row.tsn}\t${row.tso}\t${row.tsi}`)
+  // Barcode above the table, order number below it — kept identical to the
+  // server's composeMaintenanceRecordsBody, which this must mirror.
+  const barcode = event.barcode?.trim()
+  const orderNumber = event.orderNumber?.trim()
   const body = [
     'Good morning Maintenance Records team!',
     '',
     'This part is showing with zero times and cycles. Can you please have this corrected? Thank you!',
     '',
     `PN: ${event.partNumber}    SN: ${event.serialNumber}`,
+    ...(barcode ? [`Barcode: ${barcode}`] : []),
     'Usage Parm\tTSN\tTSO\tTSI',
     ...tableRows,
+    ...(orderNumber ? ['', `Order Number: ${orderNumber}`] : []),
   ].join('\n')
   return { subject: MAINTENANCE_RECORDS_SUBJECT, body }
 }
@@ -226,6 +232,8 @@ function LogRow({ event }: { event: RunLogEvent }) {
         partNumber: event.partNumber,
         serialNumber: event.serialNumber,
         usageRows: event.usageRows ?? [],
+        barcode: event.barcode ?? null,
+        orderNumber: event.orderNumber ?? null,
       })
       setDraftState('drafted')
     } catch (err) {

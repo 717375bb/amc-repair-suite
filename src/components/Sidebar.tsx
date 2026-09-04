@@ -5,21 +5,38 @@ import { useSidebar } from '../lib/sidebar'
 import { useActiveRuns, type RunActivity, type RunKey } from '../lib/activeRuns'
 
 /**
- * The badge text beside a running tab. Prefers a real "N/M" when the tab
- * knows one, falls back to the backend's own phase word, and finally to a
- * bare "running" — never invents progress it does not have.
+ * The badge text beside a running tab.
+ *
+ * Shows the REPORTED STATUS, not the word "running" (2026-09-04, per the
+ * analyst: "replace the 'running' with the status on the frontend"). The
+ * backend already emits a real phase for every job — "checking 3 of 12
+ * parts", "scrapping", "writing" — and that is far more useful than a
+ * generic label while several tabs are in flight at once.
+ *
+ * Order of preference:
+ *   1. the phase, plus "N/M" when the tab also knows a count;
+ *   2. the count alone, when there is no phase;
+ *   3. "starting…", only when the backend has reported nothing at all yet.
+ *
+ * Never invents progress it does not have — an absent count is simply not
+ * shown, rather than rendered as 0/0.
  */
 function runBadgeText(activity: RunActivity | undefined): string {
   if (!activity) return ''
-  if (typeof activity.done === 'number' && typeof activity.total === 'number') {
-    return `${activity.done}/${activity.total}`
-  }
-  if (activity.phase) return activity.phase
-  return 'running'
+  const hasCount = typeof activity.done === 'number' && typeof activity.total === 'number'
+  const count = hasCount ? `${activity.done}/${activity.total}` : ''
+  const phase = activity.phase?.trim()
+
+  if (phase && count) return `${phase} (${count})`
+  if (phase) return phase
+  if (count) return count
+  // Deliberately not "running": the spinner already says it is running, so
+  // the text should carry information the spinner cannot.
+  return 'starting…'
 }
 
 function runBadgeTitle(label: string, activity: RunActivity | undefined): string {
-  return `${label} — ${runBadgeText(activity) || 'running'}`
+  return `${label} — ${runBadgeText(activity) || 'starting…'}`
 }
 
 export function Sidebar() {
@@ -113,8 +130,13 @@ export function Sidebar() {
                         className="flex shrink-0 items-center gap-1 text-[10px] font-medium text-accent"
                         title={runBadgeTitle(item.label, activity[item.path as RunKey])}
                       >
-                        <Loader2 size={12} className="animate-spin" />
-                        {!collapsed && <span>{runBadgeText(activity[item.path as RunKey])}</span>}
+                        <Loader2 size={12} className="animate-spin shrink-0" />
+                        {/* Truncated rather than wrapped: a real phase string
+                            ("checking 3 of 12 parts") is longer than the old
+                            "running", and the full text is on the tooltip. */}
+                        {!collapsed && (
+                          <span className="max-w-[7.5rem] truncate">{runBadgeText(activity[item.path as RunKey])}</span>
+                        )}
                       </span>
                     )}
                     {!collapsed && item.status === 'soon' && !activity[item.path as RunKey]?.running && (

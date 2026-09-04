@@ -1139,9 +1139,10 @@ succeed 100% of the time even when nothing can be done with the lines:
   was empty" and "we could not read the grid" are different facts.
 - **The empty-state text is only believed when the grid also has zero rows.**
   It was a bare substring test over the whole body.
-- **`MAX_ATTEMPTS` restored from 1 to 3.** It had been set to 1, leaving the
-  retry loop and its backoff as dead code. A genuine empty is now captured
-  to `data/diagnostics/` before being reported.
+- **`MAX_ATTEMPTS` restored from 1 (now 2).** It had been set to 1, leaving
+  the retry loop and its backoff as dead code. Raised to 3, then settled at
+  **2** the same day — 3 was too slow in practice. A genuine empty is now
+  captured to `data/diagnostics/` before being reported.
 
 ### "Timeout waiting for getByRole('link', ...)" — the whole class (2026-08-28)
 
@@ -1242,3 +1243,111 @@ ESD side's `inference_unavailable`, fixed the same way.
   line exists before checking it (an absent line is the likelier real
   cause, and "Edit Lines" is unusable without one) and clicks through
   `clickActionLink`, so a failure names what was on the page.
+
+## The read was silently losing lines: a hidden grid (2026-09-04)
+
+Reported as "the read is only reading in a couple lines, even though
+there's tons of orders available." Root cause found in one probe, and it is
+worth understanding because the same shape can recur anywhere on this grid.
+
+MXI renders the USSTG grid with the table styled `visibility: hidden` and
+reveals it from a jQuery ready handler:
+
+```js
+jQuery('#idTableUnserviceableStaging_encapsulatingTable').css('visibility','visible');
+```
+
+The rows are in the DOM **before** that runs. `waitForVendorCodeGridResolved`
+only required `input[name="aInventory"]` to EXIST, so it could return during
+that window. The caller then reads the grid with
+`getByRole('link', { name: REPAIR_LINK_PATTERN })` — and `getByRole` matches
+the **accessibility tree**, which excludes anything `visibility: hidden`.
+
+Net effect, measured live on vendor 0T1Y4:
+
+```
+at submit:   aInventory(css)=8   repairLinks(role)=0   visibility=hidden
++500ms:      aInventory(css)=8   repairLinks(role)=8   visibility=visible
+```
+
+Eight real lines present, zero findable. The grid-resolved wait now requires
+the table to actually be shown. After the fix: 8/8 and 3/3 candidates on the
+two vendors that had been returning almost nothing.
+
+**A CSS selector and a role selector do not see the same page.** Any wait
+built on `querySelector` while the reader uses `getByRole` has this gap.
+
+Yesterday's silent-drop guard is what caught it, exactly as intended — it
+threw "grid shows 8 real inventory row(s), but none could be read as a
+candidate line. This is a locator failure, not an empty vendor" instead of
+reporting an empty vendor.
+
+### Lines awaiting authorization are no longer candidates
+
+Per the analyst: a line with an existing Order Number whose Authorization is
+still `REQUESTED` is excluded — the order exists and is waiting on someone
+else, so writing it up again duplicates work already in flight. Both
+conditions are required.
+
+Read via `rowOrderAuthorization.ts`, anchored on the `P000XXXX` token and
+stepping two cells (Order Number | Status | Authorization). Deliberately NOT
+a text search for `/APPROVED|REQUESTED/` over the row: the same row carries a
+Vendors/Shops group whose own Status is *also* "APPROVED" on nearly every
+row, and grepping would read the vendor's status as the order's. Pinned by a
+test built from a real captured row.
+
+The silent-drop guard subtracts these exclusions before firing — a vendor
+whose every line is legitimately awaiting authorization is a correct
+outcome, not a locator failure.
+
+## Startup and status reporting (2026-09-04)
+
+**The launcher now waits for the backend instead of guessing.**
+`Start-AMC-Repair-Suite.bat` started both servers at once, slept 6 seconds,
+and opened the browser. A cold backend (two SQLite opens plus a Playwright
+client) regularly takes longer, so the app loaded against a backend that was
+not up — which reads as "the app is broken" rather than "it started early".
+`scripts/wait-for-server.cjs` polls `GET /health` (unauthenticated for
+exactly this purpose, per security.md §2), then the frontend, then opens the
+browser. If either never comes up, it says so and does NOT open the app.
+
+**The sidebar shows the reported status, not the word "running".** The
+backend already emits a real phase for every job; the badge now shows it,
+with `N/M` appended when a count is also known, and falls back to
+"starting…" only when nothing has been reported yet. Pages that mapped
+unknown phases to a generic "Working..." now show the real phase text.
+
+### Maintenance Records draft: barcode and order number (2026-09-04)
+
+The message now reads:
+
+```
+Good morning Maintenance Records team!
+
+This part is showing with zero times and cycles. Can you please have this corrected? Thank you!
+
+PN: 102AH2AG    SN: A48324
+Barcode: IRFKE00070C2
+Usage Parm	TSN	TSO	TSI
+CYCLES	0	0	0
+HOURS	0	0	0
+
+Order Number: P000BFXN
+```
+
+**Barcode** comes from `#idCellBarcode` on InventoryDetails.jsp (its label
+cell is `#idCellBarcodeLabel`, reading "Barcode:"), confirmed live against a
+real production part — `IRFKE00070C2`, matching the format in the analyst's
+`discovery-barcode-recording.ts`. Read in `partOwnDetails.ts` because that
+function is ALREADY standing on that page to read the usage table, so it
+costs no extra navigation.
+
+**Order number** was already on the `order_created_do_not_ship` event
+(`fields.generatedOrderNumber`); the frontend simply wasn't sending it.
+
+Both are optional and **omitted entirely when absent** (analyst's choice —
+a "(not found)" placeholder is noise to a team that cannot act on it). A
+missing barcode is logged.
+
+`OrderWriteUps.tsx`'s "Copy draft" fallback mirrors the server composer
+exactly, as its docstring requires — both were changed together.

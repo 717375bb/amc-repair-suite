@@ -30,7 +30,11 @@ function phaseLabel(phase: string | null): string {
     case 'scrapping':
       return 'Scrapping in MXI...'
     default:
-      return 'Working...'
+      // Show whatever the backend actually reported rather than a generic
+      // "Working..." (2026-09-04). An unmapped phase is still real
+      // information; swallowing it means the analyst watches a spinner that
+      // says nothing while the job says plenty.
+      return phase?.trim() ? phase : 'Starting...'
   }
 }
 

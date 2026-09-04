@@ -21,6 +21,25 @@ export interface MaintenanceRecordsDraftInput {
   partNumber: string;
   serialNumber: string;
   usageRows: UsageParmRow[];
+  /**
+   * The inventory record's Barcode (`#idCellBarcode` on InventoryDetails.jsp,
+   * e.g. "IRFKE00070C2"). Rendered on its own labelled line immediately
+   * BEFORE the usage table, per the analyst (2026-09-04).
+   *
+   * Optional, and omitted from the message entirely when absent — a
+   * "Barcode: (not found)" line would be noise to the records team, who
+   * cannot act on it. The absence is logged instead.
+   */
+  barcode?: string | null;
+  /**
+   * The repair order created for this part, rendered AFTER the table.
+   *
+   * Optional for a real reason: the zero-usage exception can in principle be
+   * raised before any order exists. In practice these now arrive via the
+   * "Create Order Only" path, which always has one. Omitted when absent
+   * rather than printed as a blank or "(none)".
+   */
+  orderNumber?: string | null;
 }
 
 export interface MaintenanceRecordsDraftResult {
@@ -70,14 +89,22 @@ export function resolveMaintenanceRecordsMode(): MaintenanceRecordsMode {
  * (composeNotesForNormalLine) — not a new format to learn.
  */
 export function composeMaintenanceRecordsBody(input: MaintenanceRecordsDraftInput): string {
+  const barcode = input.barcode?.trim();
+  const orderNumber = input.orderNumber?.trim();
+
   const lines = [
     'Good morning Maintenance Records team!',
     '',
     'This part is showing with zero times and cycles. Can you please have this corrected? Thank you!',
     '',
     `PN: ${input.partNumber}    SN: ${input.serialNumber}`,
+    // Barcode sits directly above the table, per the analyst's layout.
+    ...(barcode ? [`Barcode: ${barcode}`] : []),
     'Usage Parm\tTSN\tTSO\tTSI',
     ...input.usageRows.map((row) => `${row.label}\t${row.tsn}\t${row.tso}\t${row.tsi}`),
+    // Order number after the table, separated by a blank line so it does not
+    // read as another data row.
+    ...(orderNumber ? ['', `Order Number: ${orderNumber}`] : []),
   ];
   return lines.join('\n');
 }
