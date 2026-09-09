@@ -28,7 +28,7 @@
  * the generic app.powerbi.com home if you'd rather land there and pick a
  * workspace from PowerBI's own nav.
  */
-export const POWERBI_WORKSPACE_URL = 'https://app.powerbi.com/'
+export const POWERBI_WORKSPACE_URL = 'https://app.powerbi.com/groups/a035dedb-10b8-452e-91d3-abdf587abb25/list?experience=power-bi'
 
 export interface PowerBiReportLink {
   name: string
@@ -43,4 +43,10 @@ export interface PowerBiReportLink {
  * Get a report's URL from PowerBI: open the report in the browser, then
  * copy the address bar URL (or use PowerBI's own "Share" -> "Copy link").
  */
-export const POWERBI_REPORTS: PowerBiReportLink[] = []
+export const POWERBI_REPORTS: PowerBiReportLink[] = [{ name: 'CRA Table Reports', url: 'https://app.powerbi.com/groups/a035dedb-10b8-452e-91d3-abdf587abb25/reports/6bf30269-9e0a-4bb8-a2fd-cdee6c6bac33/747f4d563d523a5a8c5a?experience=power-bi' },
+  { name: 'Key Graph Reports', url: 'https://app.powerbi.com/groups/a035dedb-10b8-452e-91d3-abdf587abb25/reports/766a3944-0840-4ac6-a0ea-ae4c2f9239da/594e20e66407ad1b6138?experience=power-bi' },
+  { name: 'Backshop USSTG', url: 'https://app.powerbi.com/groups/a035dedb-10b8-452e-91d3-abdf587abb25/reports/71188edc-093a-4942-b41c-0c5c75f3da8d/d399e6077e4adee19a42?experience=power-bi' },
+  { name: 'Issued Not Shipped', url: 'https://app.powerbi.com/groups/a035dedb-10b8-452e-91d3-abdf587abb25/reports/91209eff-38a0-4e3b-9166-9fb6f208e7da/d399e6077e4adee19a42?experience=power-bi' },
+  { name: 'Received Report', url: 'https://app.powerbi.com/groups/a035dedb-10b8-452e-91d3-abdf587abb25/reports/0daf58f4-1c68-44b2-a932-e94934ab2743/d399e6077e4adee19a42?experience=power-bi' },
+  { name: 'USSTG with Issued Flag', url: 'https://app.powerbi.com/groups/a035dedb-10b8-452e-91d3-abdf587abb25/reports/9aa3e932-4632-476d-bba6-f86d55953d06/407448ba603131511d5c?experience=power-bi' }
+]

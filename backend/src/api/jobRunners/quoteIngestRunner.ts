@@ -179,6 +179,8 @@ async function main(): Promise<void> {
         suggestsExchange: extraction.suggestsExchange,
 
         exchangeEvidence: extraction.exchangeEvidence,
+        warrantyStatus: extraction.warrantyStatus,
+        warrantyEvidence: extraction.warrantyEvidence,
         initialDisposition: disposition,
         confidence: extraction.confidence,
         reasoningNote: extraction.reasoningNote,
@@ -212,6 +214,8 @@ async function main(): Promise<void> {
           nonRepairableEvidence: extraction.nonRepairableEvidence,
           suggestsExchange: extraction.suggestsExchange,
           exchangeEvidence: extraction.exchangeEvidence,
+          warrantyStatus: extraction.warrantyStatus,
+          warrantyEvidence: extraction.warrantyEvidence,
           disposition,
           confidence: extraction.confidence,
           reasoningNote: extraction.reasoningNote,

@@ -2,6 +2,7 @@ import 'dotenv/config';
 import path from 'node:path';
 import {
   getEffectiveQuoteDispositions,
+  getEffectiveQuoteExchanges,
   insertQuoteWrite,
   openDb,
   quoteExtractionAlreadyWritten,
@@ -21,6 +22,7 @@ import {
   ReplyTemplateSet,
 } from '../../quoteWriter/quoteReplyTemplate.js';
 import { resolveWriteAction, type QuoteDisposition } from '../../quoteWriter/quoteDisposition.js';
+import { resolveIsExchange } from '../../quoteWriter/exchangeDecision.js';
 import type { MxiEnv } from '../../mxiWriter/config.js';
 import { watchStdinForCancellation } from './cancellationWatcher.js';
 import { createLogger } from '../../logging/logger.js';
@@ -120,6 +122,11 @@ async function main(): Promise<void> {
 
   // Guard 1: effective disposition comes from the DB, never the request.
   const dispositions = getEffectiveQuoteDispositions(db, dbRunId);
+  // The analyst's exchange override, if they made one. Same authority
+  // model as dispositions: what the model read is the default, a human
+  // decision replaces it. Without this, marking a row as an exchange in the
+  // UI would record the decision and change nothing.
+  const exchanges = getEffectiveQuoteExchanges(db, dbRunId);
 
   emit({ type: 'summary', dbRunId, env, requested: extractionIds.length, found: rows.length });
   emit({ type: 'phase', phase: 'writing' });
@@ -159,7 +166,10 @@ async function main(): Promise<void> {
       };
 
       const disposition = (dispositions.get(row.id)?.disposition ?? 'pending') as QuoteDisposition;
-      const writeAction = resolveWriteAction(disposition, row.suggests_exchange === 1);
+      const isExchange = resolveIsExchange(
+        exchanges.get(row.id) ?? { vendorSuggested: row.suggests_exchange === 1, humanDecision: null },
+      );
+      const writeAction = resolveWriteAction(disposition, isExchange);
       if (writeAction === 'none') {
         skip(`Not writable — disposition is "${disposition}".`);
         continue;
@@ -189,7 +199,10 @@ async function main(): Promise<void> {
       // was removed (2026-08-23) — PSA's BN system means our serial
       // routinely differs from the vendor's. Requiring it here would keep
       // enforcing a rule that no longer exists.
-      if (!row.resolved_esd && !row.suggests_exchange) missing.push('ESD');
+      // Keyed off the EFFECTIVE exchange state: an analyst-marked exchange
+      // has no promised-by date either, so requiring an ESD there would
+      // block the very row they just marked.
+      if (!row.resolved_esd && !isExchange) missing.push('ESD');
       if (missing.length > 0) {
         skip(`Missing ${missing.join(', ')} — refusing to write a partial update.`);
         continue;

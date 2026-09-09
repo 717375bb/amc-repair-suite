@@ -30,6 +30,17 @@
  */
 export type QuoteDocumentKind = 'quote' | 'shop_finding_report' | 'other_not_a_quote' | 'extraction_failed';
 
+/**
+ * What the vendor says about a warranty claim on this repair, read from the
+ * PDF or the email body (2026-09-04, at the analyst's request).
+ *
+ * `not_mentioned` is the default and is deliberately its own value rather
+ * than null-as-"no": silence about warranty is not a denial, and the two
+ * must never be confused by anyone reading the review table. Same reasoning
+ * as `extraction_failed` above — an absent statement is not a finding.
+ */
+export type WarrantyStatus = 'fully_accepted' | 'partially_accepted' | 'denied' | 'not_mentioned';
+
 export interface QuoteExtractionInput {
   /** Absolute path to the PDF on local disk. */
   pdfPath: string;
@@ -95,6 +106,18 @@ export interface QuoteExtractionResult {
   vendorSaysNonRepairable: boolean;
   /** The vendor's own words supporting vendorSaysNonRepairable, verbatim. Null when false. */
   nonRepairableEvidence: string | null;
+  /**
+   * What the document or email says about a warranty claim. Defaults to
+   * 'not_mentioned' — never inferred from silence.
+   */
+  warrantyStatus: WarrantyStatus;
+  /**
+   * The vendor's own words about warranty, verbatim. Null when
+   * warrantyStatus is 'not_mentioned'. Quoted rather than summarised
+   * because the analyst forwards this to the warranty department, who need
+   * the vendor's actual wording rather than our reading of it.
+   */
+  warrantyEvidence: string | null;
 
   /**
    * FIRST NAME of the person who signed off the email, for the approval

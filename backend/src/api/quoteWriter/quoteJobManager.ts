@@ -50,6 +50,11 @@ export interface QuoteExtractionRow {
   /** Vendor offered a replacement unit — routes to Convert Repair To Exchange instead of a price line. */
   suggestsExchange: boolean;
   exchangeEvidence: string | null;
+  /** What the vendor said about warranty, and their own wording for it. */
+  warrantyStatus: string;
+  warrantyEvidence: string | null;
+  /** The analyst's exchange override, once they make one. Null until then. */
+  exchangeOverride?: boolean | null;
   /** Effective disposition: the auto-derived initial value, overridden by any later human decision. */
   disposition: QuoteDisposition;
   confidence: string;
@@ -313,6 +318,22 @@ export function applyQuoteDisposition(
   const row = job.rows.find((r) => r.extractionId === extractionId);
   if (!row) return false;
   row.disposition = disposition;
+  return true;
+}
+
+/**
+ * Mirrors an exchange override into the in-memory run, exactly as
+ * applyQuoteDisposition does for dispositions. Without this the analyst's
+ * click would vanish from the table on the next poll — the DB row (and
+ * therefore the write) would still be right, but the UI would say otherwise,
+ * which invites a confused second click.
+ */
+export function applyQuoteExchange(runId: string, extractionId: number, isExchange: boolean): boolean {
+  const job = jobs.get(runId);
+  if (!job) return false;
+  const row = job.rows.find((r) => r.extractionId === extractionId);
+  if (!row) return false;
+  row.exchangeOverride = isExchange;
   return true;
 }
 
