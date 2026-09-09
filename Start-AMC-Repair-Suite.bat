@@ -13,8 +13,8 @@ if not exist "package.json" (
     echo.
     echo If you want a Desktop icon, don't move or copy this file itself -
     echo instead run scripts\Create-Desktop-Shortcut.ps1 from its real
-    echo folder (see docs\DESKTOP_SHORTCUT_SETUP.md), or right-click it and
-    echo choose "Send to -^> Desktop (create shortcut)".
+    echo folder ^(see docs\DESKTOP_SHORTCUT_SETUP.md^), or right-click it
+    echo and choose "Send to -^> Desktop (create shortcut)".
     echo.
     pause
     exit /b 1
