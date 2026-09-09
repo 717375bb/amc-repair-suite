@@ -23,6 +23,7 @@ import {
 } from '../../quoteWriter/quoteReplyTemplate.js';
 import { resolveWriteAction, type QuoteDisposition } from '../../quoteWriter/quoteDisposition.js';
 import { resolveIsExchange } from '../../quoteWriter/exchangeDecision.js';
+import { saveApprovedQuotePdf } from '../../quoteWriter/saveApprovedQuotePdf.js';
 import type { MxiEnv } from '../../mxiWriter/config.js';
 import { watchStdinForCancellation } from './cancellationWatcher.js';
 import { createLogger } from '../../logging/logger.js';
@@ -103,6 +104,8 @@ interface WritableRow {
   sender_name: string | null;
   sender_first_name: string | null;
   suggests_exchange: number;
+  /** Where the ingest stage saved the source PDF (data/quote-attachments/...) — see saveApprovedQuotePdf.ts. */
+  saved_path: string | null;
 }
 
 async function main(): Promise<void> {
@@ -114,7 +117,7 @@ async function main(): Promise<void> {
     .prepare(
       `SELECT id, order_number, serial_number, unit_price, resolved_esd, source_entry_id, document_kind,
               quote_number, vendor_name, currency, part_number, sender_name, sender_first_name,
-              suggests_exchange
+              suggests_exchange, saved_path
        FROM quote_extractions
        WHERE run_id = ? AND id IN (${placeholders})`,
     )
@@ -283,8 +286,16 @@ async function main(): Promise<void> {
       let markReadError: string | null = null;
       let replyStatus: 'drafted' | 'sent' | 'failed' | 'skipped' | null = null;
       let replyError: string | null = null;
+      // Same gate: a PDF only ever lands in the approved-quotes archive
+      // after a verified successful write — see saveApprovedQuotePdf.ts.
+      let archivedPdfPath: string | null = null;
+      let archiveError: string | null = null;
 
       if (result.status === 'success') {
+        const archive = await saveApprovedQuotePdf(row.saved_path, row.order_number!);
+        archivedPdfPath = archive.destPath;
+        archiveError = archive.error;
+
         const mark = await markOutlookMailRead(row.source_entry_id);
         markedRead = mark.ok;
         markReadError = mark.error;
@@ -342,6 +353,8 @@ async function main(): Promise<void> {
         markedRead,
         replyStatus,
         replyError,
+        archivedPdfPath,
+        archiveError,
         approvedBy: 'quote-writer-ui',
       });
 
@@ -362,8 +375,10 @@ async function main(): Promise<void> {
         issueDetail: result.issueDetail,
         // Deliberately distinct from errorMessage: a mailbox bookkeeping
         // miss is NOT a failed MXI write, and must not read like one. Same
-        // reasoning for replyStatus/replyError.
+        // reasoning for replyStatus/replyError/archiveError.
         markReadError,
+        archivedPdfPath,
+        archiveError,
         replyStatus,
         replyError,
         errorMessage: result.errorMessage,

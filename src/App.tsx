@@ -29,7 +29,7 @@ function App() {
 
       <Route element={<RequireAuth />}>
         <Route element={<AppLayout />}>
-          <Route index element={<Navigate to="/repair-orders" replace />} />
+          <Route index element={<Navigate to="/order-write-ups" replace />} />
           <Route path="/repair-orders" element={<RepairOrders />} />
           <Route path="/open-orders" element={<OpenOrderTracking />} />
           <Route path="/backshop-repairs" element={<BackshopRepairs />} />

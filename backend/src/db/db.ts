@@ -232,6 +232,12 @@ CREATE TABLE IF NOT EXISTS quote_writes (
   -- write look like it failed.
   reply_status TEXT,
   reply_error TEXT,
+  -- Path the approved quote's source PDF was copied to under backend/Quotes/
+  -- on a successful write (see quoteWriter/saveApprovedQuotePdf.ts). Null
+  -- when the write itself didn't succeed, or the copy failed (archive_error
+  -- explains why) — a copy failure never fails the MXI write it followed.
+  archived_pdf_path TEXT,
+  archive_error TEXT,
   approved_by TEXT,
   created_at TEXT NOT NULL
 );
@@ -287,6 +293,8 @@ export function openDb(dbPath: string): Database.Database {
   ensureColumn(db, 'quote_extractions', 'warranty_evidence', 'TEXT');
   ensureColumn(db, 'quote_writes', 'reply_status', 'TEXT');
   ensureColumn(db, 'quote_writes', 'reply_error', 'TEXT');
+  ensureColumn(db, 'quote_writes', 'archived_pdf_path', 'TEXT');
+  ensureColumn(db, 'quote_writes', 'archive_error', 'TEXT');
   // CLAUDE_CODE_PROMPT (AWB -> Inbound shipment, 2026-09-09) — existing
   // real audit.db files predate this column; CREATE TABLE IF NOT EXISTS
   // alone won't retrofit them, same reason every other column above needed
@@ -1213,6 +1221,8 @@ export interface QuoteWriteInsert {
   markedRead: boolean;
   replyStatus: 'drafted' | 'sent' | 'failed' | 'skipped' | null;
   replyError: string | null;
+  archivedPdfPath: string | null;
+  archiveError: string | null;
   approvedBy: string | null;
 }
 
@@ -1222,11 +1232,11 @@ export function insertQuoteWrite(db: Database.Database, params: QuoteWriteInsert
     INSERT INTO quote_writes (
       quote_extraction_id, order_number, target_env, written_price, written_esd,
       write_status, error_message, marked_read, reply_status, reply_error,
-      approved_by, created_at
+      archived_pdf_path, archive_error, approved_by, created_at
     ) VALUES (
       @quoteExtractionId, @orderNumber, @targetEnv, @writtenPrice, @writtenEsd,
       @writeStatus, @errorMessage, @markedRead, @replyStatus, @replyError,
-      @approvedBy, @createdAt
+      @archivedPdfPath, @archiveError, @approvedBy, @createdAt
     )
   `);
   const result = stmt.run({
