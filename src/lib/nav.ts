@@ -12,6 +12,7 @@ import {
   PlayCircle,
   Search,
   DollarSign,
+  LayoutGrid,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -129,6 +130,13 @@ export const navGroups: NavGroup[] = [
   {
     label: 'Analytics',
     items: [
+      {
+        key: 'powerbi-reports',
+        path: '/powerbi-reports',
+        label: 'PowerBI Reports',
+        description: 'Open your PowerBI workspace and individual reports',
+        icon: LayoutGrid,
+      },
       {
         key: 'vendor-kpi',
         path: '/vendor-kpi',

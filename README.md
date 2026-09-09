@@ -37,6 +37,10 @@ See the root `CLAUDE.md` ("How to run this for a normal week") and
 `backend/README.md` for the local, terminal-based setup this project has
 always used.
 
+**Want a one-click Desktop icon on your own machine?** (Each analyst runs
+their own independent local copy.) See `docs/DESKTOP_SHORTCUT_SETUP.md` for
+the full guided setup, start to finish.
+
 ---
 
 ## Frontend scaffold (React + TypeScript + Vite)

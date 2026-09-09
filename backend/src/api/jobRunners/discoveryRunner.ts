@@ -116,6 +116,15 @@ async function runVendorCodeDiscovery(client: MxiClient, vendorId: string, vendo
           approval.routedTo && approval.routedTo !== approval.baseStation
             ? `Ready to write up — ${approval.baseStation} routes to ${approval.routedTo}.`
             : 'Ready to write up.',
+        // CLAUDE_CODE_PROMPT (surface current location after discovery,
+        // 2026-09-09) — evaluateBaseStation() already reads this line's
+        // current <STATION>/<CODE> location to decide base approval; it was
+        // computed but never carried into the log event, so the review
+        // table's existing "Routing / Location" column (already populated
+        // for Aero Repair via routingLocation) always showed "—" for every
+        // vendor-code-family line. No new field needed — this reuses the
+        // same column Aero Repair already fills in.
+        routedTo: approval.routedTo ?? undefined,
       },
     });
   }

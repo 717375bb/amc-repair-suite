@@ -66,6 +66,7 @@ type RawEsdInferenceRow = {
   inferred_esd: string | null;
   flag: string;
   delta_days_vs_mxi: number | null;
+  outbound_awb?: string | null;
 };
 
 function toInferenceRecord(r: RawEsdInferenceRow): InferenceRecord {
@@ -77,6 +78,9 @@ function toInferenceRecord(r: RawEsdInferenceRow): InferenceRecord {
     currentStatus: r.current_status,
     vendorNotes: r.vendor_notes,
     orderStatus: r.order_status,
+    // Optional on the raw row: rows written before this column existed
+    // simply have no property here rather than an explicit null.
+    outboundAwb: r.outbound_awb ?? null,
     classification: r.classification as InferenceRecord['classification'],
     extractedBaseDate: r.extracted_base_date,
     bufferDaysApplied: r.buffer_days_applied,

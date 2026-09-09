@@ -189,6 +189,41 @@ export const VENDOR_REGISTRY: Readonly<Record<string, VendorConfig>> = Object.fr
   '93835': buildWarrantyTerminalStateVendorConfig('93835', 'PARKER HANNIFIN - MI', { hasPartDetailsStep: true }),
   '86329': buildWarrantyTerminalStateVendorConfig('86329', 'PARKER HANNIFIN-NICHOLS AIRBORNE', { hasPartDetailsStep: true }),
 
+  // CLAUDE_CODE_PROMPT (Monica Gonzalez vendor batch, 2026-09-09) — 10 of
+  // Monica Gonzalez's 11 assigned vendors (craAssignments.ts, craCode
+  // 232134), added per explicit user direction confirming the same
+  // vendor-code-search + BN-prefix-override + warranty-terminal-state
+  // process every other vendor in this family uses. VC01187 is the one
+  // vendor in this batch with a real recording
+  // (discovery-VC01187-APAS-MG-recording.ts) — that recording shows the
+  // standard flow end to end (Schedule Work Package, Purchasing Contact
+  // 232134, Request Authorization), confirming this template is correct
+  // for at least this vendor; the other 9 have no per-vendor recording and
+  // are added on the same "let live testing confirm" basis the
+  // 2026-08-14 batch above used, not a guess unique to this batch. The
+  // 11th assigned vendor, BAE SYSTEMS CONTROLS INC (63760), is explicitly
+  // excluded per user instruction ("skipped for now").
+  //
+  // Purchasing Contact resolves automatically via craAssignments.ts for
+  // every code below — not restated here.
+  //
+  // Not yet run live against real stage/production MXI for any of these
+  // 10 codes. Per this project's own standing rule (vendorConfig.ts's own
+  // docstring: "this does not remove the need for a first watched run per
+  // vendor"), each one still needs its own first live, watched run before
+  // being trusted for unattended use — this registry entry alone does not
+  // constitute verification.
+  VC00909: buildWarrantyTerminalStateVendorConfig('VC00909', 'AK-STRUCTURES, LLC'),
+  VC00859: buildWarrantyTerminalStateVendorConfig('VC00859', 'ALLFLIGHT CORPORATION'),
+  VC01187: buildWarrantyTerminalStateVendorConfig('VC01187', 'APAS - A PROFESSIONAL AVIATION SERVICES'),
+  VC01208: buildWarrantyTerminalStateVendorConfig('VC01208', 'GLASS AERO, INC.'),
+  '53117': buildWarrantyTerminalStateVendorConfig('53117', 'PPG INDUSTRIES INC'),
+  VC01060: buildWarrantyTerminalStateVendorConfig('VC01060', 'PREFERRED COMPOSITE SERVICES, INC'),
+  VC01224: buildWarrantyTerminalStateVendorConfig('VC01224', 'QT AEROSPACE'),
+  '76725': buildWarrantyTerminalStateVendorConfig('76725', 'RATIER FIGEAC'),
+  VC00529: buildWarrantyTerminalStateVendorConfig('VC00529', 'SUMMIT AEROSPACE INC'),
+  VC00809: buildWarrantyTerminalStateVendorConfig('VC00809', 'WORTHINGTON MRO CENTER'),
+
 });
 
 /**

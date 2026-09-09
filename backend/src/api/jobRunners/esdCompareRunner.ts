@@ -5,10 +5,11 @@ import { applyInferenceRules } from '../../inference/applyInferenceRules.js';
 import { AnthropicEsdProvider } from '../../inference/anthropicProvider.js';
 import { classifyRowAction, type RowActionType } from '../../inference/classifyRowAction.js';
 import { buildVendorOnlyOrders } from '../../matching/vendorOnlyOrders.js';
+import { matchOrders } from '../../matching/matchOrders.js';
 import { assembleNoteText } from '../../mxiWriter/esdFormatting.js';
 import { exportExcel } from '../../output/exportExcel.js';
 import type { InferenceRecord, RunSummary } from '../../types.js';
-import { ingestEsdFinderFiles, type DuplicateOrderNumber } from '../esdFinder/ingestion.js';
+import { ingestEsdFinderFiles, type DuplicateOrderNumber, type FileHeaderWarning } from '../esdFinder/ingestion.js';
 import { watchStdinForCancellation } from './cancellationWatcher.js';
 import { getSecretProvider } from '../../security/secretProvider.js';
 import { createLogger } from '../../logging/logger.js';
@@ -82,6 +83,10 @@ export interface EsdCompareResult {
   duplicates: DuplicateOrderNumber[];
   outputFilePath: string;
   summary: RunSummary;
+  /** True when a CRA OOR file was supplied for this run — lets the review UI explain why mxiEsdRaw/orderStatus are populated (or not). */
+  hasCraData: boolean;
+  /** Per-file recognized-but-missing headers (task #6) — never blocks the run, just tells the analyst which fields will be blank for that file's rows. */
+  headerWarnings: FileHeaderWarning[];
 }
 
 function emit(envelope: EsdCompareEnvelope): void {
@@ -93,7 +98,7 @@ interface FileRef {
   fileName: string;
 }
 
-function parseArgs(): { vendorFiles: FileRef[] } {
+function parseArgs(): { vendorFiles: FileRef[]; craFiles: FileRef[] } {
   const args = process.argv.slice(2);
   const vendorFilesIdx = args.indexOf('--vendor-files');
   const rawVendorFiles = vendorFilesIdx >= 0 ? args[vendorFilesIdx + 1] : undefined;
@@ -104,18 +109,25 @@ function parseArgs(): { vendorFiles: FileRef[] } {
   if (!Array.isArray(vendorFiles) || vendorFiles.length === 0) {
     throw new Error('--vendor-files must be a non-empty JSON array.');
   }
-  // `--cra-file` is no longer accepted. Deliberately not silently ignored:
-  // a caller still passing it is running against an older contract and
-  // should be told, not left believing a CRA file was used.
-  if (args.includes('--cra-file')) {
-    throw new Error('--cra-file is no longer supported — the ESD Finder now runs from the Vendor OOR file alone.');
+
+  // CLAUDE_CODE_PROMPT (optional CRA OOR re-add, 2026-09-09) — `--cra-files`
+  // (plural, matching `--vendor-files`' own shape) replaces the old
+  // singular `--cra-file`, which this runner used to reject outright.
+  // Absent entirely = vendor-only, byte-for-byte the same path this tab
+  // has run since 2026-08-26.
+  const craFilesIdx = args.indexOf('--cra-files');
+  const rawCraFiles = craFilesIdx >= 0 ? args[craFilesIdx + 1] : undefined;
+  const craFiles = rawCraFiles ? (JSON.parse(rawCraFiles) as FileRef[]) : [];
+  if (!Array.isArray(craFiles)) {
+    throw new Error('--cra-files must be a JSON array of {filePath, fileName}.');
   }
-  return { vendorFiles };
+
+  return { vendorFiles, craFiles };
 }
 
 async function main(): Promise<void> {
   const startedAt = new Date().toISOString();
-  const { vendorFiles } = parseArgs();
+  const { vendorFiles, craFiles } = parseArgs();
 
   // CLAUDE_CODE_PROMPT (#6-hardening, secrets-seam) — this runner never
   // touches MXI, so it never goes through cliMxiClient.ts's embedded
@@ -135,13 +147,20 @@ async function main(): Promise<void> {
   const cancelSignal = watchStdinForCancellation();
 
   emit({ type: 'phase', phase: 'ingesting' });
-  const { vendorRows, duplicates } = await ingestEsdFinderFiles(vendorFiles);
+  const { vendorRows, craRows, duplicates, headerWarnings } = await ingestEsdFinderFiles(vendorFiles, craFiles);
   if (cancelSignal.aborted) return;
+  for (const w of headerWarnings) {
+    log.warn({ fileName: w.fileName, missingHeaders: w.missingHeaders }, 'file missing some recognized (optional) headers');
+  }
 
-  // No matching phase any more — the CRA file is gone, so each vendor row
-  // IS the unit of work. See matching/vendorOnlyOrders.ts for why
-  // matchOrders(vendorRows, []) is deliberately not reused here.
-  const matched = buildVendorOnlyOrders(vendorRows);
+  // CLAUDE_CODE_PROMPT (optional CRA OOR re-add, 2026-09-09) — a CRA file
+  // was actually supplied this run: join for real, so mxiEsdRaw/
+  // deltaDaysVsMxi/orderStatus (and the Step 0 "Order Status is Received"
+  // skip rule, statusRules.ts) are populated. `matchOrders(vendorRows, [])`
+  // is still deliberately never used for the no-CRA case below —
+  // vendorOnlyOrders.ts's own docstring explains why (it would flag every
+  // row orphaned_vendor_row, making the whole run non-actionable).
+  const matched = craRows.length > 0 ? matchOrders(vendorRows, craRows) : buildVendorOnlyOrders(vendorRows);
   if (cancelSignal.aborted) return;
 
   emit({ type: 'phase', phase: 'inferring' });
@@ -153,10 +172,9 @@ async function main(): Promise<void> {
   const dbRunId = insertRun(db, {
     startedAt,
     vendorOorFile: vendorFiles.map((f) => f.fileName).join(', '),
-    // No CRA file in this flow any more. Recorded explicitly rather than
-    // left blank so an old run and a new one stay distinguishable in the
-    // audit history.
-    craOorFile: '(none — vendor-only run)',
+    // Recorded explicitly either way so an old vendor-only run and a new
+    // CRA-joined run stay distinguishable in the audit history.
+    craOorFile: craFiles.length > 0 ? craFiles.map((f) => f.fileName).join(', ') : '(none — vendor-only run)',
     rowCount: records.length,
   });
   insertInferenceRecords(db, dbRunId, records);
@@ -209,7 +227,7 @@ async function main(): Promise<void> {
 
   emit({
     type: 'done',
-    result: { dbRunId, records: resultRows, duplicates, outputFilePath, summary },
+    result: { dbRunId, records: resultRows, duplicates, outputFilePath, summary, hasCraData: craRows.length > 0, headerWarnings },
   });
 }
 

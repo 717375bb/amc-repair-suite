@@ -16,6 +16,7 @@
     "server:codespaces": "xvfb-run -a npm run server",
     "mxi:read-esd": "tsx src/cli/mxiReadEsd.ts",
     "mxi:write-esd": "tsx src/cli/mxiWriteEsd.ts",
+    "mxi:write-inbound-awb": "tsx src/cli/mxiWriteInboundAwb.ts",
     "mxi:save-storage-state": "tsx src/mxiWriter/saveStorageState.ts",
     "aero-repair:write-up": "tsx src/cli/aeroRepairWriteUpCli.ts",
     "aero-repair:batch-discovery": "tsx src/cli/aeroRepairBatchDiscoveryCli.ts",

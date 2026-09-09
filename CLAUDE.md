@@ -1351,3 +1351,214 @@ missing barcode is logged.
 
 `OrderWriteUps.tsx`'s "Copy draft" fallback mirrors the server composer
 exactly, as its docstring requires — both were changed together.
+
+## Quote review: warranty, manual NREP/exchange, forward, negotiate (2026-09-04)
+
+Five additions to the Vendor Quotes tab, all at the analyst's request.
+
+### Warranty status
+
+The extraction now reads what the vendor says about a warranty claim, from
+BOTH the PDF and the email body: `fully_accepted` / `partially_accepted` /
+`denied` / `not_mentioned`, plus the vendor's own wording quoted verbatim.
+
+`not_mentioned` is its own value, not null — **silence about warranty is not
+a denial**, and the prompt says so explicitly. Same reasoning as
+`extraction_failed`: an absent statement is never a finding.
+
+New columns `warranty_status` / `warranty_evidence` on `quote_extractions`,
+added via `ensureColumn` so the existing real database picks them up.
+
+### NREP and exchange are now analyst-settable
+
+`excluded_nrep` used to be deliberately absent from
+`HumanSettableDisposition` ("vendor-derived, not a human choice"). The
+analyst can now set it directly. Nothing is lost: `quote_dispositions`
+records `decided_by`, so a human NREP stays distinguishable from a
+vendor-derived one.
+
+Exchange gets the same treatment through a new append-only
+`quote_exchange_decisions` table and `quoteWriter/exchangeDecision.ts`. The
+override works **both ways** — setting an exchange the AI missed, and
+clearing one it wrongly found — because a one-way override leaves a wrong
+positive with no remedy. `quoteWriteRunner` resolves the effective value, so
+marking a row actually changes what MXI does rather than only what the table
+says.
+
+### Forward to the warranty department
+
+`scripts/forward-outlook-mail.ps1` — a real Outlook `Forward()`, so the
+quote PDF and the thread travel with it. Offered on **every** row whatever
+its disposition. The recipient (`psa-warranty@oliverwyman.com`) is fixed
+server-side in `outlookForward.ts` and is never taken from the request: a
+client-chosen recipient would turn one button into an arbitrary
+mail-sending endpoint on a machine holding real MXI credentials.
+
+Kept as its own script rather than a flag on `create-outlook-reply.ps1`,
+following the same rule that separates the read-only reader from the
+read-flag writer — each capability that can leave the mailbox lives in its
+own small, obvious file.
+
+### Price negotiation — the one send-on-click path
+
+Wording lives in `templates/quote-negotiation.html`, editable, like every
+other vendor-facing message here. The editor opens pre-filled with the
+vendor's own first name (from `senderFirstName`, already extracted for the
+approval greeting); `<reason>` and `<new price>` are left in deliberately as
+prompts.
+
+**This sends immediately rather than drafting** — the analyst's explicit
+choice, guarded by a confirmation dialog showing the final text and
+recipients. Two server-side guards that do not depend on the UI:
+the body must be non-trivial, and it must no longer contain the template's
+own `<reason>` / `<new price>` prompts. Sending those verbatim to a vendor
+is an easy mistake when the box opens pre-filled.
+
+On success the row moves to the new `negotiating` disposition, which is not
+writable — PSA has just asked the vendor to change this price, so committing
+the old one to MXI would be wrong. The analyst releases it back to `pending`
+when the vendor replies.
+
+## Session 2026-09-09 — seven-item work list
+
+Seven independent, user-requested changes, each verified with `tsc --noEmit`
+(backend), `npm run build` (frontend), and `npm test` (199/199 passing)
+after every change, not just at the end. None of this has been run against
+real MXI — see the AWB item below specifically, which needs a first
+watched live test before it's trusted for anything beyond the CLI tool.
+
+1. **Vendor-code write-up discovery now shows current location.** The
+   vendor-code family (`vendorCodeWriteUp.ts`) already read a line's
+   current `<STATION>/<CODE>` location at discovery time for the
+   approved-base check, but never carried it into the analyst-facing log —
+   the review table's existing "Routing / Location" column (already
+   populated for Aero Repair) always showed `—` for these vendors.
+   `discoveryRunner.ts`'s `runVendorCodeDiscovery` now sets `routedTo` on
+   the emitted event from the same `evaluateBaseStation()` result it
+   already computes — no new field, reuses the existing column.
+
+2. **10 of Monica Gonzalez's 11 assigned vendors added to `VENDOR_REGISTRY`**
+   (`writeUps/shared/vendorRegistry.ts`), per explicit user direction:
+   `VC00909` AK-Structures, `VC00859` Allflight, `VC01187` APAS (the one
+   vendor with a real recording, `discovery-VC01187-APAS-MG-recording.ts`,
+   confirming the standard flow), `VC01208` Glass Aero, `53117` PPG
+   Industries, `VC01060` Preferred Composite Services, `VC01224` QT
+   Aerospace, `76725` Ratier Figeac, `VC00529` Summit Aerospace, `VC00809`
+   Worthington MRO Center — all via the standard
+   `buildWarrantyTerminalStateVendorConfig`, Purchasing Contact resolved
+   automatically from `craAssignments.ts`. **`63760` BAE SYSTEMS CONTROLS
+   INC excluded per explicit instruction** ("skipped for now") — note the
+   real registered name differs from "BAE Systems Inc." as originally
+   named in the request; flagged rather than guessed which BAE entity was
+   meant. None of these 10 have had a first live watched run yet — still
+   required before unattended use, same standing rule as every other
+   vendor batch here.
+
+3. **ESD Finder: three related additions.**
+   - **CRA OOR re-added as a genuinely OPTIONAL second upload**
+     (`ingestion.ts`, `esdCompareRunner.ts`, `esdFinderJobManager.ts`,
+     `server.ts`'s `/api/esd/compare`, `EsdFinder.tsx`). Absent entirely
+     reproduces the exact vendor-only behavior unchanged (`flag='ok'` for
+     every matched row, no join). When given, `matchOrders()` runs for
+     real, populating `mxiEsdRaw`/`deltaDaysVsMxi`/`orderStatus` — this is
+     what "see the current ESD in MXI" resolves to, without a live per-row
+     MXI read (explicitly the user's own chosen tradeoff over a slower,
+     real-time Playwright read per row).
+   - **New Step 0 in `applyInferenceRules.ts`**: if the CRA row's Order
+     Status matches `isOrderStatusReceived()` (`inference/statusRules.ts`,
+     a small named-classifier module in the same style as
+     `classifyRowAction.ts` — no separate "BDD styler" convention exists
+     anywhere in this repo; that file's pure-function/named-outcome/
+     business-language-docblock shape is the closest thing to one and was
+     used as the template) — the row is force-flagged `no_esd_found` with
+     classification `order_received`, no AI call made. Only ever fires
+     when a CRA file was uploaded (Order Status is null otherwise).
+     **Judgment call, not independently confirmed**: "status" was read as
+     the CRA's own `Order Status` column, not the vendor's free-text
+     `Current Status` — the former means PSA already received the part
+     back (ESD is moot); the latter would mean the vendor received the
+     part to begin repair (the opposite implication). Worth confirming
+     directly if this doesn't match real data.
+   - **AWB -> Inbound shipment writer — built, NEVER LIVE-TESTED.** New
+     `mxiWriter/awbInboundSelectors.ts` (`findInboundShipmentId`,
+     `readWaybillNumberInEditMode`, `fillWaybillNumberAndConfirm`,
+     `writeInboundAwb` orchestrator) built from
+     `discovery-awb-inbound-recording.ts`, plus a standalone smoke-test CLI
+     (`npm run mxi:write-inbound-awb -- <orderNumber> <awb> [--env
+     production]`, mirroring `mxiWriteEsd.ts`'s pattern exactly). **The
+     recording shows editing a Receipt & Returns shipment's Waybill Number
+     field — it does NOT show any reauthorization step** (no Request
+     Authorization link, no Auth Flow dropdown anywhere in it); shown this
+     discrepancy directly, the user confirmed "just do what the recording
+     shows," so no reauthorize step was built. The INBOUND shipment is
+     identified as the mirror image of `shared/issueAndDock.ts`'s own
+     proven OUTBOUND-shipment finder (`Ship To: .../DOCK` instead of `Ship
+     From: .../DOCK`) — a reasonable inference from a proven mechanism,
+     not independently confirmed against a real page. **Deliberately NOT
+     wired into the ESD Finder's batch "Run Updates in MXI" button** —
+     every other writer in this project (ESD field, Notes to Receiver,
+     Invoice Price Writer) needed a real watched smoke test before being
+     trusted, and more than one caught a real corruption/reliability bug
+     that reading the recording alone never would have. `outboundAwb` IS
+     threaded through the full pipeline for display/detection only
+     (`InferenceRecord`, `esd_inferences.outbound_awb` — new column via
+     `ensureColumn`, both `approveAndWrite.ts`'s raw-row mapper and the ESD
+     Finder's own compare result) — the Actionable review table shows an
+     AWB badge per row today; wiring the actual write into the batch flow
+     is the natural next step once `mxi:write-inbound-awb` has been run
+     and watched at least once.
+   - **Manual actionable override** — a row the pipeline classified
+     `skipped_no_commentary` (no usable ESD, no real vendor commentary) can
+     now be promoted by typing an analyst's own ESD (and, optionally, note)
+     for it in the Non-actionable tab. `esdWriteRunner.ts`'s
+     `isManualPromotion` check requires `override.esd` specifically (a note
+     alone doesn't promote a row) and routes the promoted row through the
+     exact same `esd_write` branch/audit path as a naturally actionable
+     row, recorded under its own `mxi_writes.action` value
+     (`approved_manual_override_write`) so it's never indistinguishable
+     from a pipeline-derived write after the fact.
+
+4. **(Folded into #3 above — the manual override IS the "make
+   non-actionable items actionable" feature.)**
+
+5. **Desktop icon guided setup** — `scripts/Create-Desktop-Shortcut.ps1`
+   (creates a real `.lnk` on the Desktop pointing back at
+   `Start-AMC-Repair-Suite.bat` in its real folder — never copies/moves the
+   `.bat` itself, the exact mistake `INVOICE_PRICE_WRITER_HANDOFF.md`'s
+   Part D already documents) plus `docs/DESKTOP_SHORTCUT_SETUP.md`, a
+   start-to-finish guide for a teammate on an independent, non-domain-
+   managed machine (per explicit user direction — no shared IT push today).
+   `Start-AMC-Repair-Suite.bat`'s own error message now points at the
+   script instead of the manual "Send to > Desktop" instruction.
+
+6. **Open Order report parsing generalized** (`api/esdFinder/ingestion.ts`).
+   Sheet-name and column-order independence already existed
+   (`resolveAndValidateSheet` picks a worksheet by content, not name).
+   The actual gap was that ~10 headers per role were ALL hard-required or
+   the whole file was rejected. Now only `Order Number`
+   (`CORE_REQUIRED_HEADER`) is load-bearing — genuinely missing for every
+   candidate sheet is the one case that still throws
+   `MissingHeadersError`. Every other recognized header missing is now a
+   `missingHeaders` warning (threaded through
+   `parseVendorOorFileWithValidation`/`parseCraOorFileWithValidation`/
+   `peekEsdFinderFile`/`ingestEsdFinderFiles`/`EsdCompareResult` to a new
+   `HeaderWarningsBanner` in `EsdFinder.tsx`) — the file still runs, and
+   whichever fields came from a missing column simply come back null per
+   row, which every downstream consumer already handles gracefully
+   (nullable fields throughout `applyInferenceRules.ts`). Sheet
+   disambiguation between Vendor OOR and CRA OOR now uses a best-match
+   score across all recognized headers rather than requiring every one,
+   so a file that's genuinely the wrong role still gets the specific "this
+   looks like the other type" error rather than a flat missing-headers wall.
+
+7. **PowerBI Reports — link-out only, no Azure dependency.** New
+   `/powerbi-reports` page + nav entry under Analytics. Per explicit user
+   choice: true in-app embedding (no separate login, live report rendering)
+   needs either Premium/Fabric capacity or an Azure AD App Registration for
+   "embed for your organization" — neither exists today, and the user
+   opted to skip that dependency for now. `src/lib/powerBiConfig.ts` is a
+   plain, hand-edited config (a workspace URL + an array of `{name, url}`
+   report shortcuts, both opening in a new tab under the analyst's own
+   PowerBI login) — this is the one file to touch to add/change reports,
+   and the one to replace with a real `powerbi-client`+MSAL embed once an
+   App Registration exists.

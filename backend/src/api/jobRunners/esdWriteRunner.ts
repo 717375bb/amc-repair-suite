@@ -150,9 +150,26 @@ async function main(): Promise<void> {
   // compare-time, never trusted from the caller — a row this project's own
   // UI never offered as actionable still can't be forced through by a
   // stray/replayed order number.
-  const writableRows: Array<EsdInferenceRowForWrite & { actionType: 'esd_write' | 'note_only_reissue' }> = [];
+  //
+  // CLAUDE_CODE_PROMPT (manual actionable override, 2026-09-09) — per
+  // explicit user direction: a row the pipeline classified
+  // 'skipped_no_commentary' (no usable ESD, no real vendor commentary) can
+  // still be written if the analyst typed their OWN ESD for it in the
+  // review table. This is the one exception to "never trusted from the
+  // caller" above — it is a deliberate, visible human decision to promote
+  // a specific row, not a bypass: it requires override.esd specifically
+  // (not just any override), the promoted row is still routed through the
+  // exact same esd_write branch/write path/audit trail as a naturally
+  // actionable row, and it's recorded under its OWN mxi_writes `action`
+  // value (approved_manual_override_write) so it's never indistinguishable
+  // from a pipeline-derived write after the fact.
+  const writableRows: Array<EsdInferenceRowForWrite & { actionType: 'esd_write' | 'note_only_reissue'; isManualPromotion: boolean }> = [];
   for (const row of rows) {
-    const actionType = classifyRowAction({ flag: row.flag as EsdFlag, vendorNotes: row.vendor_notes });
+    const naturalActionType = classifyRowAction({ flag: row.flag as EsdFlag, vendorNotes: row.vendor_notes });
+    const override = overrides[row.order_number];
+    const isManualPromotion = naturalActionType === 'skipped_no_commentary' && !!override?.esd;
+    const actionType = isManualPromotion ? 'esd_write' : naturalActionType;
+
     if (actionType === 'skipped_no_commentary') {
       log.info({ orderNumber: row.order_number, flag: row.flag }, 'esd write skipped: no real commentary');
       emit({
@@ -163,7 +180,10 @@ async function main(): Promise<void> {
       });
       continue;
     }
-    writableRows.push({ ...row, actionType });
+    if (isManualPromotion) {
+      log.info({ orderNumber: row.order_number, flag: row.flag }, 'esd write: manually promoted via analyst-typed ESD override');
+    }
+    writableRows.push({ ...row, actionType, isManualPromotion });
   }
 
   if (writableRows.length === 0) {
@@ -223,15 +243,18 @@ async function main(): Promise<void> {
       }
 
       let writeUpdate: { esd?: string; noteText?: string };
-      let mxiWriteAction: 'approved_write' | 'approved_note_only_write';
+      let mxiWriteAction: 'approved_write' | 'approved_note_only_write' | 'approved_manual_override_write';
       if (row.actionType === 'esd_write') {
         if (!effectiveEsd) {
-          // Invariant violated: classifyRowAction() only returns
-          // 'esd_write' for flag === 'ok', and applyInferenceRules.ts
-          // never leaves inferred_esd null while flag stays 'ok'. Fail
-          // loudly rather than silently write a blank/garbage ESD.
+          // Invariant violated for a naturally-classified row:
+          // classifyRowAction() only returns 'esd_write' for flag === 'ok',
+          // and applyInferenceRules.ts never leaves inferred_esd null while
+          // flag stays 'ok'. For a manually-promoted row this can't happen
+          // either — isManualPromotion is only ever set when override.esd
+          // is truthy, which is exactly what effectiveEsd falls back to.
+          // Fail loudly rather than silently write a blank/garbage ESD.
           throw new Error(
-            `Row ${row.order_number} classified as esd_write but has no inferred_esd — this should be impossible.`,
+            `Row ${row.order_number} classified as esd_write but has no usable ESD (inferred or overridden) — this should be impossible.`,
           );
         }
         writeUpdate = {
@@ -247,7 +270,7 @@ async function main(): Promise<void> {
           noteText:
             assembleNoteText(effectiveNotes, override.esd ?? row.extracted_base_date) ?? undefined,
         };
-        mxiWriteAction = 'approved_write';
+        mxiWriteAction = row.isManualPromotion ? 'approved_manual_override_write' : 'approved_write';
       } else {
         writeUpdate = { noteText: assembleNoteText(effectiveNotes, null) ?? undefined };
         mxiWriteAction = 'approved_note_only_write';
@@ -265,7 +288,11 @@ async function main(): Promise<void> {
         orderNumber: row.order_number,
         targetEnv: env,
         action: mxiWriteAction,
-        inferredEsd: row.inferred_esd,
+        // The value actually written — row.inferred_esd is null for a
+        // manually-promoted row (the pipeline never inferred one), so
+        // recording it here instead of effectiveEsd would leave the audit
+        // trail silent about what really landed in MXI.
+        inferredEsd: row.actionType === 'esd_write' ? effectiveEsd : null,
         writeStatus: result.status,
         errorMessage: result.errorMessage,
         approvedBy: 'esd-finder-ui',
