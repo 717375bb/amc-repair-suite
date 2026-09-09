@@ -59,3 +59,60 @@ export function buildDefaultRepairChargeToAccount(currentValue: string): string 
   const prefix = match ? match[1] : DEFAULT_CR_PREFIX;
   return `${prefix}REPAIR`;
 }
+
+/**
+ * CLAUDE_CODE_PROMPT (HMV base account codes, 2026-09-10) — per explicit
+ * user direction: a part coming OUT OF one of these bases bills to an HMV
+ * account rather than the ordinary `<CR-prefix>REPAIR`.
+ *
+ * The value is the segment appended after "HMV". NQA and QRO carry their
+ * own station name (CR7HMVNQA, CR7HMVQRO); CKB and TUS deliberately do
+ * NOT — "CKB doesn't use its name in its account code", and TUS was
+ * confirmed the same way. That asymmetry is real, not an oversight, which
+ * is exactly why it's spelled out per-base here rather than derived by a
+ * rule that would silently invent "CR7HMVCKB".
+ *
+ * These are the same four bases `approvedLocations.ts` calls
+ * CLT_ROUTED_BASES (they're handled out of CLT). Kept as its own table
+ * rather than imported from there because the two facts are independent:
+ * where a base's orders are CREATED is a routing decision, what account
+ * they BILL to is a finance decision, and a future change to one must not
+ * silently move the other.
+ */
+const HMV_ACCOUNT_BASES = new Map<string, string>([
+  ['NQA', 'NQA'],
+  ['QRO', 'QRO'],
+  ['CKB', ''],
+  ['TUS', ''],
+]);
+
+/** True if this base station bills to an HMV account instead of the default REPAIR one. */
+export function isHmvAccountBase(baseStation: string | null | undefined): boolean {
+  if (!baseStation) return false;
+  return HMV_ACCOUNT_BASES.has(baseStation.trim().toUpperCase());
+}
+
+/**
+ * Builds the HMV charge-to-account for a base station in HMV_ACCOUNT_BASES,
+ * preserving whatever CR-prefix MXI autofilled (CR7/CR9/...) exactly as
+ * buildDefaultRepairChargeToAccount does — same lenient extraction, same
+ * CR7 fallback, and the same never-throws-on-an-odd-autofill behavior,
+ * since a real "CR7HMV" has already been seen live in that field.
+ *
+ * Throws only if called with a base that isn't an HMV base at all — that's
+ * a caller bug, not a data condition, and guessing an account code for an
+ * arbitrary station is precisely what must never happen.
+ */
+export function buildHmvChargeToAccount(currentValue: string, baseStation: string): string {
+  const normalized = baseStation.trim().toUpperCase();
+  const baseSuffix = HMV_ACCOUNT_BASES.get(normalized);
+  if (baseSuffix === undefined) {
+    throw new Error(
+      `buildHmvChargeToAccount called with base station "${baseStation}", which is not an HMV-account base ` +
+        `(${[...HMV_ACCOUNT_BASES.keys()].join(', ')}) — refusing to invent an account code.`,
+    );
+  }
+  const match = currentValue.trim().match(CR_PREFIX_PATTERN);
+  const prefix = match ? match[1] : DEFAULT_CR_PREFIX;
+  return `${prefix}HMV${baseSuffix}`;
+}

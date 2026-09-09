@@ -292,7 +292,7 @@ async function main(): Promise<void> {
       let archiveError: string | null = null;
 
       if (result.status === 'success') {
-        const archive = await saveApprovedQuotePdf(row.saved_path, row.order_number!);
+        const archive = await saveApprovedQuotePdf(row.saved_path, row.order_number!, row.vendor_name);
         archivedPdfPath = archive.destPath;
         archiveError = archive.error;
 

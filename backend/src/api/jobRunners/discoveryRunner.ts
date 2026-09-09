@@ -5,6 +5,7 @@ import type { MxiEnv } from '../../mxiWriter/config.js';
 import { discoverEligibleLines } from '../../writeUps/aeroRepair/batchDiscovery.js';
 import { findCandidateLinesForVendorCode } from '../../writeUps/shared/vendorCodeWriteUp.js';
 import { evaluateBaseStation } from '../../writeUps/shared/approvedLocations.js';
+import { extractPartName } from '../../writeUps/shared/partName.js';
 import { getVendorConfig } from '../../writeUps/shared/vendorRegistry.js';
 import { AERO_REPAIR_VENDOR_ID, listVendors } from '../vendors.js';
 import { discoveredLineToLogEvent, type RunLogEvent } from '../runLog.js';
@@ -81,7 +82,16 @@ async function runVendorCodeDiscovery(client: MxiClient, vendorId: string, vendo
       vendorDisplayName,
       partNumber: candidate.partNumber,
       serialNumber: candidate.serialNumber,
-      description: candidate.partNumber,
+      // CLAUDE_CODE_PROMPT (part NAME in write-up lines, 2026-09-10) —
+      // was `candidate.partNumber`, which put the part number in a column
+      // labelled Description right next to the part number itself. The
+      // real name lives in the work-package link text; see partName.ts.
+      // Two fallbacks, in order: a no-work-package candidate has no link
+      // text at all by definition (it carries its own description
+      // instead), and the part number remains the last resort so this
+      // column is never blank.
+      description:
+        extractPartName(candidate.linkText) || candidate.noWorkPackagePartDescription || candidate.partNumber,
     };
 
     // APPROVED-BASE CHECK (2026-08-27, explicit user direction): "if a line

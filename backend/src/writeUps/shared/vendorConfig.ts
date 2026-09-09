@@ -1,5 +1,6 @@
 import { createLogger } from '../../logging/logger.js';
 import { resolvePurchasingContactForVendorCode } from './craAssignments.js';
+import type { ReturnToLocationRotation } from './returnToLocationRotation.js';
 const log = createLogger('writeup');
 
 /**
@@ -133,6 +134,22 @@ export interface VendorConfig {
    * behavior); explicit false = skipped for that vendor.
    */
   checkPreferredVendor?: boolean;
+  /**
+   * CLAUDE_CODE_PROMPT (BAE Systems return-to rotation, 2026-09-10) —
+   * optional. When set, this vendor's Return To Location is NOT derived
+   * from the line's own base station (the normal
+   * transformReturnToLocation rule); it cycles through a fixed list
+   * instead, advancing one step per successfully written line and
+   * persisting across restarts. BAE Systems (63760) only today, per
+   * explicit user direction.
+   *
+   * A structured sub-object rather than a boolean flag, following the
+   * shipsetCase precedent: it carries real data (the ordered docks) plus
+   * an id for the audit trail, and a bare flag would leave the list of
+   * locations stranded somewhere else. See
+   * returnToLocationRotation.ts for how the pointer is derived.
+   */
+  returnToLocationRotation?: ReturnToLocationRotation;
 }
 
 /**
@@ -258,7 +275,7 @@ export function buildWarrantyTerminalStateVendorConfig(
   vendorCode: string,
   displayName: string,
   overrides?: Partial<
-    Pick<VendorConfig, 'form' | 'authFlowPolicy' | 'defaultTerminalState' | 'warrantyEligible' | 'shipsetCase' | 'hasPartDetailsStep' | 'needsRemovalDateInNotes'>
+    Pick<VendorConfig, 'form' | 'authFlowPolicy' | 'defaultTerminalState' | 'warrantyEligible' | 'shipsetCase' | 'hasPartDetailsStep' | 'needsRemovalDateInNotes' | 'returnToLocationRotation'>
   >,
 ): VendorConfig {
   // CLAUDE_CODE_PROMPT (CRA/vendor grouping, 2026-08-19) — every vendor in

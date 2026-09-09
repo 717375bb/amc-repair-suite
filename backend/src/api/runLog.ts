@@ -28,6 +28,14 @@ export interface RunLogEvent {
   summary: string;
   orderNumber?: string;
   routedTo?: string;
+  /**
+   * The Return To Location actually typed into MXI for this line — for
+   * most vendors the line's own base dock, for a rotation vendor (see
+   * VendorConfig.returnToLocationRotation) whichever dock the rotation
+   * landed on. Execute-time only; absent on outcomes that never got as far
+   * as filling the form.
+   */
+  returnedTo?: string;
   /** Machine-readable, for grouping/filtering — never shown as the primary sentence. */
   exceptionType?: string;
   /** Full technical text — collapsed by default behind "Show technical details." */
@@ -269,6 +277,15 @@ export function vendorCodeOutcomeToLogEvent(
   target: { partNumber: string; serialNumber: string },
   outcome: VendorCodeWriteUpOutcome,
 ): RunLogEvent {
+  // CLAUDE_CODE_PROMPT (part NAME in write-up lines, 2026-09-10) — the
+  // execute-side caller's target carries only {vendorId, partNumber,
+  // serialNumber}, so the part's real name has to come off the outcome
+  // itself (see VendorCodeWriteUpFields.partDescription). Outcome variants
+  // that carry no `fields` at all — zero_usage, base_not_approved, error,
+  // and friends — genuinely never reached the point where the work-package
+  // link text was parsed, so they keep the part number as the honest
+  // fallback rather than showing a blank column.
+  const outcomeDescription = 'fields' in outcome ? outcome.fields.partDescription : '';
   const base = {
     seq,
     timestamp: new Date().toISOString(),
@@ -276,7 +293,15 @@ export function vendorCodeOutcomeToLogEvent(
     vendorDisplayName,
     partNumber: target.partNumber,
     serialNumber: target.serialNumber,
-    description: target.partNumber,
+    description: outcomeDescription || target.partNumber,
+    // CLAUDE_CODE_PROMPT (BAE Systems return-to rotation, 2026-09-10) —
+    // the user asked to see which of the four docks a rotated line was
+    // sent back to. Surfaced for EVERY vendor-code line rather than only
+    // the rotating one: it's the value genuinely typed into MXI either
+    // way, the run log is the only place an analyst sees what a line did,
+    // and a field that appears for one vendor and silently vanishes for
+    // the rest is harder to trust than one that's always there.
+    returnedTo: 'fields' in outcome ? outcome.fields.returnToLocation : undefined,
   };
 
   switch (outcome.status) {
@@ -285,7 +310,20 @@ export function vendorCodeOutcomeToLogEvent(
         ...base,
         partNumber: outcome.fields.partNumber,
         status: 'completed',
-        summary: withAssignedTaskPrefix('Warranty authorization submitted — no order issued (handled by warranty dept).', outcome.fields),
+        // CLAUDE_CODE_PROMPT (order number on every created line, 2026-09-10)
+        // — this was the ONE order-bearing outcome whose summary never
+        // named its order number, even though the number was always
+        // present on the event (and in the audit row). Every sibling case
+        // embeds it in the summary, and the summary is the only thing the
+        // run-log row actually renders, so the warranty flow was the only
+        // one where the analyst couldn't see the order that got created.
+        // "created … not issued" is the accurate distinction: Schedule
+        // Work Package really does create the RO; issuing is the separate
+        // step this terminal state deliberately never performs.
+        summary: withAssignedTaskPrefix(
+          `Order ${outcome.fields.generatedOrderNumber} created — warranty authorization submitted, not issued (handled by warranty dept).`,
+          outcome.fields,
+        ),
         orderNumber: outcome.fields.generatedOrderNumber ?? undefined,
       };
     case 'issued_and_docked':

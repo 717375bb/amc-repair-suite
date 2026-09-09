@@ -239,6 +239,21 @@ export function resolvePurchasingContactForVendorCode(vendorCode: string): strin
 }
 
 /**
+ * The CRA a vendor is assigned to, by real MXI vendor code — or null if
+ * the code isn't in the assignment table at all.
+ *
+ * Deliberately separate from resolvePurchasingContactForVendorCode above,
+ * which shares the same lookup but must never return null (it falls back
+ * to the global default contact so an unassigned vendor still gets a
+ * usable form value). A caller asking "whose vendor is this?" needs the
+ * honest answer instead: silently reporting the default CRA would make an
+ * unassigned vendor look like it belongs to whoever owns 717375.
+ */
+export function resolveCraCodeForVendorCode(vendorCode: string): string | null {
+  return ASSIGNMENT_BY_VENDOR_CODE.get(vendorCode.trim().toUpperCase())?.craCode ?? null;
+}
+
+/**
  * Aero Repair is a structurally different module (see
  * writeUps/aeroRepair/vendorConfig.ts) — it searches by a fixed
  * OEM part-number list, not a single real MXI vendor code, so it has no

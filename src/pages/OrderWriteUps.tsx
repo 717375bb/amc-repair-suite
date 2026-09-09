@@ -267,6 +267,9 @@ function LogRow({ event }: { event: RunLogEvent }) {
               {event.vendorId.toUpperCase()} - {event.vendorDisplayName} — {event.description} (PN: {event.partNumber}, SN: {event.serialNumber})
             </p>
             <p className="mt-0.5 text-sm text-muted">{event.summary}</p>
+            {event.returnedTo && (
+              <p className="mt-0.5 text-xs text-muted">Returned to {event.returnedTo}</p>
+            )}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-3">

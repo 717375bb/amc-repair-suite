@@ -201,8 +201,9 @@ export const VENDOR_REGISTRY: Readonly<Record<string, VendorConfig>> = Object.fr
   // for at least this vendor; the other 9 have no per-vendor recording and
   // are added on the same "let live testing confirm" basis the
   // 2026-08-14 batch above used, not a guess unique to this batch. The
-  // 11th assigned vendor, BAE SYSTEMS CONTROLS INC (63760), is explicitly
-  // excluded per user instruction ("skipped for now").
+  // The 11th assigned vendor, BAE SYSTEMS CONTROLS INC (63760), was
+  // excluded in that batch ("skipped for now") and is now included below,
+  // with the return-to rotation that was the reason it was held back.
   //
   // Purchasing Contact resolves automatically via craAssignments.ts for
   // every code below — not restated here.
@@ -223,6 +224,26 @@ export const VENDOR_REGISTRY: Readonly<Record<string, VendorConfig>> = Object.fr
   '76725': buildWarrantyTerminalStateVendorConfig('76725', 'RATIER FIGEAC'),
   VC00529: buildWarrantyTerminalStateVendorConfig('VC00529', 'SUMMIT AEROSPACE INC'),
   VC00809: buildWarrantyTerminalStateVendorConfig('VC00809', 'WORTHINGTON MRO CENTER'),
+
+  // CLAUDE_CODE_PROMPT (BAE Systems, 2026-09-10) — the 11th Monica
+  // Gonzalez vendor, held back from the 2026-09-09 batch precisely because
+  // of the exception below, now added per explicit user direction.
+  //
+  // THE EXCEPTION: its parts go back to exactly one of four docks, on a
+  // fixed rotation in this order, rather than to the dock of whatever base
+  // the part came out of. The rotation advances one step per successfully
+  // written line and survives restarts — see
+  // returnToLocationRotation.ts for where the pointer actually lives and
+  // why it is derived from write-up history rather than a stored counter.
+  //
+  // Everything else about this vendor is the standard family template.
+  // Like the other ten, it has not yet had a first live watched run.
+  '63760': buildWarrantyTerminalStateVendorConfig('63760', 'BAE SYSTEMS CONTROLS INC', {
+    returnToLocationRotation: {
+      id: 'BAE_FOUR_DOCK_ROTATION',
+      locations: ['PHL/DOCK', 'DCA/DOCK', 'CLT/DOCK', 'DAY/DOCK'],
+    },
+  }),
 
 });
 

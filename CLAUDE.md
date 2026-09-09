@@ -1562,3 +1562,105 @@ watched live test before it's trusted for anything beyond the CLI tool.
    PowerBI login) — this is the one file to touch to add/change reports,
    and the one to replace with a real `powerbi-client`+MSAL embed once an
    App Registration exists.
+
+## Session 2026-09-10 — second seven-item work list
+
+`tsc --noEmit`, `npm run build` and `npm test` (240/240, up from 199 — 41
+new tests) all clean. **None of the MXI-facing changes below have been run
+against real MXI**; every one still needs its first watched live run, per
+this project's standing rule.
+
+1. **HMV charge-to-account by base station.** A part coming out of NQA,
+   QRO, CKB or TUS now bills to `CR<7|9>HMV<BASE>` instead of the default
+   `CR<7|9>REPAIR`. NQA/QRO append their station name; **CKB and TUS
+   deliberately do not** (confirmed twice with the user — it is a real
+   asymmetry, which is why `HMV_ACCOUNT_BASES` in
+   `shared/chargeToAccount.ts` spells it out per base rather than deriving
+   it). Slotted INSIDE the existing "this vendor has no account override"
+   arm in `vendorCodeWriteUp.ts`, so the shipset literal, the
+   CREATE_ORDER_ONLY literal, contract codes (FOKKERPBH/PARKERCPH) and a
+   vendor's own suffix (Collins' COLLINSDISPATCH100) all still win — that
+   ordering IS the user's "this does not affect parts that already use
+   account codes different from the default". Uses the line's OWN base,
+   not the base its order is routed to: all four are created out of CLT,
+   and billing them to CLT would defeat the rule. Aero Repair is untouched
+   and cannot be affected — its 12-station routing table contains none of
+   these four bases.
+2. **Write-up lines show the part NAME, not the part number.**
+   `shared/partName.ts` extracts it from the work-package link text
+   ("everything between Repair and PN"). Strips MXI's `(N)` duplicate
+   marker per explicit user choice, and strips a `Scrap ` prefix as well
+   as `Repair ` — REPAIR_LINK_PATTERN stopped requiring the `Repair `
+   prefix on 2026-08-25 specifically so this suite's own scrap-renamed
+   packages are still found, so a `^Repair`-only strip would have left
+   "Scrap " in the name for exactly those lines. Fixed at BOTH ends:
+   discovery (`discoveryRunner.ts`) and execute — the latter needed a new
+   `partDescription` on `VendorCodeWriteUpFields`, because the execute
+   caller's target carries only {vendorId, partNumber, serialNumber}.
+   **Aero Repair's own execute-time log still shows the part number**
+   (`runLog.ts`'s `aeroRepairResultToLogEvent`) — its outcome type has no
+   description either; out of scope here and left flagged rather than
+   half-done.
+3. **FEDEX-LT for oversized parts.** `shared/shipmentMethod.ts`: on Monica
+   Gonzalez's vendors (CRA 232134), a part whose description contains
+   TRANSCOWL / REVERSER GA / INLET COWL ships FEDEX-LT instead of FEDEX-2.
+   Substring rather than whole-word (unlike contractCodes.ts) — "INLET
+   COWLING" is the same oversized structure and must match. New
+   `resolveCraCodeForVendorCode` in `craAssignments.ts` returns null for an
+   unassigned vendor rather than the purchasing-contact fallback, so an
+   unregistered vendor can't be mistaken for one of Monica's.
+   **`effectiveTransportation` is now resolved once** and reused by the
+   dropdown AND all three `VendorCodeWriteUpFields` sites, which each
+   recomputed the same ternary before — an override that changed only the
+   selection would have left the audit trail reporting the vendor default.
+4. **BAE Systems (63760) registered, with a rotating return-to location.**
+   Cycles PHL/DOCK → DCA/DOCK → CLT/DOCK → DAY/DOCK. **The pointer is
+   derived from write-up history, not stored** (`returnToLocationRotation.ts`):
+   the return-to location is persisted in
+   `write_up_actions.filled_fields_json` by exactly the five order-bearing
+   outcomes and nothing else, so a line that failed before its order
+   existed consumes no slot — which is precisely the user's chosen "only
+   advance on success" semantics, for free. It also avoids introducing the
+   first mutable-state table into an audit DB that is append-only by
+   design. Scoped per environment so a stage rehearsal can't move the
+   production rotation. **Known accepted gap**: `authorization_not_confirmed`
+   does create a real order but persists only the serial and auth status,
+   so it doesn't advance the rotation. The approved-base check still runs
+   first and unchanged — where a part may be ordered from is a different
+   question from where it is returned to.
+5. **Order number now shown on the warranty line.** `authorized_only` was
+   the only order-bearing outcome whose summary never named its order
+   number, and the summary is the only thing the run-log row renders — the
+   number was always on the event and in the audit row, just invisible.
+   Fixed by naming it in the summary, matching every sibling case, rather
+   than rendering `orderNumber` separately (which would have duplicated it
+   on the four cases that already embed it).
+6. **Approved-quote PDFs: `<order number>.pdf`, per-vendor folders, never
+   overwritten.** Vendor folders are auto-created per the user's choice,
+   with a normalized-key guard that REUSES an equivalent existing folder —
+   the live DB holds "Measure Tech" / "MeasureTech" / "Measure Tech Inc."
+   for one vendor, so naive auto-create would fragment it three ways.
+   Null vendor name (~19% of real extractions) → `_Unsorted/`. Collisions
+   use `fs.copyFile(..., COPYFILE_EXCL)` in a retry loop rather than an
+   existence check — the same order number legitimately appears on more
+   than one real quote, so this fires in normal operation, and EXCL makes
+   the filesystem arbitrate instead of racing. `vendor_name` is
+   model-extracted free text being turned into a path, so it is sanitized
+   and confined to one segment. **Verified for real against the
+   filesystem**, not just unit tests: dedup produced `(1)`/`(2)`, a
+   spelling variant reused the first folder, a null name went to
+   `_Unsorted`, and `../../escaped` stayed inside `Quotes/` creating
+   nothing outside it. Test artifacts cleaned up afterwards.
+7. **Past-due work package confirmation.** From
+   `discovery-pastdue-recording.ts`: when the work package is past due,
+   MXI raises an extra YES interstitial between the Schedule Work Package
+   OK and the order number appearing. Handled inside
+   `confirmScheduleWorkPackage`, so both engines get it, and
+   presence-checked via `clickActionLinkIfPresent` — never an
+   unconditional wait, which is the exact pattern that made a working ESD
+   edit look like a failure (see this doc's "RESOLVED (2026-08-21)"
+   section). Keyed on the YES link rather than the dialog text because
+   codegen records actions, not page content; safe at this specific point
+   because both normal recordings go straight from that OK to the order
+   number with no YES in between. Returns whether it fired, so a rare
+   self-healing branch stays visible in the log.
