@@ -184,12 +184,32 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
   // process-lifecycle plumbing internal to this one machine (the server
   // only ever binds 127.0.0.1, see security.md §3), not user data.
   let lastHeartbeatAt: number | null = null;
+  // CLAUDE_CODE_PROMPT (real production incident, 2026-09-10, same day) —
+  // REAL BUG FOUND AND FIXED: relying solely on msSinceLastHeartbeat
+  // exceeding a short timeout to infer "the tab closed" is wrong — a
+  // backgrounded (not closed) tab's throttled timer can silently miss that
+  // window on its own, with nothing actually wrong. Confirmed against
+  // real logs: three separate production ESD-write batches were killed
+  // mid-run this way. `explicitlyClosed` is set only by the frontend's own
+  // `pagehide` handler (heartbeat.ts) — a real, browser-guaranteed signal
+  // that the tab is actually gone, not an inferred one — and is what
+  // run-suite-hidden.cjs now treats as the primary shutdown trigger. The
+  // heartbeat timeout itself was widened to a long fallback for the
+  // abnormal case where pagehide never fires (a crash, a forced kill).
+  let explicitlyClosed = false;
   app.post('/api/heartbeat', (_req, res) => {
     lastHeartbeatAt = Date.now();
     res.json({ ok: true });
   });
+  app.post('/api/heartbeat-closed', (_req, res) => {
+    explicitlyClosed = true;
+    res.json({ ok: true });
+  });
   app.get('/api/heartbeat-status', (_req, res) => {
-    res.json({ msSinceLastHeartbeat: lastHeartbeatAt === null ? null : Date.now() - lastHeartbeatAt });
+    res.json({
+      msSinceLastHeartbeat: lastHeartbeatAt === null ? null : Date.now() - lastHeartbeatAt,
+      explicitlyClosed,
+    });
   });
 
   // CLAUDE_CODE_PROMPT (#6, login/account system) — register/login/logout/

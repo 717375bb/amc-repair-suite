@@ -1905,10 +1905,28 @@ pinRouting.ts` holds the live flow:
     is always tomorrow, Reason is always "REPAIR" (selected by label on
     `#idDropdownReason`, the same real `<select>` writeVendorScrap.ts
     already uses by label elsewhere — not the recording's own opaque
-    encoded option value). `runPinWrongBaseShipmentFlow` implements this;
-    its date-picker helper is NOT verified across a month boundary (no
-    recording ever exercised the calendar's own month-navigation), logged
-    clearly so a wrong pick would be visible immediately on a live run.
+    encoded option value). `runPinWrongBaseShipmentFlow` implements this.
+  - **Date fields corrected AGAIN (2026-09-10, later same day)**: the
+    first pass used the recording's own calendar-picker clicks
+    (`idShipByDate_SelectBtn` -> click a day-of-month link), flagged as
+    unverified across a month boundary. The user then pointed out the
+    recording wasn't even theirs and the fields can just be typed
+    directly — no picker needed. Replaced with `fillMxiDateField`,
+    filling `#idShipByDate`/`#idEstArrivalDate` directly in MXI's
+    confirmed real date format (DD-MMM-YYYY, e.g. "10-JUN-2026" — the
+    same format `esdFormatting.ts`'s `toMxiDateFormat` already writes for
+    the Promise By field elsewhere in this project). Deliberately uses
+    `.fill()`, never a click-then-type sequence: `selectors.ts`'s own
+    `updateEsdField` documents a REAL, previously-discovered bug on a
+    DIFFERENT MXI date field where per-keystroke JS validation silently
+    corrupted typed input (typing "09-JUL-2026" over "10-JUL-2026"
+    produced "10-JUL-2020") — `.fill()` sets the value via a direct DOM
+    input/change event, sidestepping that whole class of bug. The two
+    field ids themselves (`idShipByDate`/`idEstArrivalDate`, stripped of
+    the recording's own `_SelectBtn` suffix) are inferred, not confirmed
+    directly — no recording ever exercised typing into them — but a wrong
+    guess here fails loudly (locator not found) rather than silently
+    corrupting a date.
   - The Availability tab is reached via an independent Part-Search
     navigation, not assumed to share page state with the pin's own BN
     line — the CLI explicitly re-opens the BN's repair line
@@ -1921,9 +1939,100 @@ db.ts (TS-level only, free-text column, same pattern as every prior
 outcome addition) — used only for the genuine tied-lowest-total case now
 that the rest of the flow is built.
 
-Tests: 274/274 passing, `tsc --noEmit` clean, `npm run build` clean.
+Tests: 276/276 passing, `tsc --noEmit` clean, `npm run build` clean.
 Nothing in this session has been run against a live/staging MXI page yet
 — the correct-base pin flow, the wrong-base shipment flow, and the
 DISCARD-unassign step all need a real run before they're trusted, per
 this project's standing "verify live" discipline; this session only got
 as far as static type-checking and unit tests.
+
+## Session 2026-09-10 (fourth) — BAE SB note, Rockwell/Ham* repair-flow correction, mid-run shutdown root-caused and fixed
+
+Three small-to-medium follow-ups on the same day's work.
+
+**BAE Systems trailing note.** New `writeUps/shared/vendorTrailingNotes.ts`
+— per explicit user direction, BAE (63760) gets "PLEASE COMPLY WITH SB
+73-0035, SB 73-0036, SB 73-0044, and SB 73-0045." appended as its own
+paragraph AFTER the whole composed Note To Vendor (both the shipset and
+normal/BN branches converge before this runs, in `vendorCodeWriteUp.ts`
+right before `fillNotesToVendor`). Deliberately a separate mechanism from
+`partModificationNotes.ts`'s PN-keyed line, which splices INTO the note
+(before the usage table) rather than appending at the very end — two
+different insertion points for two different kinds of rule.
+
+**Rockwell/Ham* repair-flow correction.** Per explicit user direction:
+"nothing out of Ham Sund, Hamilton Sundstrand, Ham Care, or anything in
+the Rockwell family goes through warranty flow. They just get sent through
+repair flow, and then issued and NOT moved to dock." This turned out to be
+EXACTLY 76863 (Rockwell - Seattle)'s own already-live
+`authFlowPolicy: { default: AUTH_FLOW_REPAIR, overrides: [] }` +
+`defaultTerminalState: 'ISSUE_AND_DOCK'` config, which the earlier
+same-day Andres batch had deliberately NOT copied to the other new vendors
+(confirmed at the time as Rockwell-Seattle-specific, since its
+COLLINSDISPATCH100 charge-to-account clearly wasn't meant to spread) — the
+user is now correcting that the AUTH-FLOW/TERMINAL-STATE half of that
+config, unlike the charge-to-account half, DOES apply family-wide. Applied
+(new shared `REPAIR_FLOW_ISSUED_NOT_DOCKED` constant in
+`vendorRegistry.ts`) to: '75818' HAM SUND - FL, '99167' HAMILTON
+SUNDSTRAND AEROSPACE - IL, '0CAM5' HAM CARE - AZ, '1SMU4'/'6FVE5'/'4X623'
+ROCKWELL COLLINS - ATLANTA/CALEXICO/WICHITA, and — confirmed explicitly
+after asking, since its name alone doesn't say "Rockwell" — '89305'
+COLLINS - VT. 76863 itself needed no change; it was already correct and
+is exactly what this rule was modeled on.
+
+**Mid-run shutdown — root-caused with real log evidence, not guessed.**
+The user reported "the server keeps shutting down mid run." Checked
+`logs/launcher.log` and `logs/backend.log` before touching any code:
+`launcher.log` showed three separate shutdowns, all logged as "no
+heartbeat for 34529ms" / "32678ms" / "34944ms" — each just barely past the
+hidden launcher's old 30-second `HEARTBEAT_TIMEOUT_MS`. `backend.log`
+showed a real ESD-write batch (production MXI orders — P000BD9C,
+P000BDWC, P000BE3C, P000BEGZ, P000BETN, one roughly every 18s) running
+right up to the SAME timestamp as the last of those three shutdowns —
+conclusive proof a real production run was killed mid-flight, not a
+coincidence.
+
+Root cause: the hidden-launcher's shutdown decision was built (same day,
+earlier session) entirely on top of an INFERRED signal — "no heartbeat
+ping received in 30s means the tab closed." That inference is wrong: a
+merely-backgrounded (not closed) browser tab throttles its own
+`setInterval` timers hard enough that a 5-second ping can silently slip
+past 30+ seconds between actual firings, with nothing wrong at all — and
+backgrounding the tab during a long automated run is exactly the normal,
+intended use of this tool, not a misuse of it.
+
+Fixed by replacing the inferred signal with a real one:
+- `src/lib/heartbeat.ts` now also registers a `pagehide` listener (fires
+  reliably on an actual tab close or navigation away; does NOT fire on
+  mere backgrounding/minimizing — the exact distinction that was missing)
+  that calls `navigator.sendBeacon('/api/heartbeat-closed')` —
+  `sendBeacon`, not `fetch`, since a fetch call started during page
+  teardown is not reliably delivered.
+- `backend/src/server.ts` gained `POST /api/heartbeat-closed`, setting a
+  new `explicitlyClosed` flag returned alongside `msSinceLastHeartbeat`
+  from `GET /api/heartbeat-status`.
+- `scripts/run-suite-hidden.cjs`'s shutdown loop now checks THREE signals
+  in order of trust: `explicitlyClosed` (real, acted on immediately —
+  this is the normal path now), the heartbeat timeout (widened from 30s
+  to 20 MINUTES, now purely a safety net for the abnormal case where
+  pagehide never fires at all — a crash, a forced kill), and the
+  heartbeat-status endpoint itself being unreachable (now requires 3
+  consecutive failures, ~15s, rather than one transient blip).
+
+Verified live (not just read through): started the real backend directly,
+confirmed `/api/heartbeat` sets `msSinceLastHeartbeat` and
+`/api/heartbeat-closed` sets `explicitlyClosed: true` exactly as designed,
+then killed the test server (it had genuinely logged into production MXI
+on startup, per its own storage state — confirmed nothing beyond the
+heartbeat endpoints was touched before tearing it down).
+
+Side observation, NOT investigated further (out of scope for what was
+asked): the same `backend.log` excerpt used to root-cause this shows
+"[esd writer] note entry appears more than once in Notes to Receiver —
+check the order by hand" firing on every single order in that batch, not
+occasionally — worth a look if it turns out to be a false-positive in the
+duplicate-note detection itself rather than a genuine, universal duplicate
+condition.
+
+Tests: 283/283 passing, `tsc --noEmit` clean, `npm run build` clean,
+`node --check` clean on the orchestrator script.

@@ -1,8 +1,13 @@
 /**
  * Runs the backend and frontend with NO visible console windows, opens the
  * app in the browser once both are up, and stops both automatically once
- * the browser tab that's pinging /api/heartbeat has been gone for a while
- * (see src/lib/heartbeat.ts and server.ts's own heartbeat endpoints).
+ * the browser tab actually closes (see src/lib/heartbeat.ts's `pagehide`
+ * handler and server.ts's /api/heartbeat-closed) — with a long heartbeat-
+ * timeout fallback for the abnormal case where that signal never arrives
+ * at all. See HEARTBEAT_TIMEOUT_MS's own comment below for why this is no
+ * longer inferred from a short ping timeout alone: real production runs
+ * were killed mid-write when a merely-backgrounded (not closed) tab's
+ * throttled timer missed a 30-second window on its own.
  *
  * WHY THIS EXISTS (2026-09-10, per explicit user direction): the previous
  * launcher (Start-AMC-Repair-Suite.bat alone) opened the backend and
@@ -52,10 +57,27 @@ const APP_URL = 'http://localhost:5173';
 // is even allowed to fire — covers backend/frontend startup time plus the
 // time for the browser to actually load the page and send its first ping.
 const STARTUP_GRACE_MS = 60_000;
-// No heartbeat for this long (after the grace period) means the tab is
-// gone. 5s ping interval (heartbeat.ts) means this tolerates several
-// missed/throttled pings before concluding that for real.
-const HEARTBEAT_TIMEOUT_MS = 30_000;
+// CLAUDE_CODE_PROMPT (real production incident, 2026-09-10, same day) —
+// REAL BUG FOUND AND FIXED: this was 30_000 (30s), on the theory that a
+// backgrounded tab's throttled-but-non-zero timer would still comfortably
+// clear it. Confirmed wrong against real logs from this machine —
+// logs/launcher.log recorded three separate shutdowns at "no heartbeat for
+// 34529ms" / "32678ms" / "34944ms", each just past that threshold, and
+// logs/backend.log shows a real ESD-write batch (production MXI orders)
+// running right up to the same timestamp as the last of those three. The
+// analyst had not closed the tab — it was simply backgrounded during a
+// long run, and browser timer throttling alone was enough to miss a 30s
+// window on a 5s interval.
+//
+// The primary shutdown signal is now `explicitlyClosed` (see
+// heartbeat.ts's `pagehide` handler and server.ts's /api/heartbeat-closed)
+// — a real signal fired only on an actual tab close, not an inferred one.
+// This timeout is now purely a SAFETY NET for the abnormal case where that
+// signal never arrives at all (a crash, a forced kill, the machine losing
+// power) — it no longer needs to be tight, so it's set generously long
+// specifically so ordinary background-tab throttling can never trigger it
+// again while a normal, still-open tab has simply gone quiet for a while.
+const HEARTBEAT_TIMEOUT_MS = 20 * 60_000; // 20 minutes
 const HEARTBEAT_POLL_MS = 5_000;
 const STARTUP_POLL_MS = 500;
 const STARTUP_TIMEOUT_MS = 120_000;
@@ -98,7 +120,7 @@ function waitForUrl(url, label) {
   });
 }
 
-/** { msSinceLastHeartbeat: number|null } from the backend, or null if the backend itself didn't respond (already gone/restarting). */
+/** { msSinceLastHeartbeat: number|null, explicitlyClosed: boolean } from the backend, or null if the backend itself didn't respond (already gone/restarting). */
 function getHeartbeatStatus() {
   return new Promise((resolve) => {
     const req = http.get(HEARTBEAT_STATUS_URL, (res) => {
@@ -233,13 +255,45 @@ async function main() {
   spawn('cmd', ['/c', 'start', '', APP_URL], { windowsHide: true, detached: true }).unref();
   log(`Opened ${APP_URL} in the browser.`);
 
-  // Heartbeat-timeout loop — the sole shutdown authority, see module docstring.
+  // Shutdown-decision loop — the sole shutdown authority, see module
+  // docstring. Three distinct signals, checked in order of how much they
+  // should be trusted:
+  //   1. explicitlyClosed — a real, browser-guaranteed "the tab actually
+  //      closed" signal (heartbeat.ts's pagehide handler). Acted on
+  //      immediately; this is the normal, expected way this fires.
+  //   2. msSinceLastHeartbeat past HEARTBEAT_TIMEOUT_MS — an INFERRED
+  //      signal (no ping received in a while), which real production logs
+  //      proved unreliable at a short timeout (see that constant's own
+  //      comment) — now purely a long safety net for the case where
+  //      pagehide never fires at all (a crash, a forced kill).
+  //   3. The heartbeat-status endpoint itself being unreachable — could be
+  //      a genuinely dead backend, or could be one transient blip (the
+  //      backend momentarily busy). Requires 3 CONSECUTIVE failures
+  //      (~15s at the default poll interval) before acting, rather than
+  //      the previous behavior of treating a single failed check as
+  //      instant proof of anything — same "don't act on an inferred
+  //      signal without persistence" reasoning as point 2.
+  let consecutiveStatusFailures = 0;
   setInterval(async () => {
     if (Date.now() - startedAt < STARTUP_GRACE_MS) return;
     const status = await getHeartbeatStatus();
-    const ms = status ? status.msSinceLastHeartbeat : null;
+
+    if (status === null) {
+      consecutiveStatusFailures += 1;
+      if (consecutiveStatusFailures >= 3) {
+        shutdownOnce(`could not reach heartbeat-status ${consecutiveStatusFailures} times in a row`);
+      }
+      return;
+    }
+    consecutiveStatusFailures = 0;
+
+    if (status.explicitlyClosed === true) {
+      shutdownOnce('frontend tab was closed');
+      return;
+    }
+    const ms = status.msSinceLastHeartbeat;
     if (ms === null || ms > HEARTBEAT_TIMEOUT_MS) {
-      shutdownOnce(ms === null ? 'no heartbeat ever reached the backend' : `no heartbeat for ${ms}ms`);
+      shutdownOnce(ms === null ? 'no heartbeat ever reached the backend' : `no heartbeat for ${ms}ms (fallback safety net)`);
     }
   }, HEARTBEAT_POLL_MS);
 }

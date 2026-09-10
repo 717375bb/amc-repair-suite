@@ -64,6 +64,7 @@ import { extractPartName } from './partName.js';
 import { resolveTransportationOverride } from './shipmentMethod.js';
 import { resolveRotatedReturnToLocation } from './returnToLocationRotation.js';
 import { resolvePartModificationNoteLine } from './partModificationNotes.js';
+import { appendVendorTrailingNote } from './vendorTrailingNotes.js';
 import { readRemovalDate } from './readRemovalDate.js';
 import { composeRemovalDateLine } from './removalDate.js';
 import { captureVendorCodeGridDiagnostics } from './vendorCodeGridDiagnostics.js';
@@ -1573,6 +1574,13 @@ export async function runVendorCodeWriteUp(
     } else {
       await selectTransportation(page, effectiveTransportation!);
     }
+
+    // CLAUDE_CODE_PROMPT (BAE Systems SB compliance note, 2026-09-10) — per
+    // explicit user direction, appended AFTER the whole composed note
+    // (whichever branch built it — shipset's own notesText included), not
+    // spliced into the middle like partModificationNotes.ts's PN-keyed
+    // line. See vendorTrailingNotes.ts.
+    notesText = appendVendorTrailingNote(notesText, vendorCode);
 
     await fillNotesToVendor(page, notesText);
     await confirmScheduleWorkPackage(page);

@@ -20,6 +20,27 @@ import {
  * a third `overrides` argument to buildWarrantyTerminalStateVendorConfig —
  * don't silently assume identical.
  */
+
+/**
+ * CLAUDE_CODE_PROMPT (Rockwell/Collins + Ham* repair-flow correction,
+ * 2026-09-10) — per explicit user direction: "nothing out of Ham Sund,
+ * Hamilton Sundstrand, Ham Care, or anything in the Rockwell family goes
+ * through warranty flow. They just get sent through repair flow, and then
+ * issued and NOT moved to dock." This is the exact authFlowPolicy/
+ * defaultTerminalState shape 76863 (Rockwell - Seattle) already carries —
+ * confirmed via explicit user direction that Collins - VT (89305, no
+ * "Rockwell" in its name) counts as the same lineage too, alongside the
+ * three "ROCKWELL COLLINS -" vendors and the two Ham Sund/Hamilton
+ * Sundstrand/Ham Care entries. Applied ON TOP OF each vendor's own
+ * skipMoveToDock/form overrides below (Object.assign spread order:
+ * per-vendor overrides first, then this, so a future per-vendor deviation
+ * would need to come after this instead — none exists today).
+ */
+const REPAIR_FLOW_ISSUED_NOT_DOCKED: Pick<VendorConfig, 'authFlowPolicy' | 'defaultTerminalState'> = {
+  authFlowPolicy: { default: AUTH_FLOW_REPAIR, overrides: [] },
+  defaultTerminalState: 'ISSUE_AND_DOCK',
+};
+
 export const VENDOR_REGISTRY: Readonly<Record<string, VendorConfig>> = Object.freeze({
   '0T1Y4': buildWarrantyTerminalStateVendorConfig('0T1Y4', 'BARFIELD PRECISION ELECTRONICS LLC'),
   VC01059: buildWarrantyTerminalStateVendorConfig('VC01059', 'ARC - ACTION RESEARCH CORPORATION'),
@@ -298,27 +319,30 @@ export const VENDOR_REGISTRY: Readonly<Record<string, VendorConfig>> = Object.fr
   // standing rule as every other vendor batch here.
   '7WVJ2': buildWarrantyTerminalStateVendorConfig('7WVJ2', 'AERO HYDRAULIC INC', { skipMoveToDock: true }),
   VC00800: buildWarrantyTerminalStateVendorConfig('VC00800', 'AIRBORNE MX & ENG SVC (AMES)', { skipMoveToDock: true }),
-  '89305': buildWarrantyTerminalStateVendorConfig('89305', 'COLLINS - VT', { skipMoveToDock: true }),
+  '89305': buildWarrantyTerminalStateVendorConfig('89305', 'COLLINS - VT', { skipMoveToDock: true, ...REPAIR_FLOW_ISSUED_NOT_DOCKED }),
   '0CAM5': buildWarrantyTerminalStateVendorConfig('0CAM5', 'HAM CARE - AZ', {
     skipMoveToDock: true,
     form: buildVendorFormConfig({ chargeToAccountSuffix: 'FLIGHTSENSE', notesHeader: WARRANTY_TERMINAL_STATE_NOTES_HEADER }),
+    ...REPAIR_FLOW_ISSUED_NOT_DOCKED,
   }),
   '75818': buildWarrantyTerminalStateVendorConfig('75818', 'HAM SUND - FL', {
     skipMoveToDock: true,
     form: buildVendorFormConfig({ chargeToAccountSuffix: 'FLIGHTSENSE', notesHeader: WARRANTY_TERMINAL_STATE_NOTES_HEADER }),
+    ...REPAIR_FLOW_ISSUED_NOT_DOCKED,
   }),
   '99167': buildWarrantyTerminalStateVendorConfig('99167', 'HAMILTON SUNDSTRAND AEROSPACE - IL', {
     skipMoveToDock: true,
     form: buildVendorFormConfig({ chargeToAccountSuffix: 'FLIGHTSENSE', notesHeader: WARRANTY_TERMINAL_STATE_NOTES_HEADER }),
+    ...REPAIR_FLOW_ISSUED_NOT_DOCKED,
   }),
   '83014': buildWarrantyTerminalStateVendorConfig('83014', 'HARTWELL CORPORATION', { skipMoveToDock: true }),
   VC00462: buildWarrantyTerminalStateVendorConfig('VC00462', 'HYDRO-AIRE AEROSPACE CORP', { skipMoveToDock: true }),
   VC00730: buildWarrantyTerminalStateVendorConfig('VC00730', 'NORTHROP GRUMMAN SYSTEMS CORPORATION', { skipMoveToDock: true }),
   VC00679: buildWarrantyTerminalStateVendorConfig('VC00679', 'PERFORM AIR INTERNATIONAL INC', { skipMoveToDock: true }),
   VC00201: buildWarrantyTerminalStateVendorConfig('VC00201', 'REGIONAL AVIONICS REPAIR LLC', { skipMoveToDock: true }),
-  '1SMU4': buildWarrantyTerminalStateVendorConfig('1SMU4', 'ROCKWELL COLLINS - ATLANTA', { skipMoveToDock: true }),
-  '6FVE5': buildWarrantyTerminalStateVendorConfig('6FVE5', 'ROCKWELL COLLINS - CALEXICO', { skipMoveToDock: true }),
-  '4X623': buildWarrantyTerminalStateVendorConfig('4X623', 'ROCKWELL COLLINS - WICHITA', { skipMoveToDock: true }),
+  '1SMU4': buildWarrantyTerminalStateVendorConfig('1SMU4', 'ROCKWELL COLLINS - ATLANTA', { skipMoveToDock: true, ...REPAIR_FLOW_ISSUED_NOT_DOCKED }),
+  '6FVE5': buildWarrantyTerminalStateVendorConfig('6FVE5', 'ROCKWELL COLLINS - CALEXICO', { skipMoveToDock: true, ...REPAIR_FLOW_ISSUED_NOT_DOCKED }),
+  '4X623': buildWarrantyTerminalStateVendorConfig('4X623', 'ROCKWELL COLLINS - WICHITA', { skipMoveToDock: true, ...REPAIR_FLOW_ISSUED_NOT_DOCKED }),
 
 });
 
