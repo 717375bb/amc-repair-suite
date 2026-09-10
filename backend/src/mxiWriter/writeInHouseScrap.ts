@@ -1,6 +1,13 @@
 import type { Page } from 'playwright';
 import type { MxiClient } from './mxiClient.js';
-import { clickIfPresent, enterPasswordIfPrompted, pace, repairLocationCandidates } from './scrapFlowHelpers.js';
+import {
+  clickIfPresent,
+  closePopupQuietly,
+  enterPasswordIfPrompted,
+  pace,
+  pickLocationInPopup,
+  repairLocationCandidates,
+} from './scrapFlowHelpers.js';
 import { openInventoryBySerial } from './openInventoryBySerial.js';
 import { evaluateBaseStation } from '../writeUps/shared/approvedLocations.js';
 import {
@@ -10,33 +17,6 @@ import {
   toScrapWorkPackageName,
 } from './inHouseScrapParsing.js';
 import { createLogger } from '../logging/logger.js';
-
-/**
- * Closes a location-picker popup, best-effort.
- *
- * REAL LEAK FOUND AND FIXED (2026-08-25): neither the schedule popup nor
- * the transfer popup was EVER closed. Both were opened via
- * `page.waitForEvent('popup')`, used, and abandoned — so a multi-serial
- * run accumulated two orphaned MXI pages per part, each one still holding
- * whatever server-side transaction state MXI attaches to a picker.
- *
- * Reported symptom this is part of: running several serials scraps the
- * FIRST successfully and fails every one after it, and the same serial
- * succeeds when it is first in the list. That is state carried between
- * iterations rather than anything wrong with the parts.
- *
- * Never throws — a popup that has already closed itself is the normal
- * case, and a cleanup failure must not fail a scrap that otherwise
- * succeeded.
- */
-async function closePopupQuietly(popup: Page | undefined): Promise<void> {
-  if (!popup || popup.isClosed()) return;
-  try {
-    await popup.close();
-  } catch {
-    /* already gone, or closing raced with navigation — nothing to do */
-  }
-}
 
 const log = createLogger('scrap');
 
@@ -113,83 +93,6 @@ export interface InHouseScrapResult {
   /** Description read off the real work package, used to build the rename. */
   partDescription: string | null;
   errorMessage: string | null;
-}
-
-/**
- * Picks a repair/shop location out of MXI's own location picker popup.
- *
- * Tries the candidates from repairLocationCandidates() in preference order
- * and clicks whichever genuinely exists. Deliberately does NOT fall back to
- * "any location containing REPAIR": transferring a real part to the wrong
- * shop is worse than failing visibly, and the user's rule (BASE/REPAIR1/
- * SHOP1, sometimes BASE/REPAIR, DAY is BASE/REPAIR2/SHOP2) is specific
- * enough that anything outside it deserves a human.
- */
-async function pickLocationInPopup(popup: Page, candidates: string[]): Promise<string | null> {
-  // TWO REAL BUGS FIXED HERE, both found on the first live run (2026-08-23,
-  // serial D5300-120 at PNS):
-  //
-  // 1. MXI's own location casing is INCONSISTENT between sites. The real
-  //    list contains both "DFW/REPAIR1/SHOP1" (what the recording used) and
-  //    "PNS/Repair1/Shop1", "CAK/Repair1/Shop1", "CLT/Repair1/Shop1". An
-  //    exact, case-sensitive match therefore silently failed at every
-  //    mixed-case site. Matching is now case-insensitive, and the cell is
-  //    clicked using the text MXI actually renders.
-  //
-  // 2. The recording types "repair" into the find box first. Doing that
-  //    here filtered the list to ZERO rows — so nothing could ever match.
-  //    The filter is no longer used; the full list is read directly, which
-  //    is also fewer moving parts.
-  const readAvailable = async (): Promise<string[]> => {
-    const cellTexts = await popup.locator('td').allInnerTexts();
-    return [
-      ...new Set(
-        cellTexts.map((t) => t.replace(/\s+/g, ' ').trim()).filter((t) => t.includes('/') && t.length < 60),
-      ),
-    ];
-  };
-
-  const tryMatch = async (available: string[]): Promise<string | null> => {
-    for (const candidate of candidates) {
-      const match = available.find((a) => a.toUpperCase() === candidate.toUpperCase());
-      if (match) {
-        await popup.getByRole('cell', { name: match, exact: true }).first().click();
-        return match;
-      }
-    }
-    return null;
-  };
-
-  // Unfiltered first. The SCHEDULE popup already lists every repair
-  // location, and filtering it returns zero rows.
-  let picked = await tryMatch(await readAvailable());
-  if (picked) return picked;
-
-  // The TRANSFER popup is genuinely different: it opens on local/store
-  // locations ("PNS/STORE/017", ...) and the repair shops only appear once
-  // a search is run — which is exactly why the recording types into the
-  // find box there. Confirmed live on serial D5300-120, where the schedule
-  // popup listed the shops directly but the transfer popup did not.
-  const findBox = popup.locator('#idEditFind');
-  if ((await findBox.count()) === 0) {
-    log.warn({ candidates }, '[in-house scrap] no expected repair location present, and no find box to search with');
-    return null;
-  }
-
-  const base = (candidates[0]?.split('/')[0] ?? '').trim();
-  for (const term of ['repair', base].filter(Boolean)) {
-    await findBox.first().fill(term);
-    await findBox.first().press('Enter');
-    await popup.waitForTimeout(1800);
-    picked = await tryMatch(await readAvailable());
-    if (picked) return picked;
-  }
-
-  log.warn(
-    { candidates, availableAfterSearch: await readAvailable() },
-    '[in-house scrap] no expected repair location present in the picker, even after searching',
-  );
-  return null;
 }
 
 /**

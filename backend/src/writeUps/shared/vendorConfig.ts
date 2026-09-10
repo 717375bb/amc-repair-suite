@@ -150,6 +150,24 @@ export interface VendorConfig {
    * returnToLocationRotation.ts for how the pointer is derived.
    */
   returnToLocationRotation?: ReturnToLocationRotation;
+  /**
+   * GIVEN a vendor whose real-world process is "PSA issues the order, then
+   * the analyst handles getting it to dock themselves"
+   * WHEN this vendor's terminal state is ISSUE_AND_DOCK
+   * THEN Issue Order still runs (and is still verified) exactly as normal,
+   *      but Move to Dock is never attempted — the order is left issued,
+   *      not docked, per explicit user direction (Andres Sabido's full
+   *      vendor batch, 2026-09-10: "he has a special process that he
+   *      wants to do himself").
+   *
+   * Deliberately a plain per-vendor flag, not reuse of the existing
+   * shipset-only `moveToDockOnInitialRun` mechanism — that one is gated on
+   * a matched `shipsetCase` (today, only 7A9Y2) and carries several
+   * unrelated deltas alongside it; this flag applies the one, narrower
+   * behavior to any vendor directly, with no shipset detection required.
+   * Undefined/false = unchanged, normal dock behavior (the default).
+   */
+  skipMoveToDock?: boolean;
 }
 
 /**
@@ -275,7 +293,7 @@ export function buildWarrantyTerminalStateVendorConfig(
   vendorCode: string,
   displayName: string,
   overrides?: Partial<
-    Pick<VendorConfig, 'form' | 'authFlowPolicy' | 'defaultTerminalState' | 'warrantyEligible' | 'shipsetCase' | 'hasPartDetailsStep' | 'needsRemovalDateInNotes' | 'returnToLocationRotation'>
+    Pick<VendorConfig, 'form' | 'authFlowPolicy' | 'defaultTerminalState' | 'warrantyEligible' | 'shipsetCase' | 'hasPartDetailsStep' | 'needsRemovalDateInNotes' | 'returnToLocationRotation' | 'skipMoveToDock'>
   >,
 ): VendorConfig {
   // CLAUDE_CODE_PROMPT (CRA/vendor grouping, 2026-08-19) — every vendor in

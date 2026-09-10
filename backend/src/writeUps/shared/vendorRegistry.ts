@@ -78,6 +78,15 @@ export const VENDOR_REGISTRY: Readonly<Record<string, VendorConfig>> = Object.fr
     defaultTerminalState: 'ISSUE_AND_DOCK',
     warrantyEligible: false,
     hasPartDetailsStep: true,
+    // CLAUDE_CODE_PROMPT (Andres Sabido vendor batch, 2026-09-10) — per
+    // explicit user direction, "don't move to dock" applies to ALL of
+    // Andres's vendors, this already-live one included: "he has a special
+    // process that he wants to do himself." Issue Order still runs and is
+    // still verified; only Move to Dock is skipped. A real, deliberate
+    // change to this vendor's existing production behavior, not an
+    // oversight — confirmed explicitly before changing an already-proven
+    // live flow.
+    skipMoveToDock: true,
   }),
   '7A9Y2': buildWarrantyTerminalStateVendorConfig('7A9Y2', 'SKYPAXXX INTERIOR REPAIRS', {
     shipsetCase: {
@@ -102,8 +111,13 @@ export const VENDOR_REGISTRY: Readonly<Record<string, VendorConfig>> = Object.fr
       terminalState: 'ISSUE_AND_DOCK',
       // Delta 3 — fixed, exact literal. Never composed from usage/part data.
       notesText: 'Inspect and service as required. Provide estimate for approval. Provide new 8130 with times and cycles and SFR. Provide new certificate and test data sheet.',
-      // Delta 5 — temporary safety measure for initial production runs;
-      // flip to true to re-enable Move to Dock, no code change needed.
+      // Delta 5 — originally a temporary safety measure for initial
+      // production runs only. CLAUDE_CODE_PROMPT (Andres Sabido vendor
+      // batch, 2026-09-10): superseded — per explicit user direction,
+      // "don't move to dock" is now a PERMANENT rule for every one of
+      // Andres's vendors, this shipset case included ("he has a special
+      // process that he wants to do himself"). Leave this false; it is no
+      // longer a flag to eventually flip back to true.
       moveToDockOnInitialRun: false,
       // Delta 6 — a missing assigned task is not a blocker for this case.
       allowMissingAssignedTask: true,
@@ -244,6 +258,67 @@ export const VENDOR_REGISTRY: Readonly<Record<string, VendorConfig>> = Object.fr
       locations: ['PHL/DOCK', 'DCA/DOCK', 'CLT/DOCK', 'DAY/DOCK'],
     },
   }),
+
+  // CLAUDE_CODE_PROMPT (Andres Sabido vendor batch, 2026-09-10) — the
+  // remainder of Andres Sabido's vendors (craAssignments.ts, craCode
+  // 232275), per explicit user direction: "follow the same process as
+  // Rockwell - Seattle" — read as the standard family template (what
+  // every other vendor below already uses), NOT a copy of 76863's own
+  // Collins-specific overrides (COLLINSDISPATCH100/REPAIR-default), which
+  // make sense for Rockwell/Collins entities but not for e.g. Northrop
+  // Grumman or Hartwell Corporation — confirmed explicitly rather than
+  // assumed.
+  //
+  // TWO of Andres's 18 assigned vendors are explicitly EXCLUDED (per
+  // instruction: "follow a weird process"):
+  //   - 1NQ67  INTELSAT INFLIGHT LLC
+  //   - 3TAH8  "COLLINS - MONROE, NC" (vendor name literally carries
+  //            surrounding quote characters in craAssignments.ts — not a
+  //            typo introduced here)
+  // 76863 (Rockwell - Seattle) and 7A9Y2 (SKYPAXXX) are already registered
+  // above and are not repeated here.
+  //
+  // "DON'T MOVE TO DOCK", for every vendor in this batch: skipMoveToDock —
+  // see VendorConfig's own docstring. Applies uniformly regardless of a
+  // given vendor's own default terminal state; for the (typical)
+  // AUTHORIZATION_ONLY default this has no effect (that path never
+  // reaches Issue Order or Move to Dock at all), and only actually changes
+  // behavior on the rarer ISSUE_AND_DOCK path (e.g. a BN-prefixed serial).
+  // Harmless to set on every vendor either way, which is simpler and safer
+  // than conditioning it on which terminal state a given vendor happens to
+  // resolve to.
+  //
+  // CR<7|9>FLIGHTSENSE charge-to-account — per explicit user direction,
+  // keyed on VENDOR identity (these three vendor names literally state
+  // "coming out of" them), not a base-station rule like the HMV account
+  // codes (chargeToAccount.ts) — genuinely different shape, so no shared
+  // mechanism, just each vendor's own chargeToAccountSuffix.
+  //
+  // None of these 14 have had a first live watched run yet — same
+  // standing rule as every other vendor batch here.
+  '7WVJ2': buildWarrantyTerminalStateVendorConfig('7WVJ2', 'AERO HYDRAULIC INC', { skipMoveToDock: true }),
+  VC00800: buildWarrantyTerminalStateVendorConfig('VC00800', 'AIRBORNE MX & ENG SVC (AMES)', { skipMoveToDock: true }),
+  '89305': buildWarrantyTerminalStateVendorConfig('89305', 'COLLINS - VT', { skipMoveToDock: true }),
+  '0CAM5': buildWarrantyTerminalStateVendorConfig('0CAM5', 'HAM CARE - AZ', {
+    skipMoveToDock: true,
+    form: buildVendorFormConfig({ chargeToAccountSuffix: 'FLIGHTSENSE', notesHeader: WARRANTY_TERMINAL_STATE_NOTES_HEADER }),
+  }),
+  '75818': buildWarrantyTerminalStateVendorConfig('75818', 'HAM SUND - FL', {
+    skipMoveToDock: true,
+    form: buildVendorFormConfig({ chargeToAccountSuffix: 'FLIGHTSENSE', notesHeader: WARRANTY_TERMINAL_STATE_NOTES_HEADER }),
+  }),
+  '99167': buildWarrantyTerminalStateVendorConfig('99167', 'HAMILTON SUNDSTRAND AEROSPACE - IL', {
+    skipMoveToDock: true,
+    form: buildVendorFormConfig({ chargeToAccountSuffix: 'FLIGHTSENSE', notesHeader: WARRANTY_TERMINAL_STATE_NOTES_HEADER }),
+  }),
+  '83014': buildWarrantyTerminalStateVendorConfig('83014', 'HARTWELL CORPORATION', { skipMoveToDock: true }),
+  VC00462: buildWarrantyTerminalStateVendorConfig('VC00462', 'HYDRO-AIRE AEROSPACE CORP', { skipMoveToDock: true }),
+  VC00730: buildWarrantyTerminalStateVendorConfig('VC00730', 'NORTHROP GRUMMAN SYSTEMS CORPORATION', { skipMoveToDock: true }),
+  VC00679: buildWarrantyTerminalStateVendorConfig('VC00679', 'PERFORM AIR INTERNATIONAL INC', { skipMoveToDock: true }),
+  VC00201: buildWarrantyTerminalStateVendorConfig('VC00201', 'REGIONAL AVIONICS REPAIR LLC', { skipMoveToDock: true }),
+  '1SMU4': buildWarrantyTerminalStateVendorConfig('1SMU4', 'ROCKWELL COLLINS - ATLANTA', { skipMoveToDock: true }),
+  '6FVE5': buildWarrantyTerminalStateVendorConfig('6FVE5', 'ROCKWELL COLLINS - CALEXICO', { skipMoveToDock: true }),
+  '4X623': buildWarrantyTerminalStateVendorConfig('4X623', 'ROCKWELL COLLINS - WICHITA', { skipMoveToDock: true }),
 
 });
 

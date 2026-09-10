@@ -6,6 +6,7 @@ import { discoverEligibleLines } from '../../writeUps/aeroRepair/batchDiscovery.
 import { findCandidateLinesForVendorCode } from '../../writeUps/shared/vendorCodeWriteUp.js';
 import { evaluateBaseStation } from '../../writeUps/shared/approvedLocations.js';
 import { extractPartName } from '../../writeUps/shared/partName.js';
+import { resolveRotatedReturnToLocation } from '../../writeUps/shared/returnToLocationRotation.js';
 import { getVendorConfig } from '../../writeUps/shared/vendorRegistry.js';
 import { AERO_REPAIR_VENDOR_ID, listVendors } from '../vendors.js';
 import { discoveredLineToLogEvent, type RunLogEvent } from '../runLog.js';
@@ -117,13 +118,34 @@ async function runVendorCodeDiscovery(client: MxiClient, vendorId: string, vendo
       continue;
     }
 
+    // CLAUDE_CODE_PROMPT (BAE return-to preview at discovery, 2026-09-10)
+    // — per explicit user direction: the Routing/Location column showed
+    // nothing for a rotation vendor before a run, since the rotation only
+    // ever resolved live inside the actual write. Preview it the same
+    // read-only way the real write does (resolveRotatedReturnToLocation
+    // only reads write-up history, never writes) so the review screen
+    // shows a real, honest answer instead of "—".
+    //
+    // Known, accepted limitation: this is a preview of "if this ONE line
+    // ran right now," not a simulation of the whole batch. Discovering
+    // several rotation-vendor lines in one pass will show the SAME next
+    // slot on all of them, since none has actually been written yet by
+    // the time each is previewed — only a real successful write advances
+    // the rotation. Simulating true batch-order sequencing would mean
+    // duplicating the execute-time write history the rotation is deriving
+    // from, for a display-only field; not worth that complexity today.
+    const routedToDisplay = config.returnToLocationRotation
+      ? resolveRotatedReturnToLocation(config.returnToLocationRotation, config.id, client.config.env)
+      : (approval.routedTo ?? undefined);
+
     emit({
       type: 'line',
       event: {
         ...base,
         status: 'completed', // discovery-time "found, selectable" — this family has no discovery-time exception classification
-        summary:
-          approval.routedTo && approval.routedTo !== approval.baseStation
+        summary: config.returnToLocationRotation
+          ? `Ready to write up — next in rotation: ${routedToDisplay}.`
+          : approval.routedTo && approval.routedTo !== approval.baseStation
             ? `Ready to write up — ${approval.baseStation} routes to ${approval.routedTo}.`
             : 'Ready to write up.',
         // CLAUDE_CODE_PROMPT (surface current location after discovery,
@@ -134,7 +156,7 @@ async function runVendorCodeDiscovery(client: MxiClient, vendorId: string, vendo
         // for Aero Repair via routingLocation) always showed "—" for every
         // vendor-code-family line. No new field needed — this reuses the
         // same column Aero Repair already fills in.
-        routedTo: approval.routedTo ?? undefined,
+        routedTo: routedToDisplay,
       },
     });
   }

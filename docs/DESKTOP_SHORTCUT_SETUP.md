@@ -8,9 +8,16 @@ handed to a teammate directly; no prior context needed.
 
 ## What you end up with
 
-A "Start AMC Repair Suite" icon on your Desktop. Double-clicking it starts
-both servers and opens the app in your browser — the same one-click
-experience already working on the original machine.
+Two icons on your Desktop: "Start AMC Repair Suite" and "Stop AMC Repair
+Suite". Double-clicking Start installs anything missing, starts both
+servers running invisibly in the background (no console windows to leave
+open or accidentally close), and opens the app in your browser.
+
+The suite also stops itself automatically once the browser tab you were
+using it in has been closed for about 30 seconds — closing the tab is
+normally all you need to do. "Stop AMC Repair Suite" is there for when you
+want to stop it explicitly instead (e.g. you're not sure it's still
+running, or you closed the tab by mistake and want to be sure).
 
 ## Prerequisites (one-time, per machine)
 
@@ -45,27 +52,33 @@ experience already working on the original machine.
      the app asks — see `security.md` section 1.1 for why the login *is*
      your MXI identity, not a separate app password.
 
-3. **Create the Desktop shortcut** — from the same folder, in an ordinary
+3. **Create the Desktop shortcuts** — from the same folder, in an ordinary
    PowerShell window (no admin rights needed):
    ```powershell
    powershell -ExecutionPolicy Bypass -File .\scripts\Create-Desktop-Shortcut.ps1
    ```
-   This creates a real Windows shortcut (`.lnk`) on your Desktop that
-   points back at the real `Start-AMC-Repair-Suite.bat` in this folder —
-   it does **not** copy or move the `.bat` file itself. That distinction
-   matters: an earlier session already hit the exact failure mode of
-   moving the `.bat` file straight to the Desktop, which breaks it (see
+   This creates two real Windows shortcuts (`.lnk`) on your Desktop —
+   "Start AMC Repair Suite" (points at the real `Start-AMC-Repair-Suite.bat`
+   in this folder) and "Stop AMC Repair Suite" (points at
+   `scripts\Stop-AMC-Repair-Suite.ps1`) — neither **copies or moves**
+   anything out of this folder. That distinction matters: an earlier
+   session already hit the exact failure mode of moving the `.bat` file
+   straight to the Desktop, which breaks it (see
    `docs/INVOICE_PRICE_WRITER_HANDOFF.md`'s Part D) — the script exists
    specifically so nobody has to repeat that by hand.
 
 4. **From now on**, just double-click "Start AMC Repair Suite" on your
-   Desktop.
+   Desktop. Use "Stop AMC Repair Suite" if you want to stop it explicitly
+   rather than just closing the browser tab.
 
 ## If something goes wrong
 
-- **The shortcut doesn't work after the folder gets moved or renamed.**
+- **The shortcuts don't work after the folder gets moved or renamed.**
   Re-run step 3 from the new location — it always overwrites the old
-  shortcut with a correct one, safe to run as many times as you like.
+  shortcuts with correct ones, safe to run as many times as you like.
+- **Something looks wrong and there's no console window to check.** That's
+  expected now (the servers run hidden) — check `logs\launcher.log`,
+  `logs\backend.log`, and `logs\frontend.log` in the repo folder instead.
 - **`Start-AMC-Repair-Suite.bat` itself prints "This file has been moved or
   copied."** That means someone double-clicked/copied the `.bat` directly
   to the Desktop instead of using the shortcut script. Delete that copy,

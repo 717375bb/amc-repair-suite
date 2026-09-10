@@ -164,8 +164,22 @@ export interface UnassignedTaskRow {
  * Unassigned Tasks check per explicit user direction: both flows must
  * ignore these same task types on this same MXI page and let the write-up
  * continue, not just Aero Repair's own recovery path.
+ *
+ * 'DISCARD - DS/DIS' added 2026-09-10, per explicit user direction — same
+ * treatment as FORECAST/REPL/PC-PC: an UNASSIGNED task of this type is
+ * skipped, not blocking. This is deliberately separate from, and does not
+ * affect, the different rule for an ASSIGNED DISCARD - DS/DIS task (which
+ * can be conditionally unassigned based on Usage Remaining — see the
+ * assigned-task read this project does not yet have; not built as of this
+ * comment).
  */
-export const UNASSIGNED_TASK_IGNORED_TYPES: readonly string[] = Object.freeze(['PC', 'FORECAST', 'REPL', 'PC-PC']);
+export const UNASSIGNED_TASK_IGNORED_TYPES: readonly string[] = Object.freeze([
+  'PC',
+  'FORECAST',
+  'REPL',
+  'PC-PC',
+  'DISCARD - DS/DIS',
+]);
 
 /**
  * Reads every checkbox-selectable row on the Unassigned Tasks sub-tab and

@@ -715,7 +715,14 @@ export interface WriteUpActionInsert {
     // querying both rows together for the same part/serial shows which
     // lines were quarantined, which recovered, and which still needed
     // review after the second attempt.
-    | 'quarantined';
+    | 'quarantined'
+    // Pins back-shop routing tool (2026-09-10) — a wrong-base pin's
+    // transfer destination was computed but not submitted (Create
+    // Shipment's own Ship To field and date pickers aren't yet confirmed
+    // against a live page — see pinsRoutingCli.ts). An analyst completes
+    // the shipment by hand; this row exists so what was computed and
+    // handed off is auditable.
+    | 'pending_manual';
   stationCode: string | null;
   routedLocation: string | null;
   filledFieldsJson: string | null;

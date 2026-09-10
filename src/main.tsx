@@ -6,6 +6,12 @@ import App from './App.tsx'
 import { ThemeProvider } from './lib/theme.tsx'
 import { SidebarProvider } from './lib/sidebar.tsx'
 import { AuthProvider } from './lib/authContext.tsx'
+import { startHeartbeat } from './lib/heartbeat'
+
+// CLAUDE_CODE_PROMPT (hidden launcher, 2026-09-10) — unconditional, before
+// login: see heartbeat.ts's own docstring for why this can't live inside
+// an authenticated route.
+startHeartbeat()
 
 // CLAUDE_CODE_PROMPT (#6, login/account system) — ExecuteRunProvider moved
 // out of here and into App.tsx's authenticated route group. It used to

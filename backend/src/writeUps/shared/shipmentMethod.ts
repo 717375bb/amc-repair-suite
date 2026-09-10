@@ -4,48 +4,88 @@ import { createLogger } from '../../logging/logger.js';
 const log = createLogger('writeup');
 
 /**
- * CLAUDE_CODE_PROMPT (oversized-part shipping method, 2026-09-10) — per
- * explicit user direction: "among Monica Gonzalez's vendors, anything with
- * the keywords TRANSCOWL, REVERSER GA, or INLET COWL in their descriptions
- * needs to be shipped via shipment method FEDEX-LT rather than FEDEX-2."
+ * CLAUDE_CODE_PROMPT (oversized-part shipping method, 2026-09-10; extended
+ * 2026-09-10 for FADEC) — keyword-in-description overrides for Transport
+ * Type, each independently scoped.
  *
- * These are all large nacelle/thrust-reverser structures — they don't move
- * on an ordinary parcel service, which is why the rule keys on the part
- * itself rather than on the vendor alone.
+ * Two rules exist today, with genuinely different scope, which is why each
+ * rule carries its own `craCodesInScope` rather than sharing one global
+ * list:
  *
- * Scoped to one CRA's vendors by explicit instruction, NOT engine-wide.
- * That scoping is real and load-bearing: the same keyword on another CRA's
- * vendor is not covered by this direction, and quietly widening it would
- * change how other people's parts ship. Widening later is a one-line
- * change to CRA_CODES_IN_SCOPE, not a rewrite.
+ * - TRANSCOWL / REVERSER GA / INLET COWL -> FEDEX-LT, scoped to Monica
+ *   Gonzalez's vendors only (explicit user instruction: "among Monica
+ *   Gonzalez's vendors..."). These are large nacelle/thrust-reverser
+ *   structures that don't move on an ordinary parcel service.
+ * - FADEC -> FEDEX-P1, per explicit user direction NOT vendor/CRA-scoped
+ *   ("this is actually broadly applicable to all vendors") — `null` scope
+ *   means every vendor in the shared engine, regardless of CRA.
+ *
+ * Rules are checked in array order and the FIRST match wins — today's two
+ * rules can never both match the same description (no overlapping
+ * keywords), but the ordering is still a deliberate, explicit choice
+ * rather than an accident of iteration, should that change later.
  */
+export interface TransportationOverrideRule {
+  /** Human-readable id for logging/audit. */
+  id: string;
+  /** Substring keywords (case/whitespace-insensitive) — ANY match fires this rule. */
+  keywords: readonly string[];
+  transportation: string;
+  /** CRA codes this rule applies to, or null for every vendor in the shared engine. */
+  craCodesInScope: ReadonlySet<string> | null;
+}
+
 export const LONG_FREIGHT_TRANSPORTATION = 'FEDEX-LT';
+export const FADEC_TRANSPORTATION = 'FEDEX-P1';
 
 /** Monica Gonzalez, per craAssignments.ts's own table. */
-const CRA_CODES_IN_SCOPE = new Set(['232134']);
+const MONICA_GONZALEZ_CRA_CODE = '232134';
 
-/**
- * Matched case-insensitively against the part's description, on
- * whitespace-normalized text so "REVERSER  GA" (a real possibility in
- * hand-maintained MXI descriptions) still matches "REVERSER GA".
- *
- * Substring, not whole-word, deliberately — unlike contractCodes.ts, which
- * is whole-word because an account code appearing inside a longer token
- * would be a false positive. Here the opposite is true: "INLET COWLING"
- * and "TRANSCOWL ASSY" are the same oversized structures the rule is
- * about, and requiring an exact word boundary would miss them.
- */
-const LONG_FREIGHT_KEYWORDS = ['TRANSCOWL', 'REVERSER GA', 'INLET COWL'] as const;
+const TRANSPORTATION_OVERRIDE_RULES: readonly TransportationOverrideRule[] = [
+  {
+    id: 'FADEC',
+    keywords: ['FADEC'],
+    transportation: FADEC_TRANSPORTATION,
+    craCodesInScope: null,
+  },
+  {
+    id: 'OVERSIZED_NACELLE_STRUCTURE',
+    keywords: ['TRANSCOWL', 'REVERSER GA', 'INLET COWL'],
+    transportation: LONG_FREIGHT_TRANSPORTATION,
+    craCodesInScope: new Set([MONICA_GONZALEZ_CRA_CODE]),
+  },
+];
 
 function normalize(text: string): string {
   return text.replace(/\s+/g, ' ').trim().toUpperCase();
 }
 
-/** The keyword that matched, or null. Exported for testing and for logging which one fired. */
-export function matchLongFreightKeyword(partDescription: string | null | undefined): string | null {
+/**
+ * The rule that matches, or null. Exported for testing and so a caller can
+ * log which rule/keyword fired.
+ *
+ * Substring, not whole-word, deliberately — unlike contractCodes.ts, which
+ * is whole-word because an account code appearing inside a longer token
+ * would be a false positive. Here the opposite is true: "INLET COWLING"
+ * and "TRANSCOWL ASSY" are the same oversized structures a rule is about,
+ * and requiring an exact word boundary would miss them.
+ */
+export function matchTransportationOverrideRule(
+  partDescription: string | null | undefined,
+  vendorCode: string,
+): TransportationOverrideRule | null {
   if (!partDescription) return null;
   const haystack = normalize(partDescription);
-  return LONG_FREIGHT_KEYWORDS.find((keyword) => haystack.includes(keyword)) ?? null;
+
+  for (const rule of TRANSPORTATION_OVERRIDE_RULES) {
+    if (!rule.keywords.some((keyword) => haystack.includes(keyword))) continue;
+    if (rule.craCodesInScope) {
+      const craCode = resolveCraCodeForVendorCode(vendorCode);
+      if (!craCode || !rule.craCodesInScope.has(craCode)) continue;
+    }
+    return rule;
+  }
+  return null;
 }
 
 /**
@@ -60,15 +100,12 @@ export function resolveTransportationOverride(
   vendorCode: string,
   partDescription: string | null | undefined,
 ): string | null {
-  const craCode = resolveCraCodeForVendorCode(vendorCode);
-  if (!craCode || !CRA_CODES_IN_SCOPE.has(craCode)) return null;
-
-  const keyword = matchLongFreightKeyword(partDescription);
-  if (!keyword) return null;
+  const rule = matchTransportationOverrideRule(partDescription, vendorCode);
+  if (!rule) return null;
 
   log.info(
-    { vendorCode, craCode, keyword, partDescription, transportation: LONG_FREIGHT_TRANSPORTATION },
-    '[shipment-method] oversized-part keyword matched — overriding Transport Type',
+    { vendorCode, ruleId: rule.id, partDescription, transportation: rule.transportation },
+    '[shipment-method] transportation override rule matched',
   );
-  return LONG_FREIGHT_TRANSPORTATION;
+  return rule.transportation;
 }

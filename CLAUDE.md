@@ -1664,3 +1664,266 @@ this project's standing rule.
    because both normal recordings go straight from that OK to the order
    number with no YES in between. Returns whether it fired, so a rare
    self-healing branch stays visible in the log.
+
+## Session 2026-09-10 (second) — Andres vendors, Monica fixes, hidden launcher
+
+Four-part request (Parts A/B/C/D). `tsc --noEmit`, `npm run build`, and
+`npm test` (268/268) all clean throughout. **Part C was not built at all**
+and **Part B's assigned-task-DISCARD feature was not built** — both
+genuinely blocked on information the given recordings don't contain (see
+below); nothing was guessed to fill the gap.
+
+### Part A — Andres Sabido's vendor batch (done)
+
+14 new vendors registered (`vendorRegistry.ts`) using the **standard**
+family template, not a copy of Rockwell-Seattle's Collins-specific
+overrides (confirmed explicitly — COLLINSDISPATCH100/REPAIR-default make
+sense for Rockwell/Collins entities, not e.g. Northrop Grumman). Intelsat
+(1NQ67) and Collins - Monroe (3TAH8) excluded per instruction.
+
+- **New `VendorConfig.skipMoveToDock` flag** (`vendorConfig.ts`) — Issue
+  Order still runs and is verified; Move to Dock is never attempted.
+  Applied to all 14 new vendors AND to the already-live Rockwell-Seattle
+  (76863) and SKYPAXXX (7A9Y2) shipset case, per explicit confirmation this
+  covers Andres's WHOLE vendor set, not just the new batch. 7A9Y2's
+  existing `moveToDockOnInitialRun: false` already satisfied this — its
+  comment was updated from "temporary safety measure" to "permanent per
+  Andres's process" so a future session doesn't flip it back thinking it's
+  overdue cleanup.
+- **CR<7|9>FLIGHTSENSE** (`chargeToAccountSuffix`) for the three vendors
+  literally named for it: HAM CARE - AZ, HAM SUND - FL, HAMILTON
+  SUNDSTRAND AEROSPACE - IL. Vendor-keyed, not base-station-keyed like the
+  HMV rule from the prior session — genuinely different shape.
+- **PN-keyed note line** (`partModificationNotes.ts`): PN 822-1939-055 or
+  822-1939-005 gets "Please modify part to -55" spliced in before the
+  usage table. Engine-wide per explicit confirmation, not Andres-scoped —
+  and added to `composeNotesForBnLine` too (a new `partNumber` param),
+  which previously had no PN-keyed capability at all.
+
+### Part B — Monica fixes (partially done)
+
+- **FADEC -> FEDEX-P1**, engine-wide (confirmed "broadly applicable to all
+  vendors," unlike the existing Monica-only TRANSCOWL/REVERSER/INLET COWL
+  rule). `shipmentMethod.ts` generalized into an ordered rule list
+  (`TRANSPORTATION_OVERRIDE_RULES`) so each rule carries its own scope
+  instead of one shared CRA check.
+- **BAE routing-location preview** — the gap was specifically the REVIEW
+  screen (before running), not the post-write log. `discoveryRunner.ts` now
+  calls the same read-only `resolveRotatedReturnToLocation` the real write
+  uses, purely to preview the next slot. Known, accepted limitation:
+  discovering several BAE lines in one pass shows the same "next" slot on
+  all of them, since none has actually written yet by the time each is
+  previewed — only a real write advances the rotation.
+- **Re-review after execute** (`orderWriteUpsRun.tsx`, `OrderWriteUps.tsx`):
+  a new "Review all lines again" button on the execute-done screen shows
+  the FULL original discovery list again — deselected lines selectable,
+  already-written lines shown with a badge and a **disabled** checkbox
+  (confirmed explicitly: visibility only, re-running an already-written
+  line would create a real second MXI order, so it's deliberately not
+  offered).
+- **DISCARD - DS/DIS added to `UNASSIGNED_TASK_IGNORED_TYPES`**
+  (`unassignedTasks.ts`) — same skip treatment as FORECAST/REPL/PC-PC.
+
+**NOT built — genuinely blocked, not guessed**: the ASSIGNED-task
+DISCARD-DS/DIS conditional-unassign feature (unassign if Usage Remaining >
+1000 cycles). `discovery-task-unassigning-recording.ts` shows the click
+sequence but Playwright codegen never captures page content — there is no
+confirmation-dialog evidence either way, and no confirmed real column
+header for "Usage Remaining" (only a row's accessible-name text, which is
+inference, not direct evidence). Asked the user for a screenshot; nothing
+written against this until that arrives.
+
+### Part C — Back Shop Pins (not built at all)
+
+Both recordings read in full. `discovery-pins-correct-base-recording.ts`
+is clear enough to build from (schedule + local transfer, structurally
+similar to the existing in-house-scrap flow) but was deliberately held
+back anyway, alongside the blocked half, rather than ship a Pins tool that
+silently doesn't know what to do at half of all real encounters.
+`discovery-pins-wrong-base-recording.ts`'s "part availability table" is
+**not recoverable from the recording at all** — codegen captured six bare
+numbers being clicked (`31, 30, 72, 112, 88, 84`) with zero header text
+anywhere in the file. Pin detection itself is resolved (exact PN
+`4114T06P03`, per explicit user answer) but the transfer-destination logic
+cannot be built without real column data. Asked the user for a screenshot
+or the real numbers/columns; nothing written until that arrives.
+
+### Part D — Hidden launcher (done, and genuinely hardened by real testing)
+
+Per explicit user direction: no visible console windows, and closing the
+browser tab is what stops the servers (with a dedicated Stop shortcut as a
+backup/explicit option).
+
+- **`src/lib/heartbeat.ts`** — pings `POST /api/heartbeat` every 5s from
+  the moment the page loads (before login — otherwise the server could shut
+  itself out from under someone on the login page). `server.ts` gained
+  `POST /api/heartbeat` / `GET /api/heartbeat-status` (unauthenticated,
+  same reasoning as `/health` — this is process-lifecycle plumbing, not
+  user data).
+- **`scripts/run-suite-hidden.cjs`** — a new orchestrator: spawns backend
+  (via `tsx` directly, same pattern `jobManager.ts`'s `spawnRunner`
+  already uses) and frontend (via `vite`'s own bin directly) with no
+  console window, waits for both, opens the browser exactly once, then is
+  the SOLE authority polling heartbeat-status and deciding when to stop
+  everything (avoids two independent shutdown timers racing). Writes
+  `logs/hidden-launcher-state.json` with all three real PIDs.
+- **`scripts/Stop-AMC-Repair-Suite.ps1`** — reads that state file and
+  `taskkill`s all three PIDs **directly**, rather than sending the
+  orchestrator a stop signal and trusting it to clean up after itself.
+- **`Start-AMC-Repair-Suite.bat`** — pre-flight checks (npm install, .env
+  prep) stay visible as before; the actual server startup now hands off to
+  `scripts/Start-Hidden.ps1` (a thin `Start-Process -WindowStyle Hidden`
+  wrapper) instead of two `cmd /k` windows, then the .bat's own window
+  closes itself automatically on success (no more `pause`) — it only stays
+  open now on a real failure, with a pointer to `logs/` instead of "look at
+  the other window."
+- **`scripts/Create-Desktop-Shortcut.ps1`** — now creates both a Start and
+  a Stop shortcut.
+
+**Four real bugs found and fixed, only because this was actually run
+end-to-end repeatedly rather than trusted on read-through — matching this
+project's own standing discipline:**
+
+1. **An em-dash in a `.ps1` comment broke PowerShell 5.1's parser
+   entirely** (`Missing closing '}'`, `Unexpected token ')'` — a comment,
+   of all things, corrupting statement-block parsing). Same root class as
+   the already-documented `Get-Content`/UTF-8-without-BOM issue elsewhere
+   in this project, but this time it was the SCRIPT FILE's own encoding,
+   not a file it reads. Fixed by keeping all `.ps1` files plain ASCII —
+   confirmed this is NOT a concern for `.cjs`/JS files (Node reads UTF-8
+   source correctly regardless), so only the three `.ps1` files needed it.
+2. **`2>&1` on a native `taskkill` call, under `$ErrorActionPreference =
+   'Stop'`, threw a terminating `NativeCommandError` and aborted the rest
+   of the Stop script** — even when taskkill's actual job had succeeded.
+   Confirmed live, twice. Fixed with try/catch around the native call
+   (which does catch it, since it's a real terminating error once raised)
+   plus independent verification via `Get-Process` afterward — never
+   trusting taskkill's own exit code/output at all, one retry before
+   reporting a real failure honestly.
+3. **A crashed child never brought the other one down** — the comment
+   said it should; the code didn't actually call `shutdown()`. Fixed, with
+   a `shuttingDown` guard so a crash-triggered shutdown and a
+   heartbeat-timeout shutdown can't double-fire against each other.
+4. **The real, most important one**: backend and frontend, spawned without
+   `detached: true`, died ~23 seconds after a clean, fully-logged-in,
+   listening startup — with ZERO error logged (the tell that something
+   EXTERNAL killed them, not a real crash). Root cause: without
+   `detached: true`, a Windows child stays in its parent's console process
+   group, so `Start-AMC-Repair-Suite.bat`'s own window closing (its
+   post-success countdown) cascaded a close-event down through
+   `Start-Hidden.ps1` to the orchestrator's children. Fixed with
+   `detached: true` + `.unref()` on both spawns; verified for real with a
+   90-second soak test that watched specifically past both the old 23s
+   crash point and the `.bat` window's own closing — zero crashes, all
+   four processes (orchestrator, backend, frontend, vite's esbuild child)
+   still healthy, heartbeat still flowing.
+
+Full cycle (Start -> both up -> heartbeat flowing -> Stop -> everything
+genuinely gone, independently curl/tasklist-verified, not just trusted from
+script output) run clean end-to-end after all four fixes. Real Desktop
+shortcuts (Start and Stop) created and confirmed present on this machine.
+
+## Session 2026-09-10 (third) — assigned-task DISCARD unassign, pins back-shop routing
+
+Continuation of the same day's second session. That session's own final
+summary claimed the two recordings for this work (discovery-task-
+unassigning-recording.ts, discovery-pins-wrong-base-recording.ts) lacked
+enough information to build Part B's assigned-task DISCARD rule and Part
+C's pins routing. The user directly challenged that, quoting the exact
+lines that were actually there. Re-reading both files confirmed the user
+was right on two concrete points (the cycle count WAS present; a Close
+click IS evidence of a resulting dialog, not "no dialog at all") — this
+session corrects that and builds both features.
+
+**Pins wrong-base destination rule — corrected via direct evidence, not
+inference.** The wrong-base recording's own six numeric-cell clicks (31,
+30, 72, 112, 88, 84) plus two hashed/blank-cell link clicks are the part
+availability table's CAK/DAY/GSP/ORF columns, each base showing a U/S-
+units cell then an In-Repair cell (a blank In-Repair cell renders hashed,
+confirmed by explicit user direction — "the cell becomes hashed if it
+doesn't have a number"). Totals: CAK 31+0=31, DAY 30+0=30, GSP 72+112=184,
+ORF 88+84=172. The recording's own real next step shipped to DAY — the
+LOWEST of the four, not the highest (an initial reading of "highest wins"
+was wrong and the user corrected it). Rule: **transfer to the back shop
+with the lowest U/S + In Repair total**; a genuine tie reports no
+destination rather than guessing (untested against any real tie).
+
+**Part B — assigned-task DISCARD - DS/DIS conditional unassign.** Built
+INSIDE the vendor-code write-up flow (vendorCodeWriteUp.ts), per explicit
+user direction, right after `waitForWorkPackageDetailsResolved` and before
+`readAssignedTasksAreaText` — new module
+`writeUps/shared/assignedTaskDiscardUnassign.ts`. Scans the Assigned Tasks
+area (after Collapse All) for DISCARD - DS/DIS rows via the same
+`td.shortString` convention as the Unassigned Tasks reader; reads each
+row's own Usage Remaining cycles number directly from its rendered text
+(`/(\d+)\s+CYCLES\b/` — confirmed from the SAME recorded row,
+"...LOW 39286 CYCLES N/A N/A", not from opening the recording's own cycles
+dialog, since that dialog's own clicked cell held the identical number).
+Unassigns (checks `aTask`, clicks "Unassign Tasks and Faults", Close) only
+when Usage Remaining exceeds 1000 cycles; a row whose number doesn't parse
+is left assigned rather than guessed at. This is separate from
+UNASSIGNED_TASK_IGNORED_TYPES' own 'DISCARD - DS/DIS' entry (an
+UNASSIGNED task of this type, always skipped, no conditions) — two
+different rules for the same task-type text depending on whether it's
+already assigned.
+
+**Part C — pins (PN 4114T06P03) back-shop routing.** Built as a SEPARATE
+standalone tool (`npm run pins:route -- <BN>`, `cli/pinsRoutingCli.ts`),
+per explicit user direction, not wired into any existing write-up
+pipeline. `backShop/pinAvailability.ts` holds the pure destination-
+selection logic (tested against the recording's real numbers). `backShop/
+pinRouting.ts` holds the live flow:
+- Correct-base flow (pin already at CAK/DAY/GSP/ORF) is fully built and
+  reuses ALREADY-PRODUCTION-PROVEN mechanics: `pickLocationInPopup` and
+  `repairLocationCandidates` were moved from `writeInHouseScrap.ts` into
+  the shared `mxiWriter/scrapFlowHelpers.ts` specifically so pins could
+  reuse the same "Select Repair Location" / "Select Local Location" popup
+  handling (including the DAY -> REPAIR2/SHOP2 exception and MXI's
+  inconsistent location-string casing across sites) rather than
+  re-discovering it. `writeInHouseScrap.ts` itself is unchanged in
+  behavior, just importing instead of defining these two functions.
+- Wrong-base flow is now FULLY BUILT end-to-end, following two corrections
+  the user gave directly after the first pass above (which had stopped
+  short at the decision step, flagging the same two gaps closed below):
+  - **Table selector**: the real Availability tab lives at
+    `#idTabAvailability`, reached via a confirmed working navigation from
+    `discovery-availability-table-recording.ts` (ToDoList -> Menu ->
+    "Unserviceable Staging Clerk" -> "Part Search" -> fill the OEM part
+    number box -> Search -> click the part link -> click the Availability
+    tab). That same file also contains an earlier, different, abandoned
+    attempt (Menu -> "Unserviceable Inventories" -> Options...) that never
+    reaches the tab — not used. `readPinAvailabilityTable` now locates
+    each base's row by its own label cell text ("<CODE> (<City Name>)",
+    e.g. "CAK (AKRON-CANTON REGIONAL)" — confirmed from that recording's
+    own clicked cell) rather than a table id, which sidesteps the
+    duplicate-number ambiguity entirely; `confirmPinAvailabilitySelection`
+    clicks that same row + OK, the recording's own final two steps.
+  - **Create Shipment mechanics**: the user confirmed the business rules
+    directly rather than leaving them inferred from one recording's
+    literal values — Ship From autofills (no action), Ship To is
+    "<destinationBase>/DOCK", Ship By is always today, Estimated Arrival
+    is always tomorrow, Reason is always "REPAIR" (selected by label on
+    `#idDropdownReason`, the same real `<select>` writeVendorScrap.ts
+    already uses by label elsewhere — not the recording's own opaque
+    encoded option value). `runPinWrongBaseShipmentFlow` implements this;
+    its date-picker helper is NOT verified across a month boundary (no
+    recording ever exercised the calendar's own month-navigation), logged
+    clearly so a wrong pick would be visible immediately on a live run.
+  - The Availability tab is reached via an independent Part-Search
+    navigation, not assumed to share page state with the pin's own BN
+    line — the CLI explicitly re-opens the BN's repair line
+    (`openPinLineByBn`) before running the shipment flow, matching this
+    project's established "never assume page state survives a detour"
+    discipline.
+
+New DB outcome value `pending_manual` added to `WriteUpActionInsert` in
+db.ts (TS-level only, free-text column, same pattern as every prior
+outcome addition) — used only for the genuine tied-lowest-total case now
+that the rest of the flow is built.
+
+Tests: 274/274 passing, `tsc --noEmit` clean, `npm run build` clean.
+Nothing in this session has been run against a live/staging MXI page yet
+— the correct-base pin flow, the wrong-base shipment flow, and the
+DISCARD-unassign step all need a real run before they're trusted, per
+this project's standing "verify live" discipline; this session only got
+as far as static type-checking and unit tests.

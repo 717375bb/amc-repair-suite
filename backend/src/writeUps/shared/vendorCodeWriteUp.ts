@@ -63,11 +63,13 @@ import { evaluateBaseStation } from './approvedLocations.js';
 import { extractPartName } from './partName.js';
 import { resolveTransportationOverride } from './shipmentMethod.js';
 import { resolveRotatedReturnToLocation } from './returnToLocationRotation.js';
+import { resolvePartModificationNoteLine } from './partModificationNotes.js';
 import { readRemovalDate } from './readRemovalDate.js';
 import { composeRemovalDateLine } from './removalDate.js';
 import { captureVendorCodeGridDiagnostics } from './vendorCodeGridDiagnostics.js';
 import { createWorkPackageForLine, findNoWorkPackageRowsOnGrid } from './createWorkPackage.js';
 import { extractRemovalTaskInfo, readPreferredVendorIndicator, type PreferredVendorIndicatorState } from './removalTaskInfo.js';
+import { processAssignedDiscardTasks } from './assignedTaskDiscardUnassign.js';
 import { createLogger } from '../../logging/logger.js';
 
 const log = createLogger('writeup');
@@ -641,13 +643,25 @@ export function composeNotesForNormalLine(
   const partLine = `${details.partDescription} (PN: ${details.partNumber}, SN: ${details.serialNumber})`;
   const tableHeader = 'Usage Parm\tTSN\tTSO\tTSI';
   const tableRows = details.usageRows.map((row) => `${row.label}\t${row.tsn}\t${row.tso}\t${row.tsi}`);
-  const middle = removalDateLine ? [partLine, removalDateLine] : [partLine];
+  // CLAUDE_CODE_PROMPT (PN-keyed modification instruction, 2026-09-10) —
+  // see partModificationNotes.ts. Spliced in right before the usage table,
+  // per explicit user direction ("before the times and cycles"); after the
+  // removal-date line when both happen to apply to the same part, since no
+  // vendor needs both today and this is the more natural reading order.
+  const modifyPartLine = resolvePartModificationNoteLine(details.partNumber);
+  const middle = [partLine, removalDateLine, modifyPartLine].filter((line): line is string => !!line);
   return [notesHeader, '', ...middle, tableHeader, ...tableRows].join('\n') + '\n';
 }
 
 /** Confirmed correct as recorded: header-only, no description line even though PN/SN are available. */
-export function composeNotesForBnLine(notesHeader: string): string {
-  return `${notesHeader}\n`;
+export function composeNotesForBnLine(notesHeader: string, partNumber?: string | null): string {
+  // CLAUDE_CODE_PROMPT (PN-keyed modification instruction, 2026-09-10) —
+  // per explicit user direction, this applies to any vendor with no
+  // narrower scope stated, so a -055/-005 part on a BN-prefixed line
+  // still gets the instruction even though this line's note is otherwise
+  // header-only.
+  const modifyPartLine = resolvePartModificationNoteLine(partNumber);
+  return modifyPartLine ? `${notesHeader}\n\n${modifyPartLine}\n` : `${notesHeader}\n`;
 }
 
 // ---- Orchestrator (moved from 0t1y4/writeUp.ts, parameterized by config) ----
@@ -988,6 +1002,22 @@ export async function runVendorCodeWriteUp(
 
     await openVendorCodeCandidate(page, candidate);
     await waitForWorkPackageDetailsResolved(page);
+
+    // CLAUDE_CODE_PROMPT (assigned-task DISCARD - DS/DIS, 2026-09-10) — per
+    // explicit user direction, runs BEFORE readAssignedTasksAreaText below:
+    // an assigned DISCARD - DS/DIS task with Usage Remaining over 1000
+    // cycles is unassigned here, on the same Assigned Tasks area landed on
+    // immediately after opening this line's repair link (see
+    // discovery-task-unassigning-recording.ts). Must happen first because
+    // unassigning changes what that area's own text/no-task-exception
+    // check below would otherwise see.
+    const discardUnassignResult = await processAssignedDiscardTasks(page);
+    if (discardUnassignResult.rowsUnassigned.length > 0) {
+      log.info(
+        { vendorConfigId: config.id, partNumber: candidate.partNumber, serialNumber: candidate.serialNumber, discardUnassignResult },
+        '[assigned-task-discard] unassigned one or more DISCARD - DS/DIS tasks before continuing this line',
+      );
+    }
 
     // REAL BUG FOUND AND FIXED, discovered live via direct DOM inspection,
     // a real user-provided screenshot, and explicit user correction: this
@@ -1367,7 +1397,7 @@ export async function runVendorCodeWriteUp(
       // usage is, definitionally, all zero. Matches the recording exactly
       // (a normal, non-BN line whose Note To Vendor was header-only).
       notesText = doNotShipReason || isBnFlow
-        ? composeNotesForBnLine(config.form.notesHeader)
+        ? composeNotesForBnLine(config.form.notesHeader, candidate.partNumber)
         : composeNotesForNormalLine(partOwnDetails, config.form.notesHeader, removalDateLine);
       await closePartOwnDetails(page);
 
@@ -1747,10 +1777,16 @@ export async function runVendorCodeWriteUp(
         // above) still run as normal. Config-gated (moveToDockOnInitialRun)
         // so the capability stays reachable by flipping the flag later —
         // no code change needed to re-enable.
-        if (shipset && !shipset.moveToDockOnInitialRun) {
+        //
+        // CLAUDE_CODE_PROMPT (Andres Sabido vendor batch, 2026-09-10) —
+        // `config.skipMoveToDock` is the same "issue, don't dock" outcome
+        // for an ordinary (non-shipset) vendor — see its own docstring on
+        // VendorConfig for why this is a separate flag rather than reusing
+        // the shipset-only condition.
+        if ((shipset && !shipset.moveToDockOnInitialRun) || config.skipMoveToDock) {
           log.info(
-            { vendorConfigId: config.id, generatedOrderNumber, shipsetId: shipset.id },
-            '[vendor-config] order issued successfully — Move to Dock intentionally SKIPPED on this run (Delta 5)',
+            { vendorConfigId: config.id, generatedOrderNumber, shipsetId: shipset?.id ?? null, skipMoveToDock: !!config.skipMoveToDock },
+            '[vendor-config] order issued successfully — Move to Dock intentionally SKIPPED',
           );
           return { status: 'issued_not_docked', fields };
         }

@@ -167,6 +167,31 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
     res.json({ status: 'ok' });
   });
 
+  // CLAUDE_CODE_PROMPT (hidden launcher, 2026-09-10) — per explicit user
+  // direction: hide the visible orchestration console windows, and let
+  // closing the frontend browser tab be what actually stops both servers.
+  //
+  // This endpoint is the data half of that: it just records "a browser tab
+  // running this app pinged me at time T" — it makes no decision on its
+  // own. `scripts/run-suite-hidden.cjs` (a SEPARATE process from this
+  // server, since the backend and frontend are two independently-started
+  // processes) polls GET /api/heartbeat-status on an interval and is the
+  // one place that decides "no heartbeat in too long -> stop both
+  // processes" and acts on it — keeping the decision in one place avoids
+  // two independent shutdown timers racing each other.
+  //
+  // Deliberately unauthenticated, same reasoning as /health: this is
+  // process-lifecycle plumbing internal to this one machine (the server
+  // only ever binds 127.0.0.1, see security.md §3), not user data.
+  let lastHeartbeatAt: number | null = null;
+  app.post('/api/heartbeat', (_req, res) => {
+    lastHeartbeatAt = Date.now();
+    res.json({ ok: true });
+  });
+  app.get('/api/heartbeat-status', (_req, res) => {
+    res.json({ msSinceLastHeartbeat: lastHeartbeatAt === null ? null : Date.now() - lastHeartbeatAt });
+  });
+
   // CLAUDE_CODE_PROMPT (#6, login/account system) — register/login/logout/
   // me/change-password. Unauthenticated by design (you can't require a
   // session to obtain one) except change-password, which requireSession
