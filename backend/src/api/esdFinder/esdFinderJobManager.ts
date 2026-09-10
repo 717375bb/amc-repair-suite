@@ -105,12 +105,22 @@ function stageUploadedFiles(runDir: string, files: UploadedFileRef[]): UploadedF
   });
 }
 
-export function startEsdCompareJob(vendorFiles: UploadedFileRef[]): StartEsdJobResult {
+/**
+ * `craFiles` — CLAUDE_CODE_PROMPT (optional CRA OOR re-add, 2026-09-09):
+ * empty by default, matching the vendor-only behavior this tab has run
+ * since 2026-08-26. When given, `esdCompareRunner.ts` joins vendor rows to
+ * them (matchOrders) instead of running vendor-only, which is what
+ * populates `mxiEsdRaw`/`deltaDaysVsMxi`/`orderStatus` on the review table
+ * and enables the Step 0 "Order Status is Received" skip rule
+ * (statusRules.ts) — see ingestion.ts's IngestedEsdFinderInput docstring.
+ */
+export function startEsdCompareJob(vendorFiles: UploadedFileRef[], craFiles: UploadedFileRef[] = []): StartEsdJobResult {
   if (activeRunId) return { ok: false, conflictRunId: activeRunId };
 
   const runId = nextRunId();
   const runDir = path.join('data', 'esd-finder-tmp', runId);
   const stagedVendorFiles = stageUploadedFiles(runDir, vendorFiles);
+  const stagedCraFiles = craFiles.length > 0 ? stageUploadedFiles(path.join(runDir, 'cra'), craFiles) : [];
 
   const job: EsdJob = {
     runId,
@@ -136,7 +146,11 @@ export function startEsdCompareJob(vendorFiles: UploadedFileRef[]): StartEsdJobR
 
   job.process = spawnRunner(
     'src/api/jobRunners/esdCompareRunner.ts',
-    ['--vendor-files', JSON.stringify(stagedVendorFiles)],
+    [
+      '--vendor-files',
+      JSON.stringify(stagedVendorFiles),
+      ...(stagedCraFiles.length > 0 ? ['--cra-files', JSON.stringify(stagedCraFiles)] : []),
+    ],
     (envelope) => {
       const e = envelope as { type: string; phase?: string; message?: string; result?: EsdCompareResult };
       if (e.type === 'phase') {

@@ -17,6 +17,14 @@ data/mxi-production-storage-state.json
 data/quote-attachments/
 *.pdf
 
+# Approved-quote PDF archive (saveApprovedQuotePdf.ts) — real vendor
+# pricing documents copied here on a verified successful MXI write.
+# Already matched by the *.pdf rule above; kept explicit as the same
+# second, independent guard used for data/quote-attachments/ above, for
+# the same reason (verified via `npm run verify-gitignore`, not just a
+# visual read).
+Quotes/
+
 # Real vendor/order spreadsheets dropped directly under backend/ (or its
 # subdirectories, including data/) for manual testing — never real business
 # data in git. Matches at any depth relative to this file, so this covers

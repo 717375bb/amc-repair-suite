@@ -6,7 +6,7 @@ import { timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getActionableEsdInference, getPendingEsdUpdates, getPriorMxiWriteEnvironments, insertMxiWrite, insertQuoteDisposition, openDb } from './db/db.js';
+import { getActionableEsdInference, getPendingEsdUpdates, getPriorMxiWriteEnvironments, insertMxiWrite, insertQuoteDisposition, insertQuoteExchangeDecision, openDb } from './db/db.js';
 import { openAuthDb } from './db/authDb.js';
 import { loadMxiConfig, type MxiEnv } from './mxiWriter/config.js';
 import { assembleNoteText, toMxiDateFormat } from './mxiWriter/esdFormatting.js';
@@ -14,8 +14,11 @@ import { MxiClient } from './mxiWriter/mxiClient.js';
 import { writeEsdAndNotes } from './mxiWriter/writeEsdAndNotes.js';
 import { cancelJob, getActiveJob, getJob, getVendorList, startDiscoveryJob, startExecuteJob } from './api/jobManager.js';
 import { isKnownVendorId, listCraGroupsForKnownVendors } from './api/vendors.js';
-import { applyQuoteDisposition, cancelQuoteJob, getActiveQuoteJob, getQuoteJob, startQuoteIngestJob, startQuoteWriteJob } from './api/quoteWriter/quoteJobManager.js';
+import { applyQuoteDisposition, applyQuoteExchange, cancelQuoteJob, getActiveQuoteJob, getQuoteJob, startQuoteIngestJob, startQuoteWriteJob } from './api/quoteWriter/quoteJobManager.js';
 import { isHumanSettableDisposition } from './quoteWriter/quoteDisposition.js';
+import { forwardToWarrantyDepartment } from './quoteWriter/outlookForward.js';
+import { createOutlookReply } from './quoteWriter/outlookReply.js';
+import { findUnfilledPlaceholders, negotiationBodyToHtml, renderNegotiationSeed } from './quoteWriter/negotiationTemplate.js';
 import { cancelScrapJob, getActiveScrapJob, getScrapJob, parseSerialList, startScrapOutJob } from './api/scrapWriter/scrapJobManager.js';
 import {
   cancelBackShopJob,
@@ -162,6 +165,31 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
 
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok' });
+  });
+
+  // CLAUDE_CODE_PROMPT (hidden launcher, 2026-09-10) — per explicit user
+  // direction: hide the visible orchestration console windows, and let
+  // closing the frontend browser tab be what actually stops both servers.
+  //
+  // This endpoint is the data half of that: it just records "a browser tab
+  // running this app pinged me at time T" — it makes no decision on its
+  // own. `scripts/run-suite-hidden.cjs` (a SEPARATE process from this
+  // server, since the backend and frontend are two independently-started
+  // processes) polls GET /api/heartbeat-status on an interval and is the
+  // one place that decides "no heartbeat in too long -> stop both
+  // processes" and acts on it — keeping the decision in one place avoids
+  // two independent shutdown timers racing each other.
+  //
+  // Deliberately unauthenticated, same reasoning as /health: this is
+  // process-lifecycle plumbing internal to this one machine (the server
+  // only ever binds 127.0.0.1, see security.md §3), not user data.
+  let lastHeartbeatAt: number | null = null;
+  app.post('/api/heartbeat', (_req, res) => {
+    lastHeartbeatAt = Date.now();
+    res.json({ ok: true });
+  });
+  app.get('/api/heartbeat-status', (_req, res) => {
+    res.json({ msSinceLastHeartbeat: lastHeartbeatAt === null ? null : Date.now() - lastHeartbeatAt });
   });
 
   // CLAUDE_CODE_PROMPT (#6, login/account system) — register/login/logout/
@@ -402,10 +430,10 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
   app.post(
     '/api/esd/compare',
     requireSession,
-    // craFile removed 2026-08-26 — the ESD Finder runs from the Vendor OOR
-    // file alone. Still declared so an older client posting one gets a
-    // clear 400 below rather than multer rejecting the whole request with
-    // an opaque "Unexpected field".
+    // craFile — CLAUDE_CODE_PROMPT (optional CRA OOR re-add, 2026-09-09):
+    // was rejected outright between 2026-08-26 and today; now optional
+    // again. Absent entirely still runs the exact vendor-only path this
+    // tab has used since 2026-08-26 — nothing about that path changes.
     esdUpload.fields([
       { name: 'vendorFiles', maxCount: 20 },
       { name: 'craFile', maxCount: 1 },
@@ -428,17 +456,9 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
         res.status(400).json({ error: 'At least one Vendor OOR file is required.' });
         return;
       }
-      if (craFiles.length > 0) {
-        cleanupUploads();
-        res.status(400).json({
-          error:
-            'A CRA OOR file is no longer used — the ESD Finder now runs from the Vendor OOR file alone. ' +
-            'Re-load the page if this came from an older tab.',
-        });
-        return;
-      }
 
       const vendorFileRefs = vendorFiles.map((f) => ({ filePath: f.path, fileName: f.originalname }));
+      const craFileRefs = craFiles.map((f) => ({ filePath: f.path, fileName: f.originalname }));
 
       // Fast rejection before a background job is even started — see
       // validateHeadersOnly's docstring for why this is a convenience, not
@@ -447,6 +467,9 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
       try {
         for (const f of vendorFileRefs) {
           await validateHeadersOnly(f.filePath, f.fileName, 'vendor');
+        }
+        for (const f of craFileRefs) {
+          await validateHeadersOnly(f.filePath, f.fileName, 'cra');
         }
       } catch (err) {
         cleanupUploads();
@@ -458,7 +481,7 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
         return;
       }
 
-      const result = startEsdCompareJob(vendorFileRefs);
+      const result = startEsdCompareJob(vendorFileRefs, craFileRefs);
       cleanupUploads(); // already copied into the job's own staging dir by now
       if (!result.ok) {
         res.status(409).json({ error: 'An ESD Finder job is already running.', activeRunId: result.conflictRunId });
@@ -884,9 +907,13 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
     const disposition: unknown = req.body?.disposition;
     if (typeof disposition !== 'string' || !isHumanSettableDisposition(disposition)) {
       res.status(400).json({
+        // 'excluded_nrep' became settable by hand on 2026-09-04, at the
+        // analyst's request — the AI still makes the initial call, but a
+        // human must be able to mark NREP themselves. `decided_by` on the
+        // inserted row keeps a human decision distinguishable from a
+        // vendor-derived one.
         error:
-          "disposition must be one of 'pending', 'excluded_ber', or 'excluded_other'. " +
-          "'excluded_nrep' is vendor-derived and cannot be set by hand — set 'pending' to override it.",
+          "disposition must be one of 'pending', 'negotiating', 'excluded_nrep', 'excluded_ber', or 'excluded_other'.",
       });
       return;
     }
@@ -907,6 +934,178 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
     if (typeof runId === 'string') applyQuoteDisposition(runId, extractionId, disposition);
 
     res.json({ ok: true, extractionId, disposition });
+  });
+
+  /** One quote extraction, or null. Shared by the three actions below. */
+  const loadExtraction = (extractionId: number) =>
+    db
+      .prepare(
+        'SELECT id, source_entry_id, order_number, sender_first_name, unit_price, currency FROM quote_extractions WHERE id = ?',
+      )
+      .get(extractionId) as
+      | {
+          id: number;
+          source_entry_id: string;
+          order_number: string | null;
+          sender_first_name: string | null;
+          unit_price: number | null;
+          currency: string | null;
+        }
+      | undefined;
+
+  /**
+   * The analyst's own exchange call, overriding what the model read.
+   *
+   * Works in both directions — setting one the AI missed, and clearing one
+   * it wrongly found — because a one-way override leaves a wrong positive
+   * with no remedy. See quoteWriter/exchangeDecision.ts.
+   */
+  app.post('/api/quotes/extractions/:extractionId/exchange', requireSession, (req, res) => {
+    const extractionId = Number(req.params.extractionId);
+    if (!Number.isInteger(extractionId) || extractionId <= 0) {
+      res.status(400).json({ error: 'extractionId must be a positive integer.' });
+      return;
+    }
+    const isExchange: unknown = req.body?.isExchange;
+    if (typeof isExchange !== 'boolean') {
+      res.status(400).json({ error: 'isExchange must be true or false.' });
+      return;
+    }
+    if (!loadExtraction(extractionId)) {
+      res.status(404).json({ error: `No quote extraction found with id ${extractionId}.` });
+      return;
+    }
+
+    const session = (req as AuthedRequest).session!;
+    insertQuoteExchangeDecision(db, { quoteExtractionId: extractionId, isExchange, decidedBy: session.username });
+    // Best-effort in-memory sync, same as dispositions — the DB row above is
+    // the real record.
+    const runId: unknown = req.body?.runId;
+    if (typeof runId === 'string') applyQuoteExchange(runId, extractionId, isExchange);
+    res.json({ ok: true, extractionId, isExchange });
+  });
+
+  /**
+   * The pre-filled negotiation text for one quote. A pure read — nothing is
+   * sent, and nothing is recorded.
+   */
+  app.get('/api/quotes/extractions/:extractionId/negotiation-seed', requireSession, (req, res) => {
+    const extractionId = Number(req.params.extractionId);
+    const row = Number.isInteger(extractionId) ? loadExtraction(extractionId) : undefined;
+    if (!row) {
+      res.status(404).json({ error: `No quote extraction found with id ${extractionId}.` });
+      return;
+    }
+    try {
+      res.json({ body: renderNegotiationSeed(row.sender_first_name) });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  /**
+   * Sends a price negotiation to the vendor, and holds the row.
+   *
+   * THIS SENDS REAL MAIL IMMEDIATELY — the one place in this project that
+   * does so by default rather than drafting. That is the analyst's explicit
+   * choice (2026-09-04), guarded by a confirmation dialog in the UI showing
+   * the final text and recipients before this is ever called.
+   *
+   * Two server-side guards that do not depend on the UI behaving:
+   *   - the message must not still contain the template's own <reason> /
+   *     <new price> prompts;
+   *   - the body must be non-trivial.
+   *
+   * On success the row moves to `negotiating`, which is not writable — the
+   * quoted price is one PSA has just asked the vendor to change, so it must
+   * not be written to MXI while that conversation is open.
+   */
+  app.post('/api/quotes/extractions/:extractionId/negotiate', requireSession, async (req, res) => {
+    const extractionId = Number(req.params.extractionId);
+    const row = Number.isInteger(extractionId) ? loadExtraction(extractionId) : undefined;
+    if (!row) {
+      res.status(404).json({ error: `No quote extraction found with id ${extractionId}.` });
+      return;
+    }
+
+    const body: unknown = req.body?.body;
+    if (typeof body !== 'string' || body.trim().length < 20) {
+      res.status(400).json({ error: 'body is required and must be a real message.' });
+      return;
+    }
+    const unfilled = findUnfilledPlaceholders(body);
+    if (unfilled.length > 0) {
+      res.status(400).json({
+        error:
+          `The message still contains ${unfilled.join(' and ')} — replace those before sending. ` +
+          `Nothing was sent.`,
+      });
+      return;
+    }
+
+    const result = await createOutlookReply(row.source_entry_id, negotiationBodyToHtml(body), 'send');
+    if (!result.ok) {
+      res.status(502).json({ error: result.error ?? 'Could not send the negotiation email.' });
+      return;
+    }
+
+    // Only after the mail actually went. A failed send must not leave the
+    // row held back as though a negotiation were in flight.
+    const session = (req as AuthedRequest).session!;
+    insertQuoteDisposition(db, {
+      quoteExtractionId: extractionId,
+      disposition: 'negotiating',
+      decidedBy: session.username,
+    });
+    const runId: unknown = req.body?.runId;
+    if (typeof runId === 'string') applyQuoteDisposition(runId, extractionId, 'negotiating');
+
+    log.info(
+      { extractionId, orderNumber: row.order_number, recipients: result.recipients },
+      '[quote] price negotiation sent',
+    );
+    res.json({ ok: true, extractionId, recipients: result.recipients, subject: result.subject });
+  });
+
+  /**
+   * Forwards the original vendor email — attachments and all — to PSA's
+   * warranty department. Offered on every row, per the analyst.
+   *
+   * The recipient is fixed server-side (outlookForward.ts) and is never
+   * taken from the request: a client-chosen recipient would turn this into
+   * an arbitrary mail-sending endpoint.
+   */
+  app.post('/api/quotes/extractions/:extractionId/forward-warranty', requireSession, async (req, res) => {
+    const extractionId = Number(req.params.extractionId);
+    const row = Number.isInteger(extractionId) ? loadExtraction(extractionId) : undefined;
+    if (!row) {
+      res.status(404).json({ error: `No quote extraction found with id ${extractionId}.` });
+      return;
+    }
+
+    const note: unknown = req.body?.note;
+    const noteHtml =
+      typeof note === 'string' && note.trim() ? negotiationBodyToHtml(note) : null;
+
+    const result = await forwardToWarrantyDepartment(row.source_entry_id, noteHtml, 'send');
+    if (!result.ok) {
+      res.status(502).json({ error: result.error ?? 'Could not forward to the warranty department.' });
+      return;
+    }
+
+    log.info(
+      { extractionId, orderNumber: row.order_number, attachmentCount: result.attachmentCount },
+      '[quote] forwarded to the warranty department',
+    );
+    res.json({
+      ok: true,
+      extractionId,
+      recipients: result.recipients,
+      attachmentCount: result.attachmentCount,
+      // Surfaced rather than swallowed: Outlook accepts a send to an
+      // unresolved address and the mail simply never arrives.
+      resolved: result.resolved,
+    });
   });
 
   app.post('/api/quotes/runs/:runId/cancel', requireSession, (req, res) => {

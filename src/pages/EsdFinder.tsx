@@ -14,6 +14,7 @@ import {
   type EsdRunStatusResponse,
   type EsdWriteOrderResult,
   type EsdWriteOverride,
+  type FileHeaderWarning,
   type MxiEnv,
 } from '../lib/esdFinderApi'
 import { useEsdFinderRun } from '../lib/esdFinderRun'
@@ -32,14 +33,14 @@ interface StagedFile {
 }
 
 // ---------------------------------------------------------------------------
-// The Vendor OOR drop zone. Peeks each dropped/selected file immediately
-// (real row count or a real rejection message), per the spec's State A
-// requirement — never silently stages a file that later turns out to be
-// unparseable.
+// Vendor OOR and (optional) CRA OOR drop zones. Peeks each dropped/selected
+// file immediately (real row count or a real rejection message), per the
+// spec's State A requirement — never silently stages a file that later
+// turns out to be unparseable.
 //
-// The CRA OOR zone was removed 2026-08-26: the tab now runs from the vendor
-// file alone.  is kept because peekFile still takes it, and the CRA
-// parser/validator remain in use by the original two-file CLI pipeline.
+// The CRA OOR zone was removed 2026-08-26 (vendor-only run), then re-added
+// 2026-09-09 as a genuinely optional second upload — see startCompare's
+// docstring in lib/esdFinderApi.ts for what supplying one now enables.
 // ---------------------------------------------------------------------------
 function DropZone({
   label,
@@ -174,6 +175,33 @@ function DuplicateBanner({ duplicates }: { duplicates: DuplicateOrderNumber[] })
           </div>
         ))}
       </div>
+    </Card>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Header-warnings banner — task #6 (generalized report parsing): an
+// uploaded file was accepted even though it's missing some recognized
+// columns, so those fields will come back blank for its rows. Informational
+// only, never a reason to stop — the run already succeeded by the time this
+// renders.
+// ---------------------------------------------------------------------------
+function HeaderWarningsBanner({ headerWarnings }: { headerWarnings: FileHeaderWarning[] }) {
+  if (headerWarnings.length === 0) return null
+  return (
+    <Card className="border-warning">
+      <CardHeader
+        title="Some uploaded files are missing optional columns"
+        description="Rows from these files still ran — the fields below just came back blank for them, rather than the file being rejected."
+      />
+      <ul className="divide-y divide-border">
+        {headerWarnings.map((w) => (
+          <li key={w.fileName} className="px-5 py-3 text-sm text-text">
+            <span className="font-medium">{w.fileName}</span>
+            <span className="text-muted"> — missing: {w.missingHeaders.join(', ')}</span>
+          </li>
+        ))}
+      </ul>
     </Card>
   )
 }
@@ -356,6 +384,7 @@ function WriteStatusCell({ result, jobDone }: { result: EsdWriteOrderResult | un
 // ---------------------------------------------------------------------------
 export default function EsdFinder() {
   const [vendorStaged, setVendorStaged] = useState<StagedFile[]>([])
+  const [craStaged, setCraStaged] = useState<StagedFile[]>([])
   const [loadError, setLoadError] = useState<string | null>(null)
   const [activeJobRunId, setActiveJobRunId] = useState<string | null>(null)
 
@@ -418,14 +447,16 @@ export default function EsdFinder() {
   }
 
   const removeVendorFile = (file: File) => setVendorStaged((prev) => prev.filter((s) => s.file !== file))
+  const removeCraFile = (file: File) => setCraStaged((prev) => prev.filter((s) => s.file !== file))
 
   const validVendorFiles = vendorStaged.filter((s) => !s.error && s.rowCount !== null)
+  const validCraFiles = craStaged.filter((s) => !s.error && s.rowCount !== null)
   const jobIsActive = effectivePhase === 'comparing' || isWriting || !!activeJobRunId
 
   const handleRun = async () => {
     setLoadError(null)
     try {
-      const { runId: newRunId } = await startCompare(validVendorFiles.map((s) => s.file))
+      const { runId: newRunId } = await startCompare(validVendorFiles.map((s) => s.file), validCraFiles[0]?.file)
       setRemovedOrderNumbers(new Set())
       startCompareTracking(newRunId)
     } catch (err) {
@@ -462,6 +493,7 @@ export default function EsdFinder() {
   const resetToStart = () => {
     clearAll()
     setVendorStaged([])
+    setCraStaged([])
     setRemovedOrderNumbers(new Set())
     getActiveEsdJob()
       .then((r) => setActiveJobRunId(r.activeRunId))
@@ -512,6 +544,16 @@ export default function EsdFinder() {
               staged={vendorStaged}
               onAdd={(files) => addFiles(files, 'vendor', setVendorStaged)}
               onRemove={removeVendorFile}
+              disabled={jobIsActive}
+            />
+            <DropZone
+              label="CRA OOR (optional)"
+              description="Drop PSA's own open-order report to see the real current MXI ESD next to the inferred one, and to skip orders whose Order Status already says Received. Leave empty to run vendor-only, exactly as before."
+              multiple={false}
+              role="cra"
+              staged={craStaged}
+              onAdd={(files) => addFiles(files, 'cra', setCraStaged)}
+              onRemove={removeCraFile}
               disabled={jobIsActive}
             />
           </div>
@@ -664,13 +706,26 @@ function ReviewState({
     )
   }
 
-  const { records, duplicates, outputFilePath, summary } = runStatus.result
+  const { records, duplicates, outputFilePath, summary, headerWarnings } = runStatus.result
   const duplicateOrderNumbers = new Set(duplicates.map((d) => d.orderNumber.trim().toUpperCase()))
   const actionable = records.filter((r) => r.actionable)
   const nonActionable = records.filter((r) => !r.actionable)
   const writeableRows = actionable.filter(
     (r) => !removedOrderNumbers.has(r.orderNumber) && !duplicateOrderNumbers.has(r.orderNumber.trim().toUpperCase()),
   )
+
+  // CLAUDE_CODE_PROMPT (manual actionable override, 2026-09-09) — a
+  // non-actionable row the analyst typed their OWN ESD for (in the
+  // Non-actionable tab below) is promoted into the same write set as a
+  // naturally actionable row. Requires a real typed ESD specifically — a
+  // note alone doesn't promote a row, mirroring esdWriteRunner.ts's own
+  // isManualPromotion condition exactly, so what this button offers to
+  // write and what the server will actually accept can never disagree.
+  // Duplicates are excluded here too, same as the naturally actionable set.
+  const promotedNonActionable = nonActionable.filter(
+    (r) => !!overrides[r.orderNumber]?.esd && !duplicateOrderNumbers.has(r.orderNumber.trim().toUpperCase()),
+  )
+  const allWriteableRows = [...writeableRows, ...promotedNonActionable]
 
   // Bulk select/deselect, split by actionType — duplicates are excluded from
   // both groups since they have no remove/restore control at all (always
@@ -689,7 +744,7 @@ function ReviewState({
   // into one list rather than only ever offering genuine failures.
   const writeWasCancelled = writeStatus?.status === 'cancelled'
   const notAttemptedOrderNumbers = writeWasCancelled
-    ? writeableRows.map((r) => r.orderNumber).filter((o) => !writeResultByOrder.has(o))
+    ? allWriteableRows.map((r) => r.orderNumber).filter((o) => !writeResultByOrder.has(o))
     : []
   const retryableOrderNumbers = [...failedOrderNumbers, ...notAttemptedOrderNumbers]
 
@@ -709,6 +764,7 @@ function ReviewState({
         </a>
       </Card>
 
+      <HeaderWarningsBanner headerWarnings={headerWarnings} />
       <DuplicateBanner duplicates={duplicates} />
 
       <EnvironmentBar env={env} onChange={onEnvChange} disabled={isWriting} />
@@ -752,11 +808,14 @@ function ReviewState({
                 ? writeWasCancelled
                   ? `Write cancelled against ${writeStatus?.writeEnv ?? env}: ${writeStatus?.writeResults.filter((r) => r.status === 'success').length ?? 0} written before stopping, ${notAttemptedOrderNumbers.length} never attempted.`
                   : `Write run against ${writeStatus?.writeEnv ?? env}: ${writeStatus?.writeResults.filter((r) => r.status === 'success').length ?? 0} written, ${failedOrderNumbers.length} failed.`
-                : `${writeableRows.length} of ${actionable.length} row(s) will be written to MXI.`
+                : `${writeableRows.length} of ${actionable.length} row(s) will be written to MXI` +
+                  (promotedNonActionable.length > 0
+                    ? `, plus ${promotedNonActionable.length} promoted from Non-actionable via your own typed ESD.`
+                    : '.')
             }
             action={
               !hasWriteRun ? (
-                <PrimaryButton onClick={() => onRunUpdates(writeableRows.map((r) => r.orderNumber))} disabled={isWriting || writeableRows.length === 0}>
+                <PrimaryButton onClick={() => onRunUpdates(allWriteableRows.map((r) => r.orderNumber))} disabled={isWriting || allWriteableRows.length === 0}>
                   {isWriting ? <Loader2 size={16} className="animate-spin" /> : <PlayCircle size={16} />}
                   Run Updates in MXI
                 </PrimaryButton>
@@ -808,6 +867,9 @@ function ReviewState({
                   <th className="px-5 py-3 font-medium">Inferred ESD</th>
                   <th className="px-5 py-3 font-medium">Confidence</th>
                   <th className="px-5 py-3 font-medium">Notes to Receiver</th>
+                  <th className="px-5 py-3 font-medium" title="Vendor row's Outbound AWB, if any. Detected here for now — writing it into MXI's Inbound shipment is not yet wired into this batch run.">
+                    AWB
+                  </th>
                   {hasWriteRun && <th className="px-5 py-3 font-medium">Write status</th>}
                 </tr>
               </thead>
@@ -863,6 +925,9 @@ function ReviewState({
                           onCommit={(next) => onSetOverride(row.orderNumber, 'note', next)}
                         />
                       </td>
+                      <td className="px-5 py-3">
+                        {row.outboundAwb ? <Badge tone="neutral">{row.outboundAwb}</Badge> : <span className="text-muted">—</span>}
+                      </td>
                       {hasWriteRun && (
                         <td className="px-5 py-3">
                           {excluded ? (
@@ -877,7 +942,7 @@ function ReviewState({
                 })}
                 {actionable.length === 0 && (
                   <tr>
-                    <td colSpan={hasWriteRun ? 12 : 11} className="px-5 py-6 text-center text-muted">
+                    <td colSpan={hasWriteRun ? 13 : 12} className="px-5 py-6 text-center text-muted">
                       No actionable rows found.
                     </td>
                   </tr>
@@ -888,7 +953,10 @@ function ReviewState({
         </Card>
       ) : (
         <Card>
-          <CardHeader title="Non-actionable rows" description="Informational only — these are never written to MXI." />
+          <CardHeader
+            title="Non-actionable rows"
+            description="Never written to MXI on their own — but typing your own ESD below promotes a row into the write set on the Actionable tab, same as any other row."
+          />
           <div className="overflow-x-auto">
             <table className="w-full text-left text-sm">
               <thead>
@@ -898,23 +966,58 @@ function ReviewState({
                   <th className="px-5 py-3 font-medium">Flag</th>
                   <th className="px-5 py-3 font-medium">Classification</th>
                   <th className="px-5 py-3 font-medium">Reasoning</th>
+                  <th className="px-5 py-3 font-medium">Your ESD</th>
+                  <th className="px-5 py-3 font-medium">Your Notes</th>
+                  <th className="px-5 py-3 font-medium">Status</th>
                 </tr>
               </thead>
               <tbody>
-                {nonActionable.map((row) => (
-                  <tr key={row.orderNumber} className="border-b border-border last:border-0 hover:bg-bg">
-                    <td className="px-5 py-3 font-medium text-text">{row.orderNumber}</td>
-                    <td className="px-5 py-3 text-muted">{row.vendorName ?? '—'}</td>
-                    <td className="px-5 py-3">
-                      <Badge tone={flagBadgeTone(row.flag)}>{row.flag.replace(/_/g, ' ')}</Badge>
-                    </td>
-                    <td className="px-5 py-3 text-muted">{row.classification ?? '—'}</td>
-                    <td className="px-5 py-3 text-muted">{row.reasoningNote ?? '—'}</td>
-                  </tr>
-                ))}
+                {nonActionable.map((row) => {
+                  const isDuplicate = duplicateOrderNumbers.has(row.orderNumber.trim().toUpperCase())
+                  const isPromoted = !isDuplicate && !!overrides[row.orderNumber]?.esd
+                  const writeResult = writeResultByOrder.get(row.orderNumber)
+                  return (
+                    <tr key={row.orderNumber} className="border-b border-border last:border-0 hover:bg-bg">
+                      <td className="px-5 py-3 font-medium text-text">{row.orderNumber}</td>
+                      <td className="px-5 py-3 text-muted">{row.vendorName ?? '—'}</td>
+                      <td className="px-5 py-3">
+                        <Badge tone={flagBadgeTone(row.flag)}>{row.flag.replace(/_/g, ' ')}</Badge>
+                      </td>
+                      <td className="px-5 py-3 text-muted">{row.classification ?? '—'}</td>
+                      <td className="px-5 py-3 text-muted">{row.reasoningNote ?? '—'}</td>
+                      <td className="px-5 py-3 text-text">
+                        <EditableCell
+                          value={null}
+                          override={overrides[row.orderNumber]?.esd}
+                          placeholder={isDuplicate ? 'duplicate — cannot write' : 'type an ESD to promote'}
+                          disabled={isDuplicate || hasWriteRun}
+                          onCommit={(next) => onSetOverride(row.orderNumber, 'esd', next)}
+                        />
+                      </td>
+                      <td className="px-5 py-3 text-muted">
+                        <EditableCell
+                          value={null}
+                          override={overrides[row.orderNumber]?.note}
+                          placeholder="type a note (optional)"
+                          disabled={isDuplicate || hasWriteRun}
+                          onCommit={(next) => onSetOverride(row.orderNumber, 'note', next)}
+                        />
+                      </td>
+                      <td className="px-5 py-3">
+                        {hasWriteRun ? (
+                          isPromoted ? <WriteStatusCell result={writeResult} jobDone={writeDone} /> : <span className="text-xs text-muted">Not submitted</span>
+                        ) : isPromoted ? (
+                          <Badge tone="accent">Will be written</Badge>
+                        ) : (
+                          <span className="text-xs text-muted">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  )
+                })}
                 {nonActionable.length === 0 && (
                   <tr>
-                    <td colSpan={5} className="px-5 py-6 text-center text-muted">
+                    <td colSpan={8} className="px-5 py-6 text-center text-muted">
                       No non-actionable rows.
                     </td>
                   </tr>

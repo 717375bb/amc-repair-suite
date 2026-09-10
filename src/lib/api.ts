@@ -61,6 +61,8 @@ export interface RunLogEvent {
   summary: string
   orderNumber?: string
   routedTo?: string
+  /** Return To Location actually written into MXI for this line — see the backend's RunLogEvent. */
+  returnedTo?: string
   exceptionType?: string
   detail?: string
   /** Set whenever the Maintenance Records draft can be offered — see the backend's RunLogEvent. */

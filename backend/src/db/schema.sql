@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS esd_inferences (
   inferred_esd TEXT,
   flag TEXT,                 -- ok | no_esd_found | orphaned_vendor_row | orphaned_cra_row
   delta_days_vs_mxi INTEGER,
+  outbound_awb TEXT,         -- vendor row's Outbound AWB, if any (display/detection only — see mxiWriter/awbInboundSelectors.ts)
   created_at TEXT NOT NULL
 );
 

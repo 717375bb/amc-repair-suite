@@ -1,17 +1,11 @@
 import {
-  ClipboardList,
   Mail,
-  Table2,
-  FileWarning,
   Wrench,
   PackageX,
-  FileText,
-  ShieldCheck,
-  Gauge,
-  LineChart,
   PlayCircle,
   Search,
   DollarSign,
+  LayoutGrid,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -34,20 +28,6 @@ export const navGroups: NavGroup[] = [
   {
     label: 'Orders & Repairs',
     items: [
-      {
-        key: 'repair-orders',
-        path: '/repair-orders',
-        label: 'Repair Orders',
-        description: 'Create and manage outgoing repair orders',
-        icon: ClipboardList,
-      },
-      {
-        key: 'open-orders',
-        path: '/open-orders',
-        label: 'Open Order Tracking',
-        description: 'Track in-progress repair orders',
-        icon: Table2,
-      },
       {
         key: 'backshop-repairs',
         path: '/backshop-repairs',
@@ -87,7 +67,7 @@ export const navGroups: NavGroup[] = [
     ],
   },
   {
-    label: 'Quotes & Discrepancies',
+    label: 'Quotes',
     items: [
       {
         key: 'email-quotes',
@@ -96,54 +76,17 @@ export const navGroups: NavGroup[] = [
         description: 'Read vendor quote PDFs from your Outlook Quotes folder',
         icon: Mail,
       },
-      {
-        key: 'quotes-reports',
-        path: '/quotes-reports',
-        label: 'Quotes & Reports',
-        description: 'Quote displays and other reporting',
-        icon: FileText,
-        status: 'soon',
-      },
-      {
-        key: 'discrepancies',
-        path: '/discrepancies',
-        label: 'Discrepancies & Paperwork',
-        description: 'Resolve receiving discrepancies and paperwork',
-        icon: FileWarning,
-      },
-    ],
-  },
-  {
-    label: 'Approvals',
-    items: [
-      {
-        key: 'warranty-assessment',
-        path: '/warranty-assessment',
-        label: 'Warranty Assessment',
-        description: 'Assess and approve order warranty eligibility',
-        icon: ShieldCheck,
-        status: 'soon',
-      },
     ],
   },
   {
     label: 'Analytics',
     items: [
       {
-        key: 'vendor-kpi',
-        path: '/vendor-kpi',
-        label: 'Vendor KPI Reports',
-        description: 'One-click KPI reporting by vendor',
-        icon: Gauge,
-        status: 'soon',
-      },
-      {
-        key: 'statistical-models',
-        path: '/statistical-models',
-        label: 'Statistical Models',
-        description: 'Analytical and statistical models',
-        icon: LineChart,
-        status: 'soon',
+        key: 'powerbi-reports',
+        path: '/powerbi-reports',
+        label: 'PowerBI Reports',
+        description: 'Open your PowerBI workspace and individual reports',
+        icon: LayoutGrid,
       },
     ],
   },

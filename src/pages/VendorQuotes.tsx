@@ -6,10 +6,15 @@ import { ApiError } from '../lib/api'
 import { EnvironmentBar } from '../components/EnvironmentBar'
 import { QuoteRun } from '../lib/tabRuns'
 import {
+  forwardQuoteToWarranty,
   getActiveQuoteJob,
+  getNegotiationSeed,
+  sendQuoteNegotiation,
   setQuoteDisposition,
+  setQuoteExchange,
   startQuoteIngest,
   startQuoteWrite,
+  warrantyStatusLabel,
   type HumanSettableDisposition,
   type MxiEnv,
   type QuoteDisposition,
@@ -271,6 +276,92 @@ export default function VendorQuotes() {
       await setQuoteDisposition(row.extractionId, disposition, runId)
     } catch (err) {
       setPendingDisposition((prev) => ({ ...prev, [row.extractionId]: previous }))
+      reportError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  // --- Exchange override -------------------------------------------------
+  // Held locally so the row reflects the click immediately; the server row
+  // is the real record and the next poll reconciles it.
+  const [pendingExchange, setPendingExchange] = useState<Record<number, boolean>>({})
+  const effectiveExchange = (r: QuoteExtractionRow): boolean =>
+    pendingExchange[r.extractionId] ?? r.exchangeOverride ?? r.suggestsExchange
+
+  const handleExchange = async (row: QuoteExtractionRow, isExchange: boolean) => {
+    if (!runId) return
+    const previous = effectiveExchange(row)
+    setPendingExchange((prev) => ({ ...prev, [row.extractionId]: isExchange }))
+    try {
+      await setQuoteExchange(row.extractionId, isExchange, runId)
+    } catch (err) {
+      setPendingExchange((prev) => ({ ...prev, [row.extractionId]: previous }))
+      reportError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  // --- Forward to the warranty department --------------------------------
+  // Offered on every row regardless of disposition, per the analyst. Sends
+  // a real forward with the quote PDF attached.
+  const [forwarding, setForwarding] = useState<number | null>(null)
+  const [forwarded, setForwarded] = useState<Record<number, string>>({})
+
+  const handleForwardWarranty = async (row: QuoteExtractionRow) => {
+    setForwarding(row.extractionId)
+    try {
+      const result = await forwardQuoteToWarranty(row.extractionId)
+      setForwarded((prev) => ({
+        ...prev,
+        [row.extractionId]: result.resolved
+          ? `Forwarded to warranty (${result.attachmentCount ?? 0} attachment(s))`
+          : 'Forwarded, but Outlook could not resolve the address — check it was delivered',
+      }))
+    } catch (err) {
+      reportError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setForwarding(null)
+    }
+  }
+
+  // --- Price negotiation -------------------------------------------------
+  // Two deliberate steps: an editor, then a confirmation showing the final
+  // text. This is the one path in this app that sends vendor-facing mail on
+  // click rather than drafting it, so the review is the safeguard.
+  const [negotiating, setNegotiating] = useState<QuoteExtractionRow | null>(null)
+  const [negotiationBody, setNegotiationBody] = useState('')
+  const [negotiationLoading, setNegotiationLoading] = useState(false)
+  const [confirmNegotiation, setConfirmNegotiation] = useState(false)
+  const [negotiated, setNegotiated] = useState<Record<number, string>>({})
+
+  const openNegotiation = async (row: QuoteExtractionRow) => {
+    setNegotiating(row)
+    setNegotiationBody('')
+    setNegotiationLoading(true)
+    try {
+      const { body } = await getNegotiationSeed(row.extractionId)
+      setNegotiationBody(body)
+    } catch (err) {
+      reportError(err instanceof Error ? err.message : String(err))
+      setNegotiating(null)
+    } finally {
+      setNegotiationLoading(false)
+    }
+  }
+
+  const handleSendNegotiation = async () => {
+    if (!negotiating || !runId) return
+    const row = negotiating
+    setConfirmNegotiation(false)
+    try {
+      const result = await sendQuoteNegotiation(row.extractionId, negotiationBody, runId)
+      setNegotiated((prev) => ({
+        ...prev,
+        [row.extractionId]: `Sent to ${result.recipients.join(', ')}`,
+      }))
+      // The server moved the row to 'negotiating'; mirror it locally so the
+      // write set updates without waiting for the next poll.
+      setPendingDisposition((prev) => ({ ...prev, [row.extractionId]: 'negotiating' }))
+      setNegotiating(null)
+    } catch (err) {
       reportError(err instanceof Error ? err.message : String(err))
     }
   }
@@ -704,6 +795,37 @@ export default function VendorQuotes() {
                             “{r.nonRepairableEvidence}”
                           </p>
                         )}
+                        {/* Warranty, quoted in the vendor's own words — this is
+                            what gets forwarded to the warranty department, so
+                            their wording matters more than our summary of it. */}
+                        {r.warrantyStatus !== 'not_mentioned' && (
+                          <p
+                            className={`mt-1 text-xs font-medium ${
+                              r.warrantyStatus === 'denied' ? 'text-danger' : 'text-accent'
+                            }`}
+                            title={r.warrantyEvidence ?? undefined}
+                          >
+                            {warrantyStatusLabel(r.warrantyStatus)}
+                            {r.warrantyEvidence && (
+                              <span className="block max-w-[16rem] font-normal italic text-muted">
+                                “{r.warrantyEvidence}”
+                              </span>
+                            )}
+                          </p>
+                        )}
+                        {effectiveExchange(r) && (
+                          <p className="mt-1 text-xs font-medium text-accent">
+                            {r.exchangeOverride === true || pendingExchange[r.extractionId] === true
+                              ? 'Exchange — set by analyst'
+                              : 'Exchange — vendor offered a replacement'}
+                          </p>
+                        )}
+                        {forwarded[r.extractionId] && (
+                          <p className="mt-1 text-xs text-success">{forwarded[r.extractionId]}</p>
+                        )}
+                        {negotiated[r.extractionId] && (
+                          <p className="mt-1 text-xs text-success">Negotiation sent — {negotiated[r.extractionId]}</p>
+                        )}
                       </td>
                       {hasWriteRun && (
                         <td className="px-5 py-3">
@@ -715,11 +837,55 @@ export default function VendorQuotes() {
                         </td>
                       )}
                       <td className="px-5 py-3">
-                        <div className="flex items-center justify-end gap-1.5">
+                        <div className="flex flex-wrap items-center justify-end gap-1.5">
+                          {/* Available on EVERY row, whatever its disposition or
+                              write state — per the analyst, any quote may need
+                              the warranty team's eyes. */}
+                          <button
+                            type="button"
+                            onClick={() => void handleForwardWarranty(r)}
+                            disabled={forwarding === r.extractionId}
+                            title="Forward this email and its PDF to psa-warranty@oliverwyman.com"
+                            className="rounded border border-border px-2 py-1 text-xs font-medium text-text hover:border-accent hover:text-accent disabled:opacity-50"
+                          >
+                            {forwarding === r.extractionId ? '…' : 'Warranty'}
+                          </button>
                           {hasWriteRun ? (
                             <span className="text-xs text-muted">—</span>
                           ) : disp === 'pending' ? (
                             <>
+                              <button
+                                type="button"
+                                onClick={() => void openNegotiation(r)}
+                                title="Ask the vendor to lower this price — opens an editable email that sends on confirmation"
+                                className="rounded border border-border px-2 py-1 text-xs font-medium text-text hover:border-accent hover:text-accent"
+                              >
+                                Negotiate
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleExchange(r, !effectiveExchange(r))}
+                                title={
+                                  effectiveExchange(r)
+                                    ? 'Stop treating this as an exchange — it will be priced as an ordinary repair'
+                                    : 'Treat this as an exchange — converts the order rather than pricing it'
+                                }
+                                className={`rounded border px-2 py-1 text-xs font-medium ${
+                                  effectiveExchange(r)
+                                    ? 'border-accent text-accent'
+                                    : 'border-border text-text hover:border-accent hover:text-accent'
+                                }`}
+                              >
+                                Exchange
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDisposition(r, 'excluded_nrep')}
+                                title="Mark non-repairable — excludes it from pricing and routes it to scrap"
+                                className="rounded border border-border px-2 py-1 text-xs font-medium text-text hover:border-danger hover:text-danger"
+                              >
+                                NREP
+                              </button>
                               <button
                                 type="button"
                                 onClick={() => handleDisposition(r, 'excluded_ber')}
@@ -743,9 +909,11 @@ export default function VendorQuotes() {
                               type="button"
                               onClick={() => handleDisposition(r, 'pending')}
                               title={
-                                disp === 'excluded_nrep'
-                                  ? 'Vendor called this non-repairable. Put it back in the write set if you disagree.'
-                                  : 'Put this back in the write set'
+                                disp === 'negotiating'
+                                  ? 'A price negotiation was sent. Put it back in the write set once the vendor has replied.'
+                                  : disp === 'excluded_nrep'
+                                    ? 'Marked non-repairable. Put it back in the write set if you disagree.'
+                                    : 'Put this back in the write set'
                               }
                               className="flex items-center gap-1 rounded border border-border px-2 py-1 text-xs font-medium text-accent hover:bg-accent-soft"
                             >
@@ -840,6 +1008,68 @@ export default function VendorQuotes() {
           cancelLabel="Never mind"
           onConfirm={handleCancelConfirmed}
           onCancel={() => setShowCancelConfirm(false)}
+        />
+      )}
+
+      {/* ---- Price negotiation editor ----
+          Opens pre-filled with the vendor's own first name. The analyst
+          replaces <reason> and <new price> and sends. The server refuses a
+          body that still contains those prompts, so a hurried send cannot
+          reach a vendor with placeholders in it. */}
+      {negotiating && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-2xl rounded-lg border border-border bg-surface shadow-lg">
+            <div className="border-b border-border px-5 py-4">
+              <h3 className="text-sm font-semibold text-text">
+                Negotiate price — {negotiating.orderNumber ?? negotiating.fileName}
+              </h3>
+              <p className="mt-0.5 text-xs text-muted">
+                Replies to the vendor's own email thread. Quoted at{' '}
+                {money(negotiating.unitPrice, negotiating.currency)}.
+              </p>
+            </div>
+            <div className="px-5 py-4">
+              {negotiationLoading ? (
+                <p className="flex items-center gap-2 text-sm text-muted">
+                  <Loader2 size={16} className="animate-spin" /> Preparing the message…
+                </p>
+              ) : (
+                <textarea
+                  value={negotiationBody}
+                  onChange={(e) => setNegotiationBody(e.target.value)}
+                  rows={10}
+                  spellCheck
+                  className="w-full rounded border border-border bg-bg px-3 py-2 font-mono text-sm text-text outline-none focus:border-accent"
+                />
+              )}
+              <p className="mt-2 text-xs text-muted">
+                This sends immediately once you confirm — it is not saved as a draft.
+              </p>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-border px-5 py-3">
+              <SecondaryButton onClick={() => setNegotiating(null)}>Cancel</SecondaryButton>
+              <PrimaryButton
+                onClick={() => setConfirmNegotiation(true)}
+                disabled={negotiationLoading || negotiationBody.trim().length < 20}
+              >
+                <Mail size={16} /> Send…
+              </PrimaryButton>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirmNegotiation && negotiating && (
+        <ConfirmDialog
+          title="Send this to the vendor?"
+          message={
+            `This goes out immediately as a reply on the vendor's thread — it is not a draft and cannot be ` +
+            `unsent. The row will be held out of the write set until you release it.\n\n${negotiationBody}`
+          }
+          confirmLabel="Send it"
+          cancelLabel="Back to editing"
+          onConfirm={() => void handleSendNegotiation()}
+          onCancel={() => setConfirmNegotiation(false)}
         />
       )}
     </div>

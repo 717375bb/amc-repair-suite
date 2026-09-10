@@ -11,7 +11,12 @@ import {
   type TerminalState,
   type VendorConfig,
 } from './vendorConfig.js';
-import { buildChargeToAccountWithSuffix, buildDefaultRepairChargeToAccount } from './chargeToAccount.js';
+import {
+  buildChargeToAccountWithSuffix,
+  buildDefaultRepairChargeToAccount,
+  buildHmvChargeToAccount,
+  isHmvAccountBase,
+} from './chargeToAccount.js';
 import { classifyUsageTable } from './usageTable.js';
 import {
   createAdHocTaskForCandidate,
@@ -55,11 +60,16 @@ import { closePartDetailsReceivingNotes, openPartDetailsReceivingNotes, readPart
 import { isRmaVendor } from './rmaVendors.js';
 import { buildContractChargeToAccount, detectContractCode, type ContractCode } from './contractCodes.js';
 import { evaluateBaseStation } from './approvedLocations.js';
+import { extractPartName } from './partName.js';
+import { resolveTransportationOverride } from './shipmentMethod.js';
+import { resolveRotatedReturnToLocation } from './returnToLocationRotation.js';
+import { resolvePartModificationNoteLine } from './partModificationNotes.js';
 import { readRemovalDate } from './readRemovalDate.js';
 import { composeRemovalDateLine } from './removalDate.js';
 import { captureVendorCodeGridDiagnostics } from './vendorCodeGridDiagnostics.js';
 import { createWorkPackageForLine, findNoWorkPackageRowsOnGrid } from './createWorkPackage.js';
 import { extractRemovalTaskInfo, readPreferredVendorIndicator, type PreferredVendorIndicatorState } from './removalTaskInfo.js';
+import { processAssignedDiscardTasks } from './assignedTaskDiscardUnassign.js';
 import { createLogger } from '../../logging/logger.js';
 
 const log = createLogger('writeup');
@@ -633,19 +643,41 @@ export function composeNotesForNormalLine(
   const partLine = `${details.partDescription} (PN: ${details.partNumber}, SN: ${details.serialNumber})`;
   const tableHeader = 'Usage Parm\tTSN\tTSO\tTSI';
   const tableRows = details.usageRows.map((row) => `${row.label}\t${row.tsn}\t${row.tso}\t${row.tsi}`);
-  const middle = removalDateLine ? [partLine, removalDateLine] : [partLine];
+  // CLAUDE_CODE_PROMPT (PN-keyed modification instruction, 2026-09-10) —
+  // see partModificationNotes.ts. Spliced in right before the usage table,
+  // per explicit user direction ("before the times and cycles"); after the
+  // removal-date line when both happen to apply to the same part, since no
+  // vendor needs both today and this is the more natural reading order.
+  const modifyPartLine = resolvePartModificationNoteLine(details.partNumber);
+  const middle = [partLine, removalDateLine, modifyPartLine].filter((line): line is string => !!line);
   return [notesHeader, '', ...middle, tableHeader, ...tableRows].join('\n') + '\n';
 }
 
 /** Confirmed correct as recorded: header-only, no description line even though PN/SN are available. */
-export function composeNotesForBnLine(notesHeader: string): string {
-  return `${notesHeader}\n`;
+export function composeNotesForBnLine(notesHeader: string, partNumber?: string | null): string {
+  // CLAUDE_CODE_PROMPT (PN-keyed modification instruction, 2026-09-10) —
+  // per explicit user direction, this applies to any vendor with no
+  // narrower scope stated, so a -055/-005 part on a BN-prefixed line
+  // still gets the instruction even though this line's note is otherwise
+  // header-only.
+  const modifyPartLine = resolvePartModificationNoteLine(partNumber);
+  return modifyPartLine ? `${notesHeader}\n\n${modifyPartLine}\n` : `${notesHeader}\n`;
 }
 
 // ---- Orchestrator (moved from 0t1y4/writeUp.ts, parameterized by config) ----
 
 export interface VendorCodeWriteUpFields {
   partNumber: string;
+  /**
+   * CLAUDE_CODE_PROMPT (part NAME in write-up lines, 2026-09-10) — the
+   * part's real name, read out of the work-package link text (see
+   * partName.ts). Carried on the outcome because the execute-side run log
+   * has no other access to it: its caller's target is only
+   * {vendorId, partNumber, serialNumber}, so without this the line would
+   * fall back to showing the part number as its own description.
+   * Empty string when the link text yielded nothing usable.
+   */
+  partDescription: string;
   serialNumber: string;
   isBnLine: boolean;
   purchasingContact: string;
@@ -971,6 +1003,22 @@ export async function runVendorCodeWriteUp(
     await openVendorCodeCandidate(page, candidate);
     await waitForWorkPackageDetailsResolved(page);
 
+    // CLAUDE_CODE_PROMPT (assigned-task DISCARD - DS/DIS, 2026-09-10) — per
+    // explicit user direction, runs BEFORE readAssignedTasksAreaText below:
+    // an assigned DISCARD - DS/DIS task with Usage Remaining over 1000
+    // cycles is unassigned here, on the same Assigned Tasks area landed on
+    // immediately after opening this line's repair link (see
+    // discovery-task-unassigning-recording.ts). Must happen first because
+    // unassigning changes what that area's own text/no-task-exception
+    // check below would otherwise see.
+    const discardUnassignResult = await processAssignedDiscardTasks(page);
+    if (discardUnassignResult.rowsUnassigned.length > 0) {
+      log.info(
+        { vendorConfigId: config.id, partNumber: candidate.partNumber, serialNumber: candidate.serialNumber, discardUnassignResult },
+        '[assigned-task-discard] unassigned one or more DISCARD - DS/DIS tasks before continuing this line',
+      );
+    }
+
     // REAL BUG FOUND AND FIXED, discovered live via direct DOM inspection,
     // a real user-provided screenshot, and explicit user correction: this
     // used to assume "no tasks assigned" only ever happens on BN lines
@@ -1136,7 +1184,34 @@ export async function runVendorCodeWriteUp(
       };
     }
 
-    const returnToLocation = transformReturnToLocation(currentLocation);
+    /**
+     * CLAUDE_CODE_PROMPT (BAE Systems return-to rotation, 2026-09-10) — a
+     * vendor on a fixed rotation ignores the line's own base station for
+     * this ONE field and cycles through its configured docks instead.
+     *
+     * The approved-base check above still runs, unchanged and first: it
+     * decides whether PSA may create an order for this line at all, which
+     * is a different question from where the part is returned to. A
+     * rotation must not smuggle a line at a non-approved base into a run.
+     */
+    const returnToLocation = config.returnToLocationRotation
+      ? resolveRotatedReturnToLocation(config.returnToLocationRotation, config.id, client.config.env)
+      : transformReturnToLocation(currentLocation);
+
+    /**
+     * CLAUDE_CODE_PROMPT (part NAME, 2026-09-10) — resolved once, used for
+     * the run-log description AND for the oversized-part shipping rule, so
+     * the name an analyst reads and the name the FEDEX-LT keyword test
+     * matched against can never be different strings.
+     *
+     * The fallback matters: a candidate whose work package had to be
+     * created in this same pass carries no repair-link text by definition
+     * (it didn't exist yet), only its own description — without this, such
+     * a line would have an empty name and would silently miss the keyword
+     * test even if it were a TRANSCOWL.
+     */
+    const partDescriptionForLine =
+      extractPartName(candidate.linkText) || candidate.noWorkPackagePartDescription || '';
 
     // CLAUDE_CODE_PROMPT ("Create Order Only" terminal state) — a single,
     // explicit allowlisted redirect: ONLY zero-usage-on-a-USSTG-line
@@ -1322,7 +1397,7 @@ export async function runVendorCodeWriteUp(
       // usage is, definitionally, all zero. Matches the recording exactly
       // (a normal, non-BN line whose Note To Vendor was header-only).
       notesText = doNotShipReason || isBnFlow
-        ? composeNotesForBnLine(config.form.notesHeader)
+        ? composeNotesForBnLine(config.form.notesHeader, candidate.partNumber)
         : composeNotesForNormalLine(partOwnDetails, config.form.notesHeader, removalDateLine);
       await closePartOwnDetails(page);
 
@@ -1427,17 +1502,66 @@ export async function runVendorCodeWriteUp(
       // registry for the rest of the process. Nothing here mutates config.
       if (contractCode) {
         chargeToAccountAfter = buildContractChargeToAccount(chargeToAccountBefore, contractCode);
+      } else if (config.form.chargeToAccountSuffix === WARRANTY_TERMINAL_STATE_CHARGE_TO_ACCOUNT_SUFFIX) {
+        // CLAUDE_CODE_PROMPT (HMV base account codes, 2026-09-10) — per
+        // explicit user direction: a part coming out of NQA/QRO/CKB/TUS
+        // bills to an HMV account instead of the default REPAIR one.
+        //
+        // Deliberately nested INSIDE the "this vendor has no account
+        // override of its own" arm, so it changes nothing about the cases
+        // that already win over the default: the shipset literal and the
+        // CREATE_ORDER_ONLY literal (both handled far above), the contract
+        // codes (the `if` immediately above), and a vendor with its own
+        // real suffix like Collins' COLLINSDISPATCH100 (the `else` below).
+        // That ordering is the whole of "this does not affect parts that
+        // already use account codes different from the default".
+        //
+        // `approval.baseStation` is the line's OWN current location base
+        // (read at line ~1117 and evaluated at ~1124), not the base its
+        // order is routed to — NQA/QRO/CKB/TUS orders are all created out
+        // of CLT, and billing them to CLT's account would defeat the
+        // point of the rule. Non-null here by construction: a line whose
+        // base couldn't be read, or isn't approved, returned
+        // `base_not_approved` long before this point.
+        chargeToAccountAfter = isHmvAccountBase(approval.baseStation)
+          ? buildHmvChargeToAccount(chargeToAccountBefore, approval.baseStation!)
+          : buildDefaultRepairChargeToAccount(chargeToAccountBefore);
       } else {
-        chargeToAccountAfter =
-          config.form.chargeToAccountSuffix === WARRANTY_TERMINAL_STATE_CHARGE_TO_ACCOUNT_SUFFIX
-            ? buildDefaultRepairChargeToAccount(chargeToAccountBefore)
-            : buildChargeToAccountWithSuffix(chargeToAccountBefore, config.form.chargeToAccountSuffix);
+        chargeToAccountAfter = buildChargeToAccountWithSuffix(chargeToAccountBefore, config.form.chargeToAccountSuffix);
       }
       await fillChargeToAccount(page, chargeToAccountAfter);
     }
     await fillPurchasingContact(page, config.form.purchasingContact);
     await selectConditions(page, config.form.conditions);
     await fillReturnToLocation(page, returnToLocation);
+
+    /**
+     * CLAUDE_CODE_PROMPT (oversized-part shipping method, 2026-09-10) —
+     * resolved ONCE here, then used both for the actual dropdown selection
+     * below and for all three `VendorCodeWriteUpFields` sites further down.
+     * Those three previously each recomputed the same ternary
+     * independently; a per-line override that only changed the selection
+     * would have left the audit trail reporting the vendor's baseline
+     * default while MXI got something else.
+     *
+     * null means "the Transportation Type step is intentionally skipped"
+     * (the shipset Delta 1 case) — kept as null rather than a sentinel
+     * string so the skip stays a structural fact rather than a value that
+     * could accidentally be typed into the form.
+     *
+     * Precedence, highest first: shipset skip > shipset's own value >
+     * oversized-part keyword override > the vendor's configured default.
+     * The keyword rule deliberately sits BELOW the shipset case: 7A9Y2's
+     * shipset lines are a different, already-proven flow that states its
+     * own transport handling explicitly.
+     */
+    const effectiveTransportation: string | null =
+      shipset && shipset.transportationType === null
+        ? null
+        : shipset
+          ? shipset.transportationType
+          : (resolveTransportationOverride(vendorCode, partDescriptionForLine) ??
+            config.form.transportation);
 
     if (shipset && shipset.transportationType === null) {
       // CLAUDE_CODE_PROMPT (vendor 7A9Y2 "shipset" case, Delta 1) — leave
@@ -1447,7 +1571,7 @@ export async function runVendorCodeWriteUp(
       // is visible in the run log as a MISSING line, not a wrong value.
       log.info({ vendorConfigId: config.id }, '[vendor-config] Transportation Type step intentionally SKIPPED (Delta 1 — shipset leaves it blank)');
     } else {
-      await selectTransportation(page, shipset ? shipset.transportationType! : config.form.transportation);
+      await selectTransportation(page, effectiveTransportation!);
     }
 
     await fillNotesToVendor(page, notesText);
@@ -1481,12 +1605,13 @@ export async function runVendorCodeWriteUp(
 
       const rmaFields: VendorCodeWriteUpFields = {
         partNumber: candidate.partNumber,
+        partDescription: partDescriptionForLine,
         serialNumber: candidate.serialNumber,
         isBnLine: isBnFlow,
         purchasingContact: config.form.purchasingContact,
         returnToLocation,
         conditions: config.form.conditions,
-        transportation: shipset && shipset.transportationType === null ? '(intentionally skipped — Delta 1)' : config.form.transportation,
+        transportation: effectiveTransportation ?? '(intentionally skipped — Delta 1)',
         chargeToAccountBefore,
         chargeToAccountAfter,
         notesText,
@@ -1521,12 +1646,13 @@ export async function runVendorCodeWriteUp(
 
       const doNotShipFields: VendorCodeWriteUpFields = {
         partNumber: candidate.partNumber,
+        partDescription: partDescriptionForLine,
         serialNumber: candidate.serialNumber,
         isBnLine: isBnFlow,
         purchasingContact: config.form.purchasingContact,
         returnToLocation,
         conditions: config.form.conditions,
-        transportation: shipset && shipset.transportationType === null ? '(intentionally skipped — Delta 1)' : config.form.transportation,
+        transportation: effectiveTransportation ?? '(intentionally skipped — Delta 1)',
         chargeToAccountBefore,
         chargeToAccountAfter,
         notesText,
@@ -1613,6 +1739,7 @@ export async function runVendorCodeWriteUp(
 
     const fields: VendorCodeWriteUpFields = {
       partNumber: candidate.partNumber,
+      partDescription: partDescriptionForLine,
       serialNumber: candidate.serialNumber,
       isBnLine: isBnFlow,
       purchasingContact: config.form.purchasingContact,
@@ -1620,7 +1747,7 @@ export async function runVendorCodeWriteUp(
       conditions: config.form.conditions,
       // Reflects what actually happened, not the vendor's baseline default —
       // a shipset line with transportationType: null never had this step run at all (Delta 1).
-      transportation: shipset && shipset.transportationType === null ? '(intentionally skipped — Delta 1)' : config.form.transportation,
+      transportation: effectiveTransportation ?? '(intentionally skipped — Delta 1)',
       chargeToAccountBefore,
       chargeToAccountAfter,
       notesText,
@@ -1650,10 +1777,16 @@ export async function runVendorCodeWriteUp(
         // above) still run as normal. Config-gated (moveToDockOnInitialRun)
         // so the capability stays reachable by flipping the flag later —
         // no code change needed to re-enable.
-        if (shipset && !shipset.moveToDockOnInitialRun) {
+        //
+        // CLAUDE_CODE_PROMPT (Andres Sabido vendor batch, 2026-09-10) —
+        // `config.skipMoveToDock` is the same "issue, don't dock" outcome
+        // for an ordinary (non-shipset) vendor — see its own docstring on
+        // VendorConfig for why this is a separate flag rather than reusing
+        // the shipset-only condition.
+        if ((shipset && !shipset.moveToDockOnInitialRun) || config.skipMoveToDock) {
           log.info(
-            { vendorConfigId: config.id, generatedOrderNumber, shipsetId: shipset.id },
-            '[vendor-config] order issued successfully — Move to Dock intentionally SKIPPED on this run (Delta 5)',
+            { vendorConfigId: config.id, generatedOrderNumber, shipsetId: shipset?.id ?? null, skipMoveToDock: !!config.skipMoveToDock },
+            '[vendor-config] order issued successfully — Move to Dock intentionally SKIPPED',
           );
           return { status: 'issued_not_docked', fields };
         }

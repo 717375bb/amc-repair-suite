@@ -49,7 +49,16 @@ export type EsdClassification =
   | 'parts_pending'
   | 'not_esd_relevant'
   | 'quote_sent_reference'
-  | 'none';
+  | 'none'
+  /**
+   * CRA OOR's own Order Status says the part has already been received
+   * back — see inference/statusRules.ts's isOrderStatusReceived(). Set
+   * deterministically, before Step 1, never by the AI — no AI call is made
+   * at all for a row that hits this rule, same "don't call the AI when a
+   * deterministic answer already exists" discipline Step 1's explicit_date
+   * check already uses.
+   */
+  | 'order_received';
 
 /**
  * `inference_unavailable` added 2026-08-28. It means the AI could not be
@@ -75,6 +84,15 @@ export interface InferenceRecord {
   currentStatus: string | null;
   vendorNotes: string | null;
   orderStatus: string | null;
+  /**
+   * CLAUDE_CODE_PROMPT (AWB -> Inbound shipment, 2026-09-09) — carried
+   * through purely for display/detection in the ESD Finder review table
+   * ("this order has an AWB in the report"). Deliberately NOT wired into
+   * any automatic write path yet — see mxiWriter/awbInboundSelectors.ts's
+   * own docstring for why that writer needs a first live watched test
+   * before anything reads this field to trigger a real MXI write.
+   */
+  outboundAwb: string | null;
   classification: EsdClassification | null;
   extractedBaseDate: string | null;
   bufferDaysApplied: number | null;

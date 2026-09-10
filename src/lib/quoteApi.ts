@@ -35,16 +35,28 @@ export interface QuoteExtractionRow {
   /** Vendor offered a replacement unit — converted to an exchange rather than priced. */
   suggestsExchange: boolean
   exchangeEvidence: string | null
+  /**
+   * The analyst's own exchange call, when they have made one. Overrides
+   * suggestsExchange in both directions — see the backend's
+   * quoteWriter/exchangeDecision.ts.
+   */
+  exchangeOverride?: boolean | null
+  /** What the vendor said about a warranty claim, and their own wording for it. */
+  warrantyStatus: WarrantyStatus
+  warrantyEvidence: string | null
   disposition: QuoteDisposition
   confidence: 'high' | 'medium' | 'low'
   reasoningNote: string
 }
 
 /**
- * `excluded_nrep` is vendor-derived and set automatically; only the other
- * three can be chosen by a human (see the backend's quoteDisposition.ts).
+ * What the vendor said about a warranty claim, read from the quote PDF and
+ * the email body. 'not_mentioned' is its own value on purpose — silence
+ * about warranty is not a denial.
  */
-export type QuoteDisposition = 'pending' | 'excluded_nrep' | 'excluded_ber' | 'excluded_other'
+export type WarrantyStatus = 'fully_accepted' | 'partially_accepted' | 'denied' | 'not_mentioned'
+
+export type QuoteDisposition = 'pending' | 'negotiating' | 'excluded_nrep' | 'excluded_ber' | 'excluded_other'
 
 /**
  * Which MXI action a row will take. NREP/BER are no longer dead ends — they
@@ -67,6 +79,9 @@ export function resolveWriteAction(
   disposition: QuoteDisposition,
   suggestsExchange: boolean,
 ): QuoteWriteAction {
+  // A negotiation has been sent, so the quoted price is one PSA has asked
+  // the vendor to change - nothing is written on this row until it settles.
+  if (disposition === 'negotiating') return 'none'
   if (disposition === 'excluded_other') return 'none'
   if (disposition === 'excluded_ber') return 'scrap_price'
   if (suggestsExchange) return 'exchange'
@@ -74,7 +89,13 @@ export function resolveWriteAction(
   return 'price_line'
 }
 
-export type HumanSettableDisposition = 'pending' | 'excluded_ber' | 'excluded_other'
+/** 'excluded_nrep' became human-settable 2026-09-04; 'negotiating' is set by sending a negotiation, and cleared back to 'pending' here. */
+export type HumanSettableDisposition =
+  | 'pending'
+  | 'negotiating'
+  | 'excluded_nrep'
+  | 'excluded_ber'
+  | 'excluded_other'
 
 export interface QuoteWriteResult {
   extractionId: number
@@ -197,4 +218,78 @@ export function setQuoteDisposition(
     method: 'POST',
     body: JSON.stringify({ disposition, runId }),
   })
+}
+
+/**
+ * Records the analyst's own exchange call, overriding what the model read.
+ *
+ * Works both ways — setting an exchange the AI missed, and clearing one it
+ * wrongly found. Append-only server-side, like dispositions.
+ */
+export function setQuoteExchange(
+  extractionId: number,
+  isExchange: boolean,
+  runId: string,
+): Promise<{ ok: boolean; extractionId: number; isExchange: boolean }> {
+  return request(`/api/quotes/extractions/${extractionId}/exchange`, {
+    method: 'POST',
+    // runId lets the server mirror this into the in-memory run, so the
+    // table still shows the override after the next poll.
+    body: JSON.stringify({ isExchange, runId }),
+  })
+}
+
+/** The pre-filled negotiation text, with the vendor's own first name. A pure read. */
+export function getNegotiationSeed(extractionId: number): Promise<{ body: string }> {
+  return request(`/api/quotes/extractions/${extractionId}/negotiation-seed`)
+}
+
+/**
+ * SENDS a price negotiation to the vendor immediately — no draft.
+ *
+ * The only send-on-click path in this app, at the analyst's explicit
+ * request. Always call this behind a confirmation showing the final text
+ * and recipients. The server refuses a body that still contains the
+ * template's own <reason> / <new price> prompts.
+ *
+ * On success the row moves to `negotiating` and is held out of the write
+ * set until the analyst releases it.
+ */
+export function sendQuoteNegotiation(
+  extractionId: number,
+  body: string,
+  runId: string,
+): Promise<{ ok: boolean; extractionId: number; recipients: string[]; subject: string | null }> {
+  return request(`/api/quotes/extractions/${extractionId}/negotiate`, {
+    method: 'POST',
+    body: JSON.stringify({ body, runId }),
+  })
+}
+
+/**
+ * Forwards the original vendor email, attachments included, to PSA's
+ * warranty department. The recipient is fixed server-side.
+ */
+export function forwardQuoteToWarranty(
+  extractionId: number,
+  note?: string,
+): Promise<{ ok: boolean; extractionId: number; recipients: string[]; attachmentCount: number | null; resolved: boolean }> {
+  return request(`/api/quotes/extractions/${extractionId}/forward-warranty`, {
+    method: 'POST',
+    body: JSON.stringify({ note: note ?? '' }),
+  })
+}
+
+/** Analyst-facing label for the vendor's warranty position. */
+export function warrantyStatusLabel(status: WarrantyStatus): string {
+  switch (status) {
+    case 'fully_accepted':
+      return 'Warranty fully accepted'
+    case 'partially_accepted':
+      return 'Warranty partially accepted'
+    case 'denied':
+      return 'Warranty denied'
+    default:
+      return 'Warranty not mentioned'
+  }
 }

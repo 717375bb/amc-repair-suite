@@ -2,6 +2,7 @@ import 'dotenv/config';
 import path from 'node:path';
 import {
   getEffectiveQuoteDispositions,
+  getEffectiveQuoteExchanges,
   insertQuoteWrite,
   openDb,
   quoteExtractionAlreadyWritten,
@@ -21,6 +22,8 @@ import {
   ReplyTemplateSet,
 } from '../../quoteWriter/quoteReplyTemplate.js';
 import { resolveWriteAction, type QuoteDisposition } from '../../quoteWriter/quoteDisposition.js';
+import { resolveIsExchange } from '../../quoteWriter/exchangeDecision.js';
+import { saveApprovedQuotePdf } from '../../quoteWriter/saveApprovedQuotePdf.js';
 import type { MxiEnv } from '../../mxiWriter/config.js';
 import { watchStdinForCancellation } from './cancellationWatcher.js';
 import { createLogger } from '../../logging/logger.js';
@@ -101,6 +104,8 @@ interface WritableRow {
   sender_name: string | null;
   sender_first_name: string | null;
   suggests_exchange: number;
+  /** Where the ingest stage saved the source PDF (data/quote-attachments/...) — see saveApprovedQuotePdf.ts. */
+  saved_path: string | null;
 }
 
 async function main(): Promise<void> {
@@ -112,7 +117,7 @@ async function main(): Promise<void> {
     .prepare(
       `SELECT id, order_number, serial_number, unit_price, resolved_esd, source_entry_id, document_kind,
               quote_number, vendor_name, currency, part_number, sender_name, sender_first_name,
-              suggests_exchange
+              suggests_exchange, saved_path
        FROM quote_extractions
        WHERE run_id = ? AND id IN (${placeholders})`,
     )
@@ -120,6 +125,11 @@ async function main(): Promise<void> {
 
   // Guard 1: effective disposition comes from the DB, never the request.
   const dispositions = getEffectiveQuoteDispositions(db, dbRunId);
+  // The analyst's exchange override, if they made one. Same authority
+  // model as dispositions: what the model read is the default, a human
+  // decision replaces it. Without this, marking a row as an exchange in the
+  // UI would record the decision and change nothing.
+  const exchanges = getEffectiveQuoteExchanges(db, dbRunId);
 
   emit({ type: 'summary', dbRunId, env, requested: extractionIds.length, found: rows.length });
   emit({ type: 'phase', phase: 'writing' });
@@ -159,7 +169,10 @@ async function main(): Promise<void> {
       };
 
       const disposition = (dispositions.get(row.id)?.disposition ?? 'pending') as QuoteDisposition;
-      const writeAction = resolveWriteAction(disposition, row.suggests_exchange === 1);
+      const isExchange = resolveIsExchange(
+        exchanges.get(row.id) ?? { vendorSuggested: row.suggests_exchange === 1, humanDecision: null },
+      );
+      const writeAction = resolveWriteAction(disposition, isExchange);
       if (writeAction === 'none') {
         skip(`Not writable — disposition is "${disposition}".`);
         continue;
@@ -189,7 +202,10 @@ async function main(): Promise<void> {
       // was removed (2026-08-23) — PSA's BN system means our serial
       // routinely differs from the vendor's. Requiring it here would keep
       // enforcing a rule that no longer exists.
-      if (!row.resolved_esd && !row.suggests_exchange) missing.push('ESD');
+      // Keyed off the EFFECTIVE exchange state: an analyst-marked exchange
+      // has no promised-by date either, so requiring an ESD there would
+      // block the very row they just marked.
+      if (!row.resolved_esd && !isExchange) missing.push('ESD');
       if (missing.length > 0) {
         skip(`Missing ${missing.join(', ')} — refusing to write a partial update.`);
         continue;
@@ -270,8 +286,16 @@ async function main(): Promise<void> {
       let markReadError: string | null = null;
       let replyStatus: 'drafted' | 'sent' | 'failed' | 'skipped' | null = null;
       let replyError: string | null = null;
+      // Same gate: a PDF only ever lands in the approved-quotes archive
+      // after a verified successful write — see saveApprovedQuotePdf.ts.
+      let archivedPdfPath: string | null = null;
+      let archiveError: string | null = null;
 
       if (result.status === 'success') {
+        const archive = await saveApprovedQuotePdf(row.saved_path, row.order_number!, row.vendor_name);
+        archivedPdfPath = archive.destPath;
+        archiveError = archive.error;
+
         const mark = await markOutlookMailRead(row.source_entry_id);
         markedRead = mark.ok;
         markReadError = mark.error;
@@ -329,6 +353,8 @@ async function main(): Promise<void> {
         markedRead,
         replyStatus,
         replyError,
+        archivedPdfPath,
+        archiveError,
         approvedBy: 'quote-writer-ui',
       });
 
@@ -349,8 +375,10 @@ async function main(): Promise<void> {
         issueDetail: result.issueDetail,
         // Deliberately distinct from errorMessage: a mailbox bookkeeping
         // miss is NOT a failed MXI write, and must not read like one. Same
-        // reasoning for replyStatus/replyError.
+        // reasoning for replyStatus/replyError/archiveError.
         markReadError,
+        archivedPdfPath,
+        archiveError,
         replyStatus,
         replyError,
         errorMessage: result.errorMessage,

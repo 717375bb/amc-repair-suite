@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, CheckCircle2, Clock, ClipboardCopy, Loader2, Mail, PlayCircle, RefreshCw, Search, StopCircle, XCircle } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Clock, ClipboardCopy, ClipboardList, Loader2, Mail, PlayCircle, RefreshCw, Search, StopCircle, XCircle } from 'lucide-react'
 import { Badge, Card, CardHeader, PrimaryButton, SecondaryButton } from '../components/ui'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import {
@@ -267,6 +267,9 @@ function LogRow({ event }: { event: RunLogEvent }) {
               {event.vendorId.toUpperCase()} - {event.vendorDisplayName} — {event.description} (PN: {event.partNumber}, SN: {event.serialNumber})
             </p>
             <p className="mt-0.5 text-sm text-muted">{event.summary}</p>
+            {event.returnedTo && (
+              <p className="mt-0.5 text-xs text-muted">Returned to {event.returnedTo}</p>
+            )}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-3">
@@ -334,6 +337,14 @@ export default function OrderWriteUps() {
   const [deselectedLineIds, setDeselectedLineIds] = useState<Set<string>>(new Set())
   const [showCancelConfirm, setShowCancelConfirm] = useState(false)
   const [cancelling, setCancelling] = useState(false)
+  // CLAUDE_CODE_PROMPT (re-review after execute, 2026-09-10) — when true
+  // and the execute run is done (not cancelled — that already routes to
+  // 'review' on its own), effectivePhase shows the review screen again
+  // instead of the execute-done log, with the FULL original discovery
+  // list (deselected lines included) and already-written lines badged and
+  // locked. Reset whenever a genuinely new run starts, so it never leaks
+  // into a fresh discovery/execute cycle.
+  const [showReviewAfterExecute, setShowReviewAfterExecute] = useState(false)
 
   // CLAUDE_CODE_PROMPT (persistent run state + cancel button) — discovery
   // AND execute state + their polling loops both live in a provider
@@ -348,6 +359,7 @@ export default function OrderWriteUps() {
     executeRun,
     executeEvents,
     notYetAttemptedLines,
+    writeResultByLineId,
     startDiscoveryTracking,
     startExecuteTracking,
     cancelActive,
@@ -380,7 +392,7 @@ export default function OrderWriteUps() {
   const effectivePhase: Phase = useMemo(() => {
     if (executeRunId) {
       if (executeRun?.status === 'cancelled') return 'review'
-      if (executeRun && isRunTerminal(executeRun.status)) return 'execute-done'
+      if (executeRun && isRunTerminal(executeRun.status)) return showReviewAfterExecute ? 'review' : 'execute-done'
       return 'executing'
     }
     if (discoveryRunId) {
@@ -388,19 +400,37 @@ export default function OrderWriteUps() {
       return 'discovering'
     }
     return 'select'
-  }, [executeRunId, executeRun, discoveryRunId, discoveryRun])
+  }, [executeRunId, executeRun, discoveryRunId, discoveryRun, showReviewAfterExecute])
 
   const cancelledExecute = executeRunId && executeRun?.status === 'cancelled' ? executeRun : null
+  // CLAUDE_CODE_PROMPT (re-review after execute, 2026-09-10) — distinct
+  // from cancelledExecute: this is a genuinely COMPLETED execute run the
+  // analyst asked to review again, not one that was stopped early.
+  const reviewingAfterCompletedExecute =
+    executeRunId && executeRun && isRunTerminal(executeRun.status) && executeRun.status !== 'cancelled' && showReviewAfterExecute
+      ? executeRun
+      : null
 
   // The current eligible set — every 'completed' discovery line normally,
-  // or only the not-yet-attempted subset after an execute cancel (see the
+  // only the not-yet-attempted subset after an execute cancel (see the
   // module docstring for why re-offering an already-completed line would
-  // risk a duplicate order).
+  // risk a duplicate order), or every completed line MINUS already-written
+  // ones when re-reviewing after a run finished normally (deselected lines
+  // come back; already-written ones are excluded here so they can never
+  // end up in a "Select all"/default-selected batch — ReviewState shows
+  // them separately, badged and locked).
   const eligibleLineIds = useMemo(() => {
     if (cancelledExecute) return new Set((notYetAttemptedLines ?? []).map((l) => l.lineId))
-    if (discoveryRun?.lines) return new Set(discoveryRun.lines.filter((l) => l.status === 'completed').map((l) => l.lineId))
-    return new Set<string>()
-  }, [cancelledExecute, notYetAttemptedLines, discoveryRun])
+    if (!discoveryRun?.lines) return new Set<string>()
+    const alreadyWritten = new Set(
+      reviewingAfterCompletedExecute && writeResultByLineId
+        ? [...writeResultByLineId.entries()].filter(([, e]) => e.status === 'completed').map(([lineId]) => lineId)
+        : [],
+    )
+    return new Set(
+      discoveryRun.lines.filter((l) => l.status === 'completed' && !alreadyWritten.has(l.lineId)).map((l) => l.lineId),
+    )
+  }, [cancelledExecute, notYetAttemptedLines, discoveryRun, reviewingAfterCompletedExecute, writeResultByLineId])
 
   const selectedLineIds = useMemo(() => {
     const result = new Set<string>()
@@ -466,6 +496,7 @@ export default function OrderWriteUps() {
     setLoadError(null)
     try {
       const { executeRunId: newExecuteRunId } = await startExecute(discoveryRun.runId, [...selectedLineIds], env)
+      setShowReviewAfterExecute(false)
       startExecuteTracking(newExecuteRunId)
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
@@ -496,6 +527,7 @@ export default function OrderWriteUps() {
     setLoadError(null)
     try {
       const { executeRunId: newExecuteRunId } = await startExecute(discoveryRun.runId, failedLineIds, env)
+      setShowReviewAfterExecute(false)
       startExecuteTracking(newExecuteRunId)
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
@@ -510,6 +542,7 @@ export default function OrderWriteUps() {
     clearAll()
     setDeselectedLineIds(new Set())
     setSelectedVendorIds(new Set())
+    setShowReviewAfterExecute(false)
     getActiveJob()
       .then((r) => setActiveJobRunId(r.activeRunId))
       .catch(() => {})
@@ -578,9 +611,15 @@ export default function OrderWriteUps() {
             setDeselectedLineIds(new Set([...eligibleLineIds].filter((id) => !idSet.has(id))))
           }}
           onConfirm={handleConfirm}
-          onCancel={resetToStart}
+          // CLAUDE_CODE_PROMPT (re-review after execute, 2026-09-10) — when
+          // re-reviewing a completed run, "back" should return to the
+          // results log (nothing new has happened yet to discard), not
+          // wipe the whole run the way starting over from a fresh review
+          // does.
+          onCancel={reviewingAfterCompletedExecute ? () => setShowReviewAfterExecute(false) : resetToStart}
           restrictToLineIds={cancelledExecute ? eligibleLineIds : null}
           cancelledExecuteSummary={cancelledExecute ? cancelledExecute.counts : null}
+          writeResultByLineId={reviewingAfterCompletedExecute ? writeResultByLineId : null}
         />
       )}
 
@@ -594,6 +633,11 @@ export default function OrderWriteUps() {
           onRetryFailed={discoveryRun ? handleRetryFailed : undefined}
           onCancelClick={effectivePhase === 'executing' ? () => setShowCancelConfirm(true) : undefined}
           cancelling={cancelling}
+          // CLAUDE_CODE_PROMPT (re-review after execute, 2026-09-10) — only
+          // offered once the run is actually done and there's a discovery
+          // snapshot to review against (a freshly-remounted page mid-run
+          // may have the execute run but not the original discovery lines).
+          onBackToReview={effectivePhase === 'execute-done' && discoveryRun ? () => setShowReviewAfterExecute(true) : undefined}
         />
       )}
 
@@ -792,6 +836,7 @@ function ReviewState({
   onCancel,
   restrictToLineIds,
   cancelledExecuteSummary,
+  writeResultByLineId,
 }: {
   run: RunStatusResponse
   selectedLineIds: Set<string>
@@ -803,11 +848,27 @@ function ReviewState({
   restrictToLineIds: Set<string> | null
   /** Counts from the cancelled execute run, shown as context for why the offered list is smaller than the original discovery. */
   cancelledExecuteSummary: RunStatusResponse['counts'] | null
+  /**
+   * CLAUDE_CODE_PROMPT (re-review after execute, 2026-09-10) — non-null
+   * when re-reviewing the original discovery list after a run: lines with
+   * a 'completed' (successful) result here render as informational, badged
+   * "Already written," with no checkbox — re-running one would create a
+   * genuine second MXI order for the same part. A failed/skipped result
+   * still renders as an ordinary selectable row (retrying a failed line is
+   * safe). Null on a fresh discovery or a cancel-triggered review, where
+   * there's no execute history yet to show.
+   */
+  writeResultByLineId: Map<string, RunLogEvent> | null
 }) {
   const lines = run.lines ?? []
-  const selectable = (restrictToLineIds ? lines.filter((l) => restrictToLineIds.has(l.lineId)) : lines).filter(
-    (l) => l.status === 'completed',
+  const alreadyWrittenLineIds = new Set(
+    writeResultByLineId
+      ? [...writeResultByLineId.entries()].filter(([, e]) => e.status === 'completed').map(([lineId]) => lineId)
+      : [],
   )
+  const restricted = restrictToLineIds ? lines.filter((l) => restrictToLineIds.has(l.lineId)) : lines
+  const selectable = restricted.filter((l) => l.status === 'completed' && !alreadyWrittenLineIds.has(l.lineId))
+  const alreadyWritten = restricted.filter((l) => l.status === 'completed' && alreadyWrittenLineIds.has(l.lineId))
   const exceptions = lines.filter((l) => l.status === 'exception')
 
   const now = useNow(CLOCK_TICK_MS)
@@ -838,7 +899,11 @@ function ReviewState({
       <Card>
         <CardHeader
           title="Eligible lines"
-          description={`${selectable.length} line(s) ready to write up — all selected by default.`}
+          description={
+            alreadyWritten.length > 0
+              ? `${selectable.length} line(s) ready to write up (all selected by default) — ${alreadyWritten.length} already written and shown for reference only.`
+              : `${selectable.length} line(s) ready to write up — all selected by default.`
+          }
           action={
             <div className="flex gap-2">
               <SecondaryButton onClick={() => onSelectAll(selectable.map((l) => l.lineId))}>Select all</SecondaryButton>
@@ -876,7 +941,21 @@ function ReviewState({
                   <td className="px-5 py-3 text-muted">{line.routedTo ?? '—'}</td>
                 </tr>
               ))}
-              {selectable.length === 0 && (
+              {alreadyWritten.map((line) => (
+                <tr key={line.lineId} className="border-b border-border bg-bg/50 last:border-0">
+                  <td className="px-5 py-3">
+                    <input type="checkbox" checked={false} disabled className="h-4 w-4 rounded border-border" />
+                  </td>
+                  <td className="px-5 py-3 text-muted">{line.partNumber}</td>
+                  <td className="px-5 py-3 text-muted">{line.serialNumber}</td>
+                  <td className="px-5 py-3 text-muted">{line.description}</td>
+                  <td className="px-5 py-3 text-muted">{line.vendorDisplayName}</td>
+                  <td className="px-5 py-3">
+                    <Badge tone="success">Already written</Badge>
+                  </td>
+                </tr>
+              ))}
+              {selectable.length === 0 && alreadyWritten.length === 0 && (
                 <tr>
                   <td colSpan={6} className="px-5 py-6 text-center text-muted">
                     No eligible lines found.
@@ -942,6 +1021,7 @@ function ExecuteState({
   onRetryFailed,
   onCancelClick,
   cancelling,
+  onBackToReview,
 }: {
   run: RunStatusResponse | null
   events: RunLogEvent[]
@@ -953,6 +1033,14 @@ function ExecuteState({
   /** Undefined once the run is done — nothing left to cancel. */
   onCancelClick?: () => void
   cancelling: boolean
+  /**
+   * CLAUDE_CODE_PROMPT (re-review after execute, 2026-09-10) — undefined
+   * while the run is still in progress, or when there's no discovery
+   * snapshot to review against. Shows the full original line list again
+   * (deselected lines selectable, already-written ones badged and locked)
+   * so a follow-up run can pick up where this one left off.
+   */
+  onBackToReview?: () => void
 }) {
   const counts = run?.counts ?? { completed: 0, skipped: 0, exception: 0, inProgress: 0, total: 0 }
   const currentLine = Math.min(counts.total + (counts.inProgress > 0 ? 1 : 0), totalLines || counts.total)
@@ -1017,6 +1105,12 @@ function ExecuteState({
 
       {done && (
         <div className="flex items-center justify-end gap-2">
+          {onBackToReview && (
+            <SecondaryButton onClick={onBackToReview}>
+              <ClipboardList size={16} />
+              Review all lines again
+            </SecondaryButton>
+          )}
           {onRetryFailed && failedCount > 0 && (
             <SecondaryButton onClick={onRetryFailed}>
               <RefreshCw size={16} />

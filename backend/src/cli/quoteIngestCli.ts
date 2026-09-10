@@ -169,6 +169,8 @@ async function main(): Promise<void> {
         suggestsExchange: extraction.suggestsExchange,
 
         exchangeEvidence: extraction.exchangeEvidence,
+        warrantyStatus: extraction.warrantyStatus,
+        warrantyEvidence: extraction.warrantyEvidence,
         initialDisposition: isQuote ? initialDisposition(extraction.vendorSaysNonRepairable) : 'excluded_other',
         confidence: extraction.confidence,
         reasoningNote: extraction.reasoningNote,

@@ -59,6 +59,6 @@ export function RequireGuest() {
   const { status } = useAuth()
 
   if (status === 'loading') return null
-  if (status === 'authenticated') return <Navigate to="/repair-orders" replace />
+  if (status === 'authenticated') return <Navigate to="/order-write-ups" replace />
   return <Outlet />
 }

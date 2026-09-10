@@ -39,7 +39,10 @@ $sensitivePaths = @(
   # point it somewhere else under backend/.
   'backend/data/quote-attachments/example-quote.pdf',
   'backend/data/quote-attachments/nested/example-quote.pdf',
-  'backend/some-stray-quote.pdf'
+  'backend/some-stray-quote.pdf',
+  # Approved-quote PDF archive (saveApprovedQuotePdf.ts) — same real
+  # confidential vendor pricing, copied here after a successful MXI write.
+  'backend/Quotes/example-quote.pdf'
 )
 
 Push-Location $repoRoot

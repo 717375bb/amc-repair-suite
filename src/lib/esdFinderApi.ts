@@ -16,6 +16,10 @@ export type EsdClassification =
   | 'not_esd_relevant'
   | 'quote_sent_reference'
   | 'none'
+  // CRA Order Status already said this order was received back — see
+  // backend's inference/statusRules.ts. Only ever appears when a CRA OOR
+  // file was uploaded for this run.
+  | 'order_received'
 export type EsdFlag = 'ok' | 'no_esd_found' | 'inference_unavailable' | 'orphaned_vendor_row' | 'orphaned_cra_row'
 // CLAUDE_CODE_PROMPT (ESD writer changes, A4) — mirrors backend's
 // classifyRowAction.ts RowActionType.
@@ -38,6 +42,8 @@ export interface EsdCompareResultRow {
   currentStatus: string | null
   vendorNotes: string | null
   orderStatus: string | null
+  /** Vendor row's own Outbound AWB, if any — display/detection only, see backend's mxiWriter/awbInboundSelectors.ts. */
+  outboundAwb: string | null
   classification: EsdClassification | null
   extractedBaseDate: string | null
   bufferDaysApplied: number | null
@@ -69,12 +75,21 @@ export interface EsdRunSummary {
   aiFallbackUsed: number
 }
 
+export interface FileHeaderWarning {
+  fileName: string
+  missingHeaders: string[]
+}
+
 export interface EsdCompareResult {
   dbRunId: number
   records: EsdCompareResultRow[]
   duplicates: DuplicateOrderNumber[]
   outputFilePath: string
   summary: EsdRunSummary
+  /** True when a CRA OOR file was supplied for this run — see server-side ingestion.ts. */
+  hasCraData: boolean
+  /** Per-file columns recognized but not found on the uploaded sheet — informational, never blocks a run. */
+  headerWarnings: FileHeaderWarning[]
 }
 
 export interface EsdRunStatusResponse {
@@ -153,7 +168,7 @@ function uploadRequest<T>(path: string, formData: FormData): Promise<T> {
   }).then(handleResponse<T>)
 }
 
-export function peekFile(file: File, role: 'vendor' | 'cra'): Promise<{ fileName: string; rowCount: number }> {
+export function peekFile(file: File, role: 'vendor' | 'cra'): Promise<{ fileName: string; rowCount: number; missingHeaders: string[] }> {
   const formData = new FormData()
   formData.append('file', file)
   formData.append('role', role)
@@ -165,13 +180,19 @@ export function getActiveEsdJob(): Promise<{ activeRunId: string | null; kind: E
 }
 
 /**
- * CRA file removed 2026-08-26 — the ESD Finder runs from the Vendor OOR
- * file alone. Every field the inference reads comes off the vendor row, so
- * the comparison influenced no decision.
+ * CRA file dropped 2026-08-26 (vendor-only run — every field the pipeline
+ * strictly needs comes off the vendor row), then re-added 2026-09-09 as a
+ * genuinely OPTIONAL second upload, per explicit user direction: when
+ * given, it enables a real current-MXI-ESD comparison and the
+ * "Order Status is Received" skip rule (see esdFinderApi's
+ * EsdClassification 'order_received'), without requiring a live per-row
+ * MXI read. Omitting it (or passing undefined) reproduces the exact
+ * vendor-only behavior unchanged.
  */
-export function startCompare(vendorFiles: File[]): Promise<{ runId: string }> {
+export function startCompare(vendorFiles: File[], craFile?: File): Promise<{ runId: string }> {
   const formData = new FormData()
   for (const f of vendorFiles) formData.append('vendorFiles', f)
+  if (craFile) formData.append('craFile', craFile)
   return uploadRequest('/api/esd/compare', formData)
 }
 

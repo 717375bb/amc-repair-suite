@@ -5,6 +5,8 @@ import type { MxiEnv } from '../../mxiWriter/config.js';
 import { discoverEligibleLines } from '../../writeUps/aeroRepair/batchDiscovery.js';
 import { findCandidateLinesForVendorCode } from '../../writeUps/shared/vendorCodeWriteUp.js';
 import { evaluateBaseStation } from '../../writeUps/shared/approvedLocations.js';
+import { extractPartName } from '../../writeUps/shared/partName.js';
+import { resolveRotatedReturnToLocation } from '../../writeUps/shared/returnToLocationRotation.js';
 import { getVendorConfig } from '../../writeUps/shared/vendorRegistry.js';
 import { AERO_REPAIR_VENDOR_ID, listVendors } from '../vendors.js';
 import { discoveredLineToLogEvent, type RunLogEvent } from '../runLog.js';
@@ -81,7 +83,16 @@ async function runVendorCodeDiscovery(client: MxiClient, vendorId: string, vendo
       vendorDisplayName,
       partNumber: candidate.partNumber,
       serialNumber: candidate.serialNumber,
-      description: candidate.partNumber,
+      // CLAUDE_CODE_PROMPT (part NAME in write-up lines, 2026-09-10) —
+      // was `candidate.partNumber`, which put the part number in a column
+      // labelled Description right next to the part number itself. The
+      // real name lives in the work-package link text; see partName.ts.
+      // Two fallbacks, in order: a no-work-package candidate has no link
+      // text at all by definition (it carries its own description
+      // instead), and the part number remains the last resort so this
+      // column is never blank.
+      description:
+        extractPartName(candidate.linkText) || candidate.noWorkPackagePartDescription || candidate.partNumber,
     };
 
     // APPROVED-BASE CHECK (2026-08-27, explicit user direction): "if a line
@@ -107,15 +118,45 @@ async function runVendorCodeDiscovery(client: MxiClient, vendorId: string, vendo
       continue;
     }
 
+    // CLAUDE_CODE_PROMPT (BAE return-to preview at discovery, 2026-09-10)
+    // — per explicit user direction: the Routing/Location column showed
+    // nothing for a rotation vendor before a run, since the rotation only
+    // ever resolved live inside the actual write. Preview it the same
+    // read-only way the real write does (resolveRotatedReturnToLocation
+    // only reads write-up history, never writes) so the review screen
+    // shows a real, honest answer instead of "—".
+    //
+    // Known, accepted limitation: this is a preview of "if this ONE line
+    // ran right now," not a simulation of the whole batch. Discovering
+    // several rotation-vendor lines in one pass will show the SAME next
+    // slot on all of them, since none has actually been written yet by
+    // the time each is previewed — only a real successful write advances
+    // the rotation. Simulating true batch-order sequencing would mean
+    // duplicating the execute-time write history the rotation is deriving
+    // from, for a display-only field; not worth that complexity today.
+    const routedToDisplay = config.returnToLocationRotation
+      ? resolveRotatedReturnToLocation(config.returnToLocationRotation, config.id, client.config.env)
+      : (approval.routedTo ?? undefined);
+
     emit({
       type: 'line',
       event: {
         ...base,
         status: 'completed', // discovery-time "found, selectable" — this family has no discovery-time exception classification
-        summary:
-          approval.routedTo && approval.routedTo !== approval.baseStation
+        summary: config.returnToLocationRotation
+          ? `Ready to write up — next in rotation: ${routedToDisplay}.`
+          : approval.routedTo && approval.routedTo !== approval.baseStation
             ? `Ready to write up — ${approval.baseStation} routes to ${approval.routedTo}.`
             : 'Ready to write up.',
+        // CLAUDE_CODE_PROMPT (surface current location after discovery,
+        // 2026-09-09) — evaluateBaseStation() already reads this line's
+        // current <STATION>/<CODE> location to decide base approval; it was
+        // computed but never carried into the log event, so the review
+        // table's existing "Routing / Location" column (already populated
+        // for Aero Repair via routingLocation) always showed "—" for every
+        // vendor-code-family line. No new field needed — this reuses the
+        // same column Aero Repair already fills in.
+        routedTo: routedToDisplay,
       },
     });
   }

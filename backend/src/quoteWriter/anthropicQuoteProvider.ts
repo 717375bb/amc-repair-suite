@@ -6,6 +6,7 @@ import type {
   QuoteExtractionInput,
   QuoteExtractionProvider,
   QuoteExtractionResult,
+  WarrantyStatus,
 } from './extractionTypes.js';
 
 const log = createLogger('quote');
@@ -21,6 +22,9 @@ const log = createLogger('quote');
 const MODEL = 'claude-sonnet-5';
 const TOOL_NAME = 'record_quote_extraction';
 const MAX_ATTEMPTS = 2;
+
+/** The closed warranty set; anything else the model returns is not trusted. */
+const ALLOWED_WARRANTY = ['fully_accepted', 'partially_accepted', 'denied', 'not_mentioned'];
 
 const SYSTEM_PROMPT = `You are reading a PDF attached to an email sent to PSA Airlines' component repair team by an outside repair vendor. Extract the quote details exactly as stated. Never estimate, infer, or "helpfully" fill in a value that is not really there — a null is always better than a guess, because these values get written into a real maintenance system.
 
@@ -53,6 +57,14 @@ Be strict about this. It must reflect what the VENDOR said, not your own judgeme
 EXCHANGE: set suggestsExchange to true when the vendor is offering to supply a REPLACEMENT unit instead of repairing the one we sent. Wording varies — common cues are "exchange", "exchange unit", "exchange price", "replacement part", "replacement unit", "outright replacement", or an offer to ship a serviceable unit in place of ours. Quote the vendor's own supporting words verbatim in exchangeEvidence.
 
 Distinguish this from a normal repair quote carefully: a vendor REPAIRING our part and quoting for replacement PARTS/components consumed during that repair (seals, bearings, a replacement circuit board inside the unit) is NOT an exchange — that is an ordinary repair. An exchange means WE GET A DIFFERENT UNIT BACK. If the document is ambiguous, set it false and explain the ambiguity in reasoningNote; a wrongly-flagged exchange converts a real order to the wrong type.
+
+WARRANTY: set warrantyStatus from what the vendor says about a warranty claim on this repair, looking in BOTH the PDF and the email body. Use exactly one of:
+- "fully_accepted": the whole repair is covered under warranty (e.g. "warranty accepted", "covered under warranty", "no charge - warranty").
+- "partially_accepted": some of it is covered and some is chargeable (e.g. "labor covered under warranty, parts billable", "warranty applies to the actuator only").
+- "denied": the vendor considered warranty and refused it (e.g. "warranty denied", "out of warranty", "damage not covered", "warranty void").
+- "not_mentioned": the documents say nothing about warranty at all.
+
+"not_mentioned" is the default and the correct answer whenever warranty simply is not discussed. Silence is NOT a denial — do not infer one. When the status is anything other than "not_mentioned", quote the vendor's own supporting words verbatim in warrantyEvidence; that text is forwarded to PSA's warranty department, who need the vendor's actual wording rather than a paraphrase.
 
 SENDER FIRST NAME: read the sign-off at the bottom of the EMAIL BODY (e.g. "Kind regards, Brennan Rowland" -> "Brennan") and return just the first name in senderFirstName. Use the name the person actually signed with, not the From header, and not a company name. If the body has no legible human sign-off, return null rather than guessing — this is used to greet a real vendor by name, so a wrong or invented name is worse than none.
 
@@ -112,6 +124,17 @@ const inputSchema = {
       type: ['string', 'null'],
       description: "The vendor's own supporting wording, verbatim. Null when suggestsExchange is false.",
     },
+    warrantyStatus: {
+      type: 'string',
+      enum: ['fully_accepted', 'partially_accepted', 'denied', 'not_mentioned'],
+      description:
+        "What the vendor says about a warranty claim, from the PDF or the email body. 'not_mentioned' when warranty is not discussed — silence is never a denial.",
+    },
+    warrantyEvidence: {
+      type: ['string', 'null'],
+      description:
+        "The vendor's own warranty wording, verbatim. Null when warrantyStatus is 'not_mentioned'.",
+    },
     senderFirstName: {
       type: ['string', 'null'],
       description:
@@ -120,7 +143,7 @@ const inputSchema = {
     confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
     reasoningNote: { type: 'string' },
   },
-  required: ['documentKind', 'vendorSaysNonRepairable', 'suggestsExchange', 'confidence', 'reasoningNote'],
+  required: ['documentKind', 'vendorSaysNonRepairable', 'suggestsExchange', 'warrantyStatus', 'confidence', 'reasoningNote'],
 };
 
 function failureResult(reason: string): QuoteExtractionResult {
@@ -147,6 +170,9 @@ function failureResult(reason: string): QuoteExtractionResult {
     nonRepairableEvidence: null,
     suggestsExchange: false,
     exchangeEvidence: null,
+    // Never a warranty finding on a failed read - see WarrantyStatus.
+    warrantyStatus: 'not_mentioned',
+    warrantyEvidence: null,
     senderFirstName: null,
     confidence: 'low',
     reasoningNote: reason,
@@ -250,6 +276,13 @@ export class AnthropicQuoteProvider implements QuoteExtractionProvider {
           nonRepairableEvidence: raw.nonRepairableEvidence ?? null,
           suggestsExchange: raw.suggestsExchange === true,
           exchangeEvidence: raw.exchangeEvidence ?? null,
+          // Anything outside the closed set collapses to not_mentioned rather
+          // than inventing a warranty position we cannot support.
+          warrantyStatus:
+            typeof raw.warrantyStatus === 'string' && ALLOWED_WARRANTY.includes(raw.warrantyStatus)
+              ? (raw.warrantyStatus as WarrantyStatus)
+              : 'not_mentioned',
+          warrantyEvidence: raw.warrantyEvidence ?? null,
           senderFirstName: raw.senderFirstName ?? null,
           confidence: raw.confidence ?? 'low',
           reasoningNote: raw.reasoningNote ?? '(no reasoning note returned)',

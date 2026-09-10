@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS esd_inferences (
   inferred_esd TEXT,
   flag TEXT,
   delta_days_vs_mxi INTEGER,
+  outbound_awb TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -159,6 +160,10 @@ CREATE TABLE IF NOT EXISTS quote_extractions (
   -- Routes the write to Convert Repair To Exchange instead of a price line.
   suggests_exchange INTEGER NOT NULL DEFAULT 0,
   exchange_evidence TEXT,
+  -- What the vendor says about a warranty claim. 'not_mentioned' by default:
+  -- silence about warranty is not a denial.
+  warranty_status TEXT NOT NULL DEFAULT 'not_mentioned',
+  warranty_evidence TEXT,
   -- The disposition this row STARTED at (auto-derived from the NREP flag).
   -- The effective disposition is this, overridden by the latest
   -- quote_dispositions row if one exists.
@@ -176,6 +181,18 @@ CREATE TABLE IF NOT EXISTS quote_dispositions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   quote_extraction_id INTEGER NOT NULL REFERENCES quote_extractions(id),
   disposition TEXT NOT NULL,
+  decided_by TEXT,
+  created_at TEXT NOT NULL
+);
+
+-- Analyst overrides of the model's exchange read (2026-09-04). Append-only
+-- and shaped exactly like quote_dispositions: latest row wins, and the
+-- origin of the decision stays visible rather than overwriting the
+-- extraction's own suggests_exchange.
+CREATE TABLE IF NOT EXISTS quote_exchange_decisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  quote_extraction_id INTEGER NOT NULL REFERENCES quote_extractions(id),
+  is_exchange INTEGER NOT NULL,
   decided_by TEXT,
   created_at TEXT NOT NULL
 );
@@ -215,6 +232,12 @@ CREATE TABLE IF NOT EXISTS quote_writes (
   -- write look like it failed.
   reply_status TEXT,
   reply_error TEXT,
+  -- Path the approved quote's source PDF was copied to under backend/Quotes/
+  -- on a successful write (see quoteWriter/saveApprovedQuotePdf.ts). Null
+  -- when the write itself didn't succeed, or the copy failed (archive_error
+  -- explains why) — a copy failure never fails the MXI write it followed.
+  archived_pdf_path TEXT,
+  archive_error TEXT,
   approved_by TEXT,
   created_at TEXT NOT NULL
 );
@@ -264,8 +287,19 @@ export function openDb(dbPath: string): Database.Database {
   ensureColumn(db, 'quote_extractions', 'sender_first_name', 'TEXT');
   ensureColumn(db, 'quote_extractions', 'suggests_exchange', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'quote_extractions', 'exchange_evidence', 'TEXT');
+  // Warranty status read from the quote/email (2026-09-04). 'not_mentioned'
+  // is the default because silence about warranty is not a denial.
+  ensureColumn(db, 'quote_extractions', 'warranty_status', "TEXT NOT NULL DEFAULT 'not_mentioned'");
+  ensureColumn(db, 'quote_extractions', 'warranty_evidence', 'TEXT');
   ensureColumn(db, 'quote_writes', 'reply_status', 'TEXT');
   ensureColumn(db, 'quote_writes', 'reply_error', 'TEXT');
+  ensureColumn(db, 'quote_writes', 'archived_pdf_path', 'TEXT');
+  ensureColumn(db, 'quote_writes', 'archive_error', 'TEXT');
+  // CLAUDE_CODE_PROMPT (AWB -> Inbound shipment, 2026-09-09) — existing
+  // real audit.db files predate this column; CREATE TABLE IF NOT EXISTS
+  // alone won't retrofit them, same reason every other column above needed
+  // this same explicit ensureColumn call.
+  ensureColumn(db, 'esd_inferences', 'outbound_awb', 'TEXT');
   return db;
 }
 
@@ -289,11 +323,11 @@ export function insertInferenceRecords(
     INSERT INTO esd_inferences (
       run_id, order_number, vendor_name, ro_esd_raw, mxi_esd_raw, current_status,
       vendor_notes, order_status, classification, extracted_base_date, buffer_days_applied,
-      used_fallback, confidence, reasoning_note, inferred_esd, flag, delta_days_vs_mxi, created_at
+      used_fallback, confidence, reasoning_note, inferred_esd, flag, delta_days_vs_mxi, outbound_awb, created_at
     ) VALUES (
       @runId, @orderNumber, @vendorName, @roEsdRaw, @mxiEsdRaw, @currentStatus,
       @vendorNotes, @orderStatus, @classification, @extractedBaseDate, @bufferDaysApplied,
-      @usedFallback, @confidence, @reasoningNote, @inferredEsd, @flag, @deltaDaysVsMxi, @createdAt
+      @usedFallback, @confidence, @reasoningNote, @inferredEsd, @flag, @deltaDaysVsMxi, @outboundAwb, @createdAt
     )
   `);
 
@@ -318,6 +352,7 @@ export function insertInferenceRecords(
         inferredEsd: row.inferredEsd,
         flag: row.flag,
         deltaDaysVsMxi: row.deltaDaysVsMxi,
+        outboundAwb: row.outboundAwb,
         createdAt,
       });
     }
@@ -345,6 +380,7 @@ export interface EsdInferenceDbRow {
   inferredEsd: string | null;
   flag: string;
   deltaDaysVsMxi: number | null;
+  outboundAwb: string | null;
   createdAt: string;
 }
 
@@ -367,6 +403,7 @@ interface RawEsdInferenceRow {
   inferred_esd: string | null;
   flag: string;
   delta_days_vs_mxi: number | null;
+  outbound_awb: string | null;
   created_at: string;
 }
 
@@ -390,6 +427,7 @@ function rowToEsdInference(row: RawEsdInferenceRow): EsdInferenceDbRow {
     inferredEsd: row.inferred_esd,
     flag: row.flag,
     deltaDaysVsMxi: row.delta_days_vs_mxi,
+    outboundAwb: row.outbound_awb,
     createdAt: row.created_at,
   };
 }
@@ -447,11 +485,18 @@ export interface MxiWriteInsert {
   // CLAUDE_CODE_PROMPT (ESD writer changes, A4) — 'approved_note_only_write'
   // added alongside the existing two: a real MXI write (note + reissue)
   // that deliberately never touches the ESD field, distinct from
-  // 'approved_write' so the audit trail can tell the two apart. `action`
+  // 'approved_write' so the audit trail can tell the two apart.
+  // CLAUDE_CODE_PROMPT (manual actionable override, 2026-09-09) —
+  // 'approved_manual_override_write' added for a row the pipeline itself
+  // classified as skipped_no_commentary (no usable ESD, no real vendor
+  // commentary) that an analyst promoted by typing their own ESD/notes in
+  // the review table — kept distinct in the audit trail from
+  // 'approved_write' (a pipeline-derived ESD) precisely because the value
+  // written did not come from the inference engine at all. `action`
   // is a free-text column at the SQL level (see schema below) — no
   // migration needed, same pattern this project already uses for
   // write_up_actions.outcome.
-  action: 'approved_write' | 'approved_note_only_write' | 'rejected';
+  action: 'approved_write' | 'approved_note_only_write' | 'approved_manual_override_write' | 'rejected';
   inferredEsd: string | null;
   writeStatus: 'success' | 'failed' | 'skipped';
   errorMessage: string | null;
@@ -670,7 +715,14 @@ export interface WriteUpActionInsert {
     // querying both rows together for the same part/serial shows which
     // lines were quarantined, which recovered, and which still needed
     // review after the second attempt.
-    | 'quarantined';
+    | 'quarantined'
+    // Pins back-shop routing tool (2026-09-10) — a wrong-base pin's
+    // transfer destination was computed but not submitted (Create
+    // Shipment's own Ship To field and date pickers aren't yet confirmed
+    // against a live page — see pinsRoutingCli.ts). An analyst completes
+    // the shipment by hand; this row exists so what was computed and
+    // handed off is auditable.
+    | 'pending_manual';
   stationCode: string | null;
   routedLocation: string | null;
   filledFieldsJson: string | null;
@@ -990,6 +1042,8 @@ export interface QuoteExtractionInsert {
   senderFirstName: string | null;
   suggestsExchange: boolean;
   exchangeEvidence: string | null;
+  warrantyStatus: string;
+  warrantyEvidence: string | null;
   initialDisposition: string;
   confidence: string | null;
   reasoningNote: string | null;
@@ -1005,6 +1059,7 @@ export function insertQuoteExtraction(db: Database.Database, params: QuoteExtrac
       quote_date, promised_ship_date, lead_time_days, resolved_esd, esd_basis,
       needs_review, vendor_says_non_repairable, non_repairable_evidence,
       sender_first_name, suggests_exchange, exchange_evidence,
+      warranty_status, warranty_evidence,
       initial_disposition, confidence, reasoning_note, created_at
     ) VALUES (
       @runId, @sourceEntryId, @subject, @senderName, @senderEmail, @receivedTime,
@@ -1013,6 +1068,7 @@ export function insertQuoteExtraction(db: Database.Database, params: QuoteExtrac
       @quoteDate, @promisedShipDate, @leadTimeDays, @resolvedEsd, @esdBasis,
       @needsReview, @vendorSaysNonRepairable, @nonRepairableEvidence,
       @senderFirstName, @suggestsExchange, @exchangeEvidence,
+      @warrantyStatus, @warrantyEvidence,
       @initialDisposition, @confidence, @reasoningNote, @createdAt
     )
   `);
@@ -1045,6 +1101,75 @@ export function insertQuoteDisposition(
     new Date().toISOString(),
   );
   return Number(result.lastInsertRowid);
+}
+
+/**
+ * Records an analyst's exchange override (2026-09-04). Append-only, exactly
+ * like quote_dispositions — the extraction's own `suggests_exchange` is
+ * never rewritten, so what the model read and what the analyst decided stay
+ * separately visible.
+ */
+export function insertQuoteExchangeDecision(
+  db: Database.Database,
+  params: { quoteExtractionId: number; isExchange: boolean; decidedBy: string | null },
+): number {
+  const stmt = db.prepare(
+    'INSERT INTO quote_exchange_decisions (quote_extraction_id, is_exchange, decided_by, created_at) VALUES (?, ?, ?, ?)',
+  );
+  const result = stmt.run(
+    params.quoteExtractionId,
+    params.isExchange ? 1 : 0,
+    params.decidedBy,
+    new Date().toISOString(),
+  );
+  return Number(result.lastInsertRowid);
+}
+
+/**
+ * Effective exchange state per extraction for one run: what the model read,
+ * overridden by the analyst's most recent decision if they made one.
+ *
+ * Returns the two halves separately rather than a single boolean, so the
+ * review table can say WHY a row is (or is not) an exchange — see
+ * quoteWriter/exchangeDecision.ts.
+ */
+export function getEffectiveQuoteExchanges(
+  db: Database.Database,
+  runId: number,
+): Map<number, { vendorSuggested: boolean; humanDecision: boolean | null; decidedBy: string | null }> {
+  const rows = db
+    .prepare(
+      `
+    SELECT e.id AS extraction_id,
+           e.suggests_exchange,
+           x.is_exchange AS human_decision,
+           x.decided_by
+    FROM quote_extractions e
+    LEFT JOIN quote_exchange_decisions x
+      ON x.id = (
+        SELECT id FROM quote_exchange_decisions
+        WHERE quote_extraction_id = e.id
+        ORDER BY id DESC LIMIT 1
+      )
+    WHERE e.run_id = ?
+  `,
+    )
+    .all(runId) as Array<{
+    extraction_id: number;
+    suggests_exchange: number;
+    human_decision: number | null;
+    decided_by: string | null;
+  }>;
+
+  const result = new Map<number, { vendorSuggested: boolean; humanDecision: boolean | null; decidedBy: string | null }>();
+  for (const row of rows) {
+    result.set(row.extraction_id, {
+      vendorSuggested: row.suggests_exchange === 1,
+      humanDecision: row.human_decision === null ? null : row.human_decision === 1,
+      decidedBy: row.decided_by,
+    });
+  }
+  return result;
 }
 
 /**
@@ -1103,6 +1228,8 @@ export interface QuoteWriteInsert {
   markedRead: boolean;
   replyStatus: 'drafted' | 'sent' | 'failed' | 'skipped' | null;
   replyError: string | null;
+  archivedPdfPath: string | null;
+  archiveError: string | null;
   approvedBy: string | null;
 }
 
@@ -1112,11 +1239,11 @@ export function insertQuoteWrite(db: Database.Database, params: QuoteWriteInsert
     INSERT INTO quote_writes (
       quote_extraction_id, order_number, target_env, written_price, written_esd,
       write_status, error_message, marked_read, reply_status, reply_error,
-      approved_by, created_at
+      archived_pdf_path, archive_error, approved_by, created_at
     ) VALUES (
       @quoteExtractionId, @orderNumber, @targetEnv, @writtenPrice, @writtenEsd,
       @writeStatus, @errorMessage, @markedRead, @replyStatus, @replyError,
-      @approvedBy, @createdAt
+      @archivedPdfPath, @archiveError, @approvedBy, @createdAt
     )
   `);
   const result = stmt.run({

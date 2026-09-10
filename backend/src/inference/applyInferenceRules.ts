@@ -3,6 +3,7 @@ import type { EsdClassification, EsdFlag, InferenceRecord, MatchedOrder, MatchFl
 import { PARTS_PENDING_FALLBACK_DAYS, QUOTE_BUFFER_DAYS, SHIPPING_BUFFER_DAYS } from './constants.js';
 import { parseFlexibleDate } from './dateUtils.js';
 import { resolveExtractedDateYear } from './bareDateYear.js';
+import { isOrderStatusReceived } from './statusRules.js';
 import type { EsdInferenceProvider } from './types.js';
 
 interface BaseFields {
@@ -13,6 +14,7 @@ interface BaseFields {
   currentStatus: string | null;
   vendorNotes: string | null;
   orderStatus: string | null;
+  outboundAwb: string | null;
 }
 
 interface ComputedFields {
@@ -71,6 +73,7 @@ async function processOrder(
     currentStatus: order.vendor?.currentStatus ?? null,
     vendorNotes: order.vendor?.vendorNotes ?? null,
     orderStatus: order.cra?.orderStatus ?? null,
+    outboundAwb: order.vendor?.outboundAwb ?? null,
   };
 
   // No vendor data at all (orphaned_cra_row) — nothing to run inference on.
@@ -89,6 +92,29 @@ async function processOrder(
       },
       order.flag,
       todayStart,
+    );
+  }
+
+  // Step 0 — CRA Order Status already says the part was received back.
+  // Checked before Step 1 (and before spending an AI call in Step 2) since
+  // it's a deterministic, no-cost answer when it applies. Only ever fires
+  // when a CRA OOR file was supplied (orderStatus is null otherwise).
+  if (isOrderStatusReceived(base.orderStatus)) {
+    return finalizeRecord(
+      base,
+      {
+        classification: 'order_received',
+        extractedBaseDate: null,
+        bufferDaysApplied: null,
+        usedFallback: false,
+        confidence: 'high',
+        reasoningNote: `CRA Order Status is "${base.orderStatus}" — the part has already been received back, so ESD tracking no longer applies.`,
+        inferredEsd: null,
+        aiCallMade: false,
+      },
+      order.flag,
+      todayStart,
+      'no_esd_found',
     );
   }
 
@@ -223,9 +249,11 @@ function finalizeRecord(
   todayStart: Date,
   /**
    * Forces a specific outcome regardless of Step 4's date reasoning. Used
-   * only for 'inference_unavailable', where there is no computed date to
-   * reason about and calling it "no ESD found" would misreport the order.
-   * An orphan flag still wins — an orphaned row was never inferable.
+   * for 'inference_unavailable' (no computed date to reason about, and
+   * calling it "no ESD found" would misreport the order) and for the
+   * Step 0 order_received short-circuit above ('no_esd_found' — a
+   * deterministic "moot," not a stale-date rejection). An orphan flag
+   * still wins — an orphaned row was never inferable.
    */
   overrideFlag?: EsdFlag,
 ): InferenceRecord {

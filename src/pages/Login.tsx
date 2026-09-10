@@ -20,7 +20,7 @@ export default function Login() {
     setIsSubmitting(true)
     try {
       await login(username, password)
-      navigate('/repair-orders', { replace: true })
+      navigate('/order-write-ups', { replace: true })
     } catch (err) {
       setError(err instanceof AuthApiError ? err.message : 'Something went wrong logging in.')
     } finally {

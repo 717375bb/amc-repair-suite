@@ -25,16 +25,50 @@
  * user direction). This module only records the signal so that process can
  * find these rows when it's built.
  */
-export type QuoteDisposition = 'pending' | 'excluded_nrep' | 'excluded_ber' | 'excluded_other';
+/**
+ * `negotiating` added 2026-09-04: a price negotiation has been sent to the
+ * vendor and the quoted price is no longer the one PSA intends to accept.
+ * Held out of the write set so the superseded price cannot be written to
+ * MXI while the conversation is still open — per the analyst, who chose
+ * "hold it back until you decide" over leaving it writable.
+ */
+export type QuoteDisposition =
+  | 'pending'
+  | 'negotiating'
+  | 'excluded_nrep'
+  | 'excluded_ber'
+  | 'excluded_other';
 
 /** The two dispositions that mean "this part is heading for scrap". */
 export const SCRAP_DISPOSITIONS: readonly QuoteDisposition[] = Object.freeze(['excluded_nrep', 'excluded_ber']);
 
-/** The dispositions a human may set directly. `excluded_nrep` is absent on purpose — it's vendor-derived, not a human choice. */
-export type HumanSettableDisposition = 'pending' | 'excluded_ber' | 'excluded_other';
+/**
+ * The dispositions a human may set directly.
+ *
+ * `excluded_nrep` USED TO BE ABSENT here, on the reasoning that NREP is
+ * vendor-derived and therefore not a human choice. **Changed 2026-09-04 on
+ * the analyst's instruction**: the AI still makes the initial call from the
+ * document, but the analyst must be able to mark a row NREP themselves when
+ * they disagree or when the vendor said it somewhere the extraction did not
+ * read. The origin of the decision is not lost — `quote_dispositions`
+ * records `decided_by` on every human row, so a human NREP and a
+ * vendor-derived one remain distinguishable in the audit trail.
+ */
+export type HumanSettableDisposition =
+  | 'pending'
+  | 'negotiating'
+  | 'excluded_nrep'
+  | 'excluded_ber'
+  | 'excluded_other';
 
 export function isHumanSettableDisposition(value: string): value is HumanSettableDisposition {
-  return value === 'pending' || value === 'excluded_ber' || value === 'excluded_other';
+  return (
+    value === 'pending' ||
+    value === 'negotiating' ||
+    value === 'excluded_nrep' ||
+    value === 'excluded_ber' ||
+    value === 'excluded_other'
+  );
 }
 
 /**
@@ -101,6 +135,11 @@ export function resolveWriteAction(
   //   3. exchange        — vendor-stated, and beats vendor-stated NREP.
   //   4. excluded_nrep   — vendor-stated, with no exchange on offer.
   //   5. price_line      — an ordinary repair.
+  //
+  // `negotiating` sits at the very top (2026-09-04): a negotiation has been
+  // sent, so the price on this row is one PSA has explicitly asked the
+  // vendor to change. Writing it would commit to a number already disputed.
+  if (disposition === 'negotiating') return 'none';
   if (disposition === 'excluded_other') return 'none';
   if (disposition === 'excluded_ber') return 'scrap_price';
   if (suggestsExchange) return 'exchange';
@@ -109,7 +148,7 @@ export function resolveWriteAction(
 }
 
 export function isWritable(disposition: QuoteDisposition): boolean {
-  return disposition !== 'excluded_other';
+  return disposition !== 'excluded_other' && disposition !== 'negotiating';
 }
 
 export function writeActionLabel(action: QuoteWriteAction): string {
@@ -127,8 +166,10 @@ export function writeActionLabel(action: QuoteWriteAction): string {
 
 export function dispositionLabel(disposition: QuoteDisposition): string {
   switch (disposition) {
+    case 'negotiating':
+      return 'Negotiating — price query sent to vendor';
     case 'excluded_nrep':
-      return 'NREP — vendor says non-repairable';
+      return 'NREP — non-repairable';
     case 'excluded_ber':
       return 'BER — beyond economical repair';
     case 'excluded_other':

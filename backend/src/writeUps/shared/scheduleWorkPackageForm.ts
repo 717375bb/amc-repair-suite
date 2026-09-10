@@ -2,7 +2,7 @@ import type { Page } from 'playwright';
 import { extractBaseStation, routeBaseStation } from './approvedLocations.js';
 import { createLogger } from '../../logging/logger.js';
 
-import { clickActionLink } from './clickActionLink.js';
+import { clickActionLink, clickActionLinkIfPresent } from './clickActionLink.js';
 const log = createLogger('writeup');
 
 const CLICK_DELAY_MS = 750;
@@ -191,10 +191,64 @@ export async function fillNotesToVendor(page: Page, value: string): Promise<void
   await pace(page);
 }
 
-/** Exact-match "OK" link that confirms/saves the Schedule Work Package form. */
-export async function confirmScheduleWorkPackage(page: Page): Promise<void> {
+/**
+ * CLAUDE_CODE_PROMPT (past-due work package confirmation, 2026-09-10) —
+ * real, from discovery-pastdue-recording.ts: when the work package being
+ * scheduled has a past-due date, MXI raises an extra approval interstitial
+ * with a YES link between the Schedule Work Package "OK" and the generated
+ * order number appearing. The analyst's captured resolution is exactly one
+ * more click; nothing else about the flow changes.
+ *
+ * Presence-checked, never assumed — the same discipline
+ * handleMinimumPurchaseAmountConfirmation (shared/authFlow.ts) uses for its
+ * own sometimes-there dialog, and the same lesson the ESD writer learned
+ * the hard way: an unconditional wait for a dialog that only sometimes
+ * appears turns a successful write into a spurious 30s timeout (see
+ * PHASE2_MXI_WRITER_SPEC.md's "RESOLVED (2026-08-21)" section, where
+ * exactly that pattern made a working edit look like a failure).
+ *
+ * Keyed on the YES link itself rather than the dialog's message text,
+ * because codegen records actions and not page content — the recording
+ * gives the click but never captured the wording. That is safe HERE
+ * specifically: both normal recordings (VC01187 and 0T1Y4 warranty) go
+ * straight from this OK to the order-number link with no YES in between,
+ * so a YES present at this exact point is the past-due dialog. It is
+ * deliberately checked only here and not later in the flow, where a YES
+ * genuinely does belong to a different dialog (authFlow's minimum-purchase
+ * confirmation).
+ *
+ * `exact: true` because clickActionLinkIfPresent matches by substring by
+ * default and "YES" is short enough to appear inside a longer link name.
+ * The 3s budget is a deliberate compromise: long enough for a real dialog
+ * that has already had confirmScheduleWorkPackage's own 750ms settle, short
+ * enough that the overwhelmingly common no-dialog case doesn't add real
+ * time to every line of a large run.
+ */
+async function handlePastDueConfirmation(page: Page): Promise<boolean> {
+  const clicked = await clickActionLinkIfPresent(page, 'YES', {
+    exact: true,
+    timeoutMs: 3_000,
+    label: 'past-due work package confirmation (YES)',
+  });
+  if (clicked) {
+    log.info('[schedule-wp] past-due work package confirmation appeared — clicked YES (real, from discovery-pastdue-recording.ts)');
+    await pace(page);
+  }
+  return clicked;
+}
+
+/**
+ * Exact-match "OK" link that confirms/saves the Schedule Work Package form,
+ * followed by the conditional past-due confirmation above.
+ *
+ * Returns whether that extra confirmation actually fired, so a caller can
+ * record it — a rare branch that silently self-heals is exactly the kind of
+ * thing that should still be visible in the run log when it happens.
+ */
+export async function confirmScheduleWorkPackage(page: Page): Promise<boolean> {
   await page.getByRole('link', { name: 'OK', exact: true }).click();
   await pace(page);
+  return await handlePastDueConfirmation(page);
 }
 
 /**

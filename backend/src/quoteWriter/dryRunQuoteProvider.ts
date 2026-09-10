@@ -45,7 +45,9 @@ export class DryRunQuoteProvider implements QuoteExtractionProvider {
       exchangeEvidence: null,
       senderFirstName: null,
       confidence: 'low',
-      reasoningNote: 'Dry run — no PDF was read and no API call was made.',
+      warrantyStatus: 'not_mentioned' as const,
+    warrantyEvidence: null,
+    reasoningNote: 'Dry run — no PDF was read and no API call was made.',
     };
   }
 }

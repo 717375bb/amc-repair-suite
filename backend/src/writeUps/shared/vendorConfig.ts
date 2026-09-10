@@ -1,5 +1,6 @@
 import { createLogger } from '../../logging/logger.js';
 import { resolvePurchasingContactForVendorCode } from './craAssignments.js';
+import type { ReturnToLocationRotation } from './returnToLocationRotation.js';
 const log = createLogger('writeup');
 
 /**
@@ -133,6 +134,40 @@ export interface VendorConfig {
    * behavior); explicit false = skipped for that vendor.
    */
   checkPreferredVendor?: boolean;
+  /**
+   * CLAUDE_CODE_PROMPT (BAE Systems return-to rotation, 2026-09-10) —
+   * optional. When set, this vendor's Return To Location is NOT derived
+   * from the line's own base station (the normal
+   * transformReturnToLocation rule); it cycles through a fixed list
+   * instead, advancing one step per successfully written line and
+   * persisting across restarts. BAE Systems (63760) only today, per
+   * explicit user direction.
+   *
+   * A structured sub-object rather than a boolean flag, following the
+   * shipsetCase precedent: it carries real data (the ordered docks) plus
+   * an id for the audit trail, and a bare flag would leave the list of
+   * locations stranded somewhere else. See
+   * returnToLocationRotation.ts for how the pointer is derived.
+   */
+  returnToLocationRotation?: ReturnToLocationRotation;
+  /**
+   * GIVEN a vendor whose real-world process is "PSA issues the order, then
+   * the analyst handles getting it to dock themselves"
+   * WHEN this vendor's terminal state is ISSUE_AND_DOCK
+   * THEN Issue Order still runs (and is still verified) exactly as normal,
+   *      but Move to Dock is never attempted — the order is left issued,
+   *      not docked, per explicit user direction (Andres Sabido's full
+   *      vendor batch, 2026-09-10: "he has a special process that he
+   *      wants to do himself").
+   *
+   * Deliberately a plain per-vendor flag, not reuse of the existing
+   * shipset-only `moveToDockOnInitialRun` mechanism — that one is gated on
+   * a matched `shipsetCase` (today, only 7A9Y2) and carries several
+   * unrelated deltas alongside it; this flag applies the one, narrower
+   * behavior to any vendor directly, with no shipset detection required.
+   * Undefined/false = unchanged, normal dock behavior (the default).
+   */
+  skipMoveToDock?: boolean;
 }
 
 /**
@@ -258,7 +293,7 @@ export function buildWarrantyTerminalStateVendorConfig(
   vendorCode: string,
   displayName: string,
   overrides?: Partial<
-    Pick<VendorConfig, 'form' | 'authFlowPolicy' | 'defaultTerminalState' | 'warrantyEligible' | 'shipsetCase' | 'hasPartDetailsStep' | 'needsRemovalDateInNotes'>
+    Pick<VendorConfig, 'form' | 'authFlowPolicy' | 'defaultTerminalState' | 'warrantyEligible' | 'shipsetCase' | 'hasPartDetailsStep' | 'needsRemovalDateInNotes' | 'returnToLocationRotation' | 'skipMoveToDock'>
   >,
 ): VendorConfig {
   // CLAUDE_CODE_PROMPT (CRA/vendor grouping, 2026-08-19) — every vendor in

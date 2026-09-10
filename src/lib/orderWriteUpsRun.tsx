@@ -65,6 +65,21 @@ interface OrderWriteUpsRunContextValue {
    */
   notYetAttemptedLines: DiscoveredLineSummary[] | null
 
+  /**
+   * CLAUDE_CODE_PROMPT (re-review after execute, 2026-09-10) — per
+   * explicit user direction: after a run finishes, the analyst wants to
+   * see the FULL original discovery list again (deselected lines
+   * included, so they can be picked up in a follow-up run), with
+   * already-written lines visible but not re-selectable (a second write
+   * would create a genuine second MXI order for the same part — not
+   * offered). Maps every 'completed' discovery line's lineId to its most
+   * recent TERMINAL execute-log outcome, using the same composite-key
+   * matching notYetAttemptedLines already uses. Null until both a
+   * discoveryRun and an executeRun exist; a line with no entry here was
+   * never attempted at all.
+   */
+  writeResultByLineId: Map<string, RunLogEvent> | null
+
   /** True once activeJob re-attachment has been checked at least once — lets the page distinguish "nothing tracked" from "still checking." */
   attachChecked: boolean
 
@@ -231,6 +246,24 @@ export function OrderWriteUpsRunProvider({ children }: { children: ReactNode }) 
     return discoveryRun.lines.filter((l) => l.status === 'completed' && !attemptedKeys.has(l.lineId))
   }, [discoveryRun, executeRun, executeEvents])
 
+  const writeResultByLineId = useMemo<Map<string, RunLogEvent> | null>(() => {
+    if (!discoveryRun?.lines || !executeRun) return null
+    const byKey = new Map<string, RunLogEvent>()
+    // Later events win — a retried line's most recent terminal outcome is
+    // the one that matters, same "last write wins" reasoning
+    // notYetAttemptedLines' attemptedKeys already relies on implicitly.
+    for (const e of executeEvents) {
+      if (e.status === 'in_progress' || e.status === 'retrying') continue
+      byKey.set(`${e.vendorId}::${e.partNumber}::${e.serialNumber}`, e)
+    }
+    const result = new Map<string, RunLogEvent>()
+    for (const line of discoveryRun.lines) {
+      const event = byKey.get(line.lineId)
+      if (event) result.set(line.lineId, event)
+    }
+    return result
+  }, [discoveryRun, executeRun, executeEvents])
+
   // Reports into the shared registry so the sidebar can show this tab as
   // running from anywhere. Read-only: this provider remains the single
   // owner of its own polling and cancel semantics.
@@ -253,6 +286,7 @@ export function OrderWriteUpsRunProvider({ children }: { children: ReactNode }) 
         executeRun,
         executeEvents,
         notYetAttemptedLines,
+        writeResultByLineId,
         attachChecked,
         startDiscoveryTracking,
         startExecuteTracking,

@@ -17,6 +17,7 @@ import QuotesReports from './pages/QuotesReports'
 import WarrantyAssessment from './pages/WarrantyAssessment'
 import VendorKpiReports from './pages/VendorKpiReports'
 import StatisticalModels from './pages/StatisticalModels'
+import PowerBiReports from './pages/PowerBiReports'
 
 function App() {
   return (
@@ -28,7 +29,7 @@ function App() {
 
       <Route element={<RequireAuth />}>
         <Route element={<AppLayout />}>
-          <Route index element={<Navigate to="/repair-orders" replace />} />
+          <Route index element={<Navigate to="/order-write-ups" replace />} />
           <Route path="/repair-orders" element={<RepairOrders />} />
           <Route path="/open-orders" element={<OpenOrderTracking />} />
           <Route path="/backshop-repairs" element={<BackshopRepairs />} />
@@ -41,6 +42,7 @@ function App() {
           <Route path="/discrepancies" element={<Discrepancies />} />
           <Route path="/warranty-assessment" element={<WarrantyAssessment />} />
           <Route path="/vendor-kpi" element={<VendorKpiReports />} />
+          <Route path="/powerbi-reports" element={<PowerBiReports />} />
           <Route path="/statistical-models" element={<StatisticalModels />} />
           <Route path="/change-password" element={<ChangePassword />} />
         </Route>
