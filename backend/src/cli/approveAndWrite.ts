@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import Database from 'better-sqlite3';
 import { getPriorMxiWriteEnvironments, insertMxiWrite } from '../db/db.js';
+import { resolveInboundAwbFromNotes } from '../inference/inboundAwb.js';
 import { createReadyMxiClient } from '../mxiWriter/cliMxiClient.js';
 import { assembleNoteText, toMxiDateFormat } from '../mxiWriter/esdFormatting.js';
 import { parseEnvFlag } from '../mxiWriter/parseEnvFlag.js';
@@ -70,6 +71,7 @@ type RawEsdInferenceRow = {
 };
 
 function toInferenceRecord(r: RawEsdInferenceRow): InferenceRecord {
+  const inboundAwbDetection = resolveInboundAwbFromNotes(r.vendor_notes);
   return {
     orderNumber: r.order_number,
     vendorName: r.vendor_name,
@@ -81,6 +83,8 @@ function toInferenceRecord(r: RawEsdInferenceRow): InferenceRecord {
     // Optional on the raw row: rows written before this column existed
     // simply have no property here rather than an explicit null.
     outboundAwb: r.outbound_awb ?? null,
+    inboundAwb: inboundAwbDetection.awb,
+    inboundAwbAmbiguous: inboundAwbDetection.ambiguous,
     classification: r.classification as InferenceRecord['classification'],
     extractedBaseDate: r.extracted_base_date,
     bufferDaysApplied: r.buffer_days_applied,

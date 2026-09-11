@@ -59,14 +59,31 @@ export function startHeartbeat(): void {
   ping()
   setInterval(ping, HEARTBEAT_INTERVAL_MS)
 
-  // Fires on an actual tab close or navigation away — NOT on the tab
-  // merely losing focus or being backgrounded (that's `visibilitychange`,
-  // deliberately not used here, since it fires far too often to mean
-  // "the tab is gone"). sendBeacon (not fetch) is required here: a fetch
-  // call started inside a pagehide handler is not guaranteed to complete
-  // once the page starts unloading, while sendBeacon is specifically
-  // designed by browser vendors to survive it.
+  // CLAUDE_CODE_PROMPT (third pass, 2026-09-11) — pagehide does NOT mean
+  // "this tab is gone for good", which is what the previous version of
+  // this comment assumed and what a real production incident then
+  // disproved (a live write-up run was killed by this, mid-part — see
+  // server.ts's heartbeat block). It also fires on a plain RELOAD, on
+  // navigating away, on a browser discarding a backgrounded tab, and from
+  // any ONE tab when the app is open in several.
+  //
+  // So this is now a HINT, not a verdict: the backend records it, a
+  // reloaded page's own first ping clears it again, and the launcher only
+  // acts once the flag has survived a confirmation window with no tab
+  // pinging back (run-suite-hidden.cjs's CLOSE_CONFIRM_MS). sendBeacon
+  // rather than fetch because a fetch started during unload is not
+  // guaranteed to be delivered.
   window.addEventListener('pagehide', () => {
     navigator.sendBeacon('/api/heartbeat-closed')
+  })
+
+  // Ping the moment the tab becomes visible again, rather than waiting up
+  // to a full interval for the next timer tick. Matters after the machine
+  // has been asleep or the tab throttled for a long stretch: the backend's
+  // "last heartbeat" age is what the launcher's fallback timeout reads, so
+  // refreshing it immediately on wake closes the window where a long sleep
+  // could still look like an abandoned tab.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') ping()
   })
 }

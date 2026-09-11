@@ -53,10 +53,30 @@ const FRONTEND_URL = 'http://127.0.0.1:5173';
 const HEARTBEAT_STATUS_URL = 'http://127.0.0.1:3001/api/heartbeat-status';
 const APP_URL = 'http://localhost:5173';
 
-// How long to wait, from process start, before the heartbeat-timeout check
-// is even allowed to fire — covers backend/frontend startup time plus the
-// time for the browser to actually load the page and send its first ping.
-const STARTUP_GRACE_MS = 60_000;
+// How long to wait, AFTER THE BROWSER IS ACTUALLY OPENED, before the
+// heartbeat checks are allowed to fire at all — the time for the page to
+// load and send its first ping.
+//
+// CLAUDE_CODE_PROMPT (third pass, 2026-09-11) — REAL BUG FOUND AND FIXED:
+// this used to be measured from LAUNCHER start, and the whole grace was
+// consumed before the browser even opened. Real log, 2026-09-11T11:45:31Z:
+// the launcher started, the backend took 59 SECONDS to come up (it does a
+// real MXI login at boot), the browser opened at 11:46:30, the 60s grace
+// expired one second later, and at 11:46:35 the check fired, saw that no
+// heartbeat had arrived in the five seconds since the browser opened, and
+// killed everything with "no heartbeat ever reached the backend." Anchored
+// to the browser-open moment instead, so a slow backend boot can no longer
+// eat the page's own load time.
+const STARTUP_GRACE_MS = 90_000;
+/**
+ * How long `explicitlyClosed` must stay continuously true before it's
+ * acted on. `pagehide` fires on a plain RELOAD and on closing any ONE of
+ * several open tabs, not just on the last tab genuinely going away — and
+ * a reloaded page's first heartbeat CLEARS the flag server-side (see
+ * server.ts), so waiting this out is what tells a real close apart from a
+ * refresh. Comfortably longer than a reload takes.
+ */
+const CLOSE_CONFIRM_MS = 45_000;
 // CLAUDE_CODE_PROMPT (real production incident, 2026-09-10, same day) —
 // REAL BUG FOUND AND FIXED: this was 30_000 (30s), on the theory that a
 // backgrounded tab's throttled-but-non-zero timer would still comfortably
@@ -253,29 +273,37 @@ async function main() {
   }
 
   spawn('cmd', ['/c', 'start', '', APP_URL], { windowsHide: true, detached: true }).unref();
+  // The grace clock starts HERE, not at launcher start — see
+  // STARTUP_GRACE_MS's own comment for the real incident that caused.
+  const browserOpenedAt = Date.now();
   log(`Opened ${APP_URL} in the browser.`);
 
   // Shutdown-decision loop — the sole shutdown authority, see module
-  // docstring. Three distinct signals, checked in order of how much they
-  // should be trusted:
-  //   1. explicitlyClosed — a real, browser-guaranteed "the tab actually
-  //      closed" signal (heartbeat.ts's pagehide handler). Acted on
-  //      immediately; this is the normal, expected way this fires.
-  //   2. msSinceLastHeartbeat past HEARTBEAT_TIMEOUT_MS — an INFERRED
-  //      signal (no ping received in a while), which real production logs
-  //      proved unreliable at a short timeout (see that constant's own
-  //      comment) — now purely a long safety net for the case where
-  //      pagehide never fires at all (a crash, a forced kill).
-  //   3. The heartbeat-status endpoint itself being unreachable — could be
-  //      a genuinely dead backend, or could be one transient blip (the
-  //      backend momentarily busy). Requires 3 CONSECUTIVE failures
-  //      (~15s at the default poll interval) before acting, rather than
-  //      the previous behavior of treating a single failed check as
-  //      instant proof of anything — same "don't act on an inferred
-  //      signal without persistence" reasoning as point 2.
+  // docstring.
+  //
+  // CLAUDE_CODE_PROMPT (third pass, 2026-09-11) — the ONE rule that
+  // matters most is the first check below: never shut down while the
+  // backend says a job is running. Two earlier passes each replaced one
+  // ambiguous browser signal with another and each still killed a live
+  // production run (see HEARTBEAT_TIMEOUT_MS and STARTUP_GRACE_MS's own
+  // comments for the two real incidents, and server.ts's heartbeat block
+  // for the third). No browser-derived signal can distinguish "the
+  // analyst is done" from "the analyst reloaded / switched tabs / locked
+  // the laptop" — so the deciding question is asked of the backend
+  // instead, which actually knows whether work is in flight.
+  //
+  // The remaining signals, in order of how much they're trusted:
+  //   1. explicitlyClosed, held continuously for CLOSE_CONFIRM_MS — a
+  //      real close, not a reload (a reload's own first ping clears the
+  //      flag server-side long before the window elapses).
+  //   2. msSinceLastHeartbeat past HEARTBEAT_TIMEOUT_MS — a long backstop
+  //      for the case where the browser dies without ever firing pagehide.
+  //   3. heartbeat-status unreachable 3 times running — the backend
+  //      itself is gone, not a single transient blip.
   let consecutiveStatusFailures = 0;
+  let closedSinceMs = null;
   setInterval(async () => {
-    if (Date.now() - startedAt < STARTUP_GRACE_MS) return;
+    if (Date.now() - browserOpenedAt < STARTUP_GRACE_MS) return;
     const status = await getHeartbeatStatus();
 
     if (status === null) {
@@ -287,13 +315,47 @@ async function main() {
     }
     consecutiveStatusFailures = 0;
 
-    if (status.explicitlyClosed === true) {
-      shutdownOnce('frontend tab was closed');
+    // THE GUARD. Nothing below this line can fire while real work is in
+    // flight — a job half-written into MXI is not recoverable by
+    // restarting the launcher, and idle RAM is.
+    if (status.busy === true) {
+      if (closedSinceMs !== null) {
+        log(`Shutdown signal held off — backend busy with: ${(status.busyWith || []).join(', ') || 'a job'}`);
+      }
       return;
     }
+
+    if (status.explicitlyClosed === true) {
+      if (closedSinceMs === null) {
+        closedSinceMs = Date.now();
+        log(`Frontend reported a tab close — confirming over ${CLOSE_CONFIRM_MS / 1000}s before stopping.`);
+        return;
+      }
+      if (Date.now() - closedSinceMs >= CLOSE_CONFIRM_MS) {
+        shutdownOnce('frontend tab was closed (confirmed — no tab pinged back)');
+      }
+      return;
+    }
+    // A ping arrived after a close signal: a reload came back, or another
+    // tab is still open. Not a close at all.
+    if (closedSinceMs !== null) {
+      log('A heartbeat arrived after the close signal — that was a reload or another tab, not a close. Staying up.');
+      closedSinceMs = null;
+    }
+
     const ms = status.msSinceLastHeartbeat;
-    if (ms === null || ms > HEARTBEAT_TIMEOUT_MS) {
-      shutdownOnce(ms === null ? 'no heartbeat ever reached the backend' : `no heartbeat for ${ms}ms (fallback safety net)`);
+    if (ms !== null && ms > HEARTBEAT_TIMEOUT_MS) {
+      shutdownOnce(`no heartbeat for ${ms}ms (fallback safety net)`);
+      return;
+    }
+    // `ms === null` means no tab has EVER pinged. It used to shut down the
+    // instant the startup grace lapsed, which killed a healthy suite whose
+    // page simply hadn't finished loading (see STARTUP_GRACE_MS's comment).
+    // It still needs SOME backstop, or a browser that never opened would
+    // leave the suite running forever — so it's held to the same long
+    // timeout as a heartbeat that stopped, measured from browser-open.
+    if (ms === null && Date.now() - browserOpenedAt > HEARTBEAT_TIMEOUT_MS) {
+      shutdownOnce(`no heartbeat ever reached the backend within ${HEARTBEAT_TIMEOUT_MS / 60_000} minutes of opening the browser`);
     }
   }, HEARTBEAT_POLL_MS);
 }

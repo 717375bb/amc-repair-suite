@@ -2,6 +2,7 @@ import { addDays, differenceInCalendarDays, formatISO, isBefore, parseISO, start
 import type { EsdClassification, EsdFlag, InferenceRecord, MatchedOrder, MatchFlag, RunSummary } from '../types.js';
 import { PARTS_PENDING_FALLBACK_DAYS, QUOTE_BUFFER_DAYS, SHIPPING_BUFFER_DAYS } from './constants.js';
 import { parseFlexibleDate } from './dateUtils.js';
+import { resolveInboundAwbFromNotes } from './inboundAwb.js';
 import { resolveExtractedDateYear } from './bareDateYear.js';
 import { isOrderStatusReceived } from './statusRules.js';
 import type { EsdInferenceProvider } from './types.js';
@@ -298,8 +299,15 @@ function buildRecord(
   inferredEsdIso: string | null,
   deltaDaysVsMxi: number | null,
 ): InferenceRecord {
+  // Per explicit user direction (2026-09-10) — see types.ts's own
+  // docblock on inboundAwb — computed once here, the single terminal
+  // point every InferenceRecord passes through, rather than at each of
+  // finalizeRecord's several call sites.
+  const inboundAwbDetection = resolveInboundAwbFromNotes(base.vendorNotes);
   return {
     ...base,
+    inboundAwb: inboundAwbDetection.awb,
+    inboundAwbAmbiguous: inboundAwbDetection.ambiguous,
     classification: computed.classification,
     extractedBaseDate: computed.extractedBaseDate,
     bufferDaysApplied: computed.bufferDaysApplied,

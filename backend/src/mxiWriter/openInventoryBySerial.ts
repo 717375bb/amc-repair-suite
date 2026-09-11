@@ -40,8 +40,16 @@ export interface OpenInventoryResult {
  * Shared by both openers below so there is exactly one implementation of the
  * navigation and of the "did MXI actually answer" wait. Returns null when the
  * search succeeded; a failed OpenInventoryResult otherwise.
+ *
+ * Exported (2026-09-12) so the pins back-shop routing tool (pinRouting.ts)
+ * can reuse this exact search — confirmed live to also work for a
+ * BN-prefixed identifier ("BN 398511"), not just a plain serial — while
+ * using its OWN result-row click, since the real result link's accessible
+ * name was recorded WITHOUT an exact full-string match
+ * (discovery-pins-start-recording.ts), unlike this file's two existing
+ * openers below.
  */
-async function runSerialSearch(
+export async function runSerialSearch(
   page: Page,
   todoListUrl: string,
   serialNumber: string,

@@ -2036,3 +2036,690 @@ condition.
 
 Tests: 283/283 passing, `tsc --noEmit` clean, `npm run build` clean,
 `node --check` clean on the orchestrator script.
+
+## Session 2026-09-10 (fifth) — inbound AWB from Vendor Notes, one-day-early ESD bug fixed
+
+Two ESD writer follow-ups.
+
+**One-day-early ESD — root-caused as a genuine bug, not a rule.** The user
+reported ESDs landing one day before what the vendor's report actually
+states, and asked to undo it whether or not they'd previously asked for
+it. Grepped the whole backend for any deliberate `-1`/`subDays` logic
+first — none exists, confirming this was never an intentional rule.
+Root cause, reproduced directly against date-fns before touching anything:
+`parsers/cellUtils.ts`'s `cleanCell()` converts a Date-typed Excel cell via
+`.toISOString()`, and ExcelJS always builds that Date at UTC MIDNIGHT for
+the cell's calendar date (Excel dates carry no timezone) — e.g. a cell
+showing "September 2" becomes the string `"2026-09-02T00:00:00.000Z"`.
+`inference/dateUtils.ts`'s `parseFlexibleDate()` fed that straight into
+`parseISO()`, which correctly treats the "Z" as a real UTC instant — and
+every later date-fns call in the pipeline (`addDays`, `formatISO`,
+`differenceInCalendarDays`) works in LOCAL time, so on this US-timezone
+server that instant always falls on the PREVIOUS calendar day locally.
+This hit `applyInferenceRules.ts`'s Step 1 (`roEsdDate = parseFlexibleDate
+(base.roEsdRaw)`) — literally the vendor's own stated RO ESD, read
+straight off their report, before any AI/buffer logic. Fixed by stripping
+the synthetic midnight-UTC time before parsing whenever the string is
+EXACTLY `YYYY-MM-DDT00:00:00[.000]Z` (never a real timezone-meaningful
+value from this pipeline's actual sources), so it's treated the same safe
+"local calendar date" way a bare `YYYY-MM-DD` already was. 5 new tests in
+`dateUtils.test.ts`, including the exact reproduced scenario.
+
+**Inbound AWB from Vendor Notes.** Per explicit user correction: the
+review table was displaying the vendor row's own "Outbound AWB" column
+(what WE gave the vendor) — the user wants the vendor's OWN AWB instead,
+detected in Vendor Notes ("any string of 12 numbers and the keyword 'AWB'"),
+shown only when present, and written into the order's inbound shipment.
+New `inference/inboundAwb.ts`'s `resolveInboundAwbFromNotes()`: matches a
+12-digit run (not part of a longer digit run) within a 30-character window
+of the literal word "AWB" on either side; returns null (not a guess) when
+absent, and flags `ambiguous` rather than picking arbitrarily when two
+DIFFERENT 12-digit candidates are both found near "AWB" mentions. Computed
+once in `applyInferenceRules.ts`'s `buildRecord` (the one terminal point
+every `InferenceRecord` passes through) from `vendorNotes` — not persisted
+as a new DB column, since it's a pure derivation of `vendor_notes`, which
+is already stored; re-derived fresh wherever else an `InferenceRecord` is
+built from a raw DB row (`cli/approveAndWrite.ts`).
+
+Wired into the real batch write flow (`api/jobRunners/esdWriteRunner.ts`):
+after a row's ESD write succeeds, if the (possibly analyst-edited)
+effective notes contain a detected inbound AWB, calls
+`mxiWriter/awbInboundSelectors.ts`'s existing `writeInboundAwb()` — a
+module that was already fully built (from an earlier session) but
+deliberately never wired into any write path, since it had never been run
+against real MXI. **That is still true after this change** — this session
+made it reachable from the batch flow, it did not give it its first live
+test. Flagged prominently in that module's own docstring and here: run
+`npm run mxi:write-inbound-awb` once, watched, against a known stage order
+with a real inbound shipment before trusting a production batch run to
+exercise this path unattended. Recorded as its own `mxi_writes` audit row
+(`action: 'approved_inbound_awb_write'`), separate from the ESD write's
+own row, referencing the same `esd_inference_id`.
+
+Frontend (`EsdFinder.tsx`, `esdFinderApi.ts`): the review table's AWB
+column now shows the detected inbound AWB (badge) or "multiple found"
+(the ambiguous case, with a tooltip explaining why) instead of the old
+Outbound AWB; the write-status cell shows a distinct line for the AWB
+write's own outcome (written / no inbound shipment yet / skipped /
+failed), separate from the ESD write's own status.
+
+9 new tests in `inboundAwb.test.ts`. Tests: 297/297 passing, `tsc
+--noEmit` clean, `npm run build` clean.
+
+## Session 2026-09-11 — pins on the back-shop listing
+
+Per explicit user direction: PN 4114T06P03 (pins — see the 2026-09-10
+"pins back-shop routing" session, `backend/src/backShop/pinRouting.ts`)
+shows up on the daily `BackShopListing.xlsm` sheet, but since pins are
+never scrapped, the existing Back Shop discovery job read their (always
+absent) part-note in MXI, classified them `no_scrap_note`, and displayed
+them identically to a part that genuinely has nothing to do — invisible
+as something actually needing action.
+
+Fixed by detecting a pin row from the SHEET DATA ALONE (no MXI navigation
+needed — a pin's scrap note was never going to say anything relevant
+anyway), before the scrap-note read runs at all:
+
+- New `isPinPartNumber()` in `pinRouting.ts`, alongside the existing
+  `isPinBackShop()` — trimmed/uppercased comparison against
+  `PIN_PART_NUMBER`.
+- `api/jobRunners/backShopDiscoveryRunner.ts` short-circuits on this check
+  right where `evaluateBaseStation(row.location)` already runs its own
+  sheet-data-only check, emitting a new `'pins_process'` outcome (added to
+  `BackShopFinding.outcome` in `backShopJobManager.ts`) instead of opening
+  the part and reading its note.
+- Frontend (`BackshopRepairs.tsx`, `backShopApi.ts`): pins get their OWN
+  card ("Pins — N parts need the Pins process"), not lumped into "Not
+  recommended" — each row shows the exact command to run
+  (`npm run pins:route -- <serial>`, using the sheet's own BN-prefixed
+  serial column value directly, since that's exactly the `<BN>` argument
+  `pinsRoutingCli.ts` expects). No one-click UI action yet — the Pins
+  process is still CLI-only, so the command is shown rather than a button
+  that doesn't exist.
+
+2 new tests in `pinRouting.test.ts`. Tests: 299/299 passing, `tsc
+--noEmit` clean, `npm run build` clean. Not yet run against a real
+back-shop listing containing a pin row — the classification logic itself
+needs no MXI interaction to verify, but the end-to-end UI path (upload ->
+discover -> see the new Pins card) hasn't been clicked through live.
+
+## Session 2026-09-11 (second) — Back Shop "Run Pins process" button
+
+Per explicit user follow-up: a real button instead of copying a
+`npm run pins:route -- <BN>` command by hand.
+
+Extracted the CLI's per-BN routing logic (`cli/pinsRoutingCli.ts`'s old
+`main()` body) into a new shared `runPinsRoutingForBn(client, db, env, bn)`
+in `backShop/pinRouting.ts`, so the CLI and the new button call the exact
+same implementation rather than risking two copies drifting apart. The CLI
+is now a thin wrapper.
+
+New job type, mirroring `backShopJobManager.ts`'s own shape exactly:
+- `api/jobRunners/pinsRoutingRunner.ts` — spawnable runner, single BN in,
+  one JSON `result` envelope out.
+- `api/pins/pinsJobManager.ts` — its own `activeRunId` singleton (one pin
+  job at a time, independent of every other job type). **Deliberately no
+  cancel route**, unlike discovery/scrap/ESD: those have a natural
+  "between items" point to honor a cancel at; a single pin run is one
+  continuous MXI sequence with none, and cutting it off mid-sequence on an
+  unverified write path is a bigger unknown than letting it finish.
+- `server.ts`: `POST /api/pins/start`, `GET /api/pins/active-job`,
+  `GET /api/pins/runs/:runId` — same `requireSession` +
+  `getMxiCredentialForUser` pattern as every other job route.
+
+Frontend (`BackshopRepairs.tsx`, new `lib/pinsApi.ts`): each pin row on
+the new Pins card gets its own "Run Pins process in <env>" button, gated
+by the SAME `ConfirmDialog` pattern the scrap flow already uses — the
+dialog text says plainly that this write path has never had a first live
+test and to watch it closely, rather than presenting it as routine.
+**Deliberately NOT wired into the shared cross-navigation tracked-run
+system** (`tabRuns.tsx`) that Quote/Scrap/InvoicePrice/BackShop use — that
+infra exists for long batch jobs an analyst wants to track while
+navigating elsewhere and in the sidebar; a single pin run is a quick
+action watched from the same card it was launched from. Plain page-local
+polling instead (`useEffect` + `setTimeout`, same shape as
+`trackedRun.tsx`'s own loop, just not shared).
+
+**Real safety gap caught before shipping, not after**: the first draft
+let an already-succeeded row show "Run again." Neither
+`runPinCorrectBaseFlow` nor `runPinWrongBaseShipmentFlow` check "is this
+already done" before acting — a second run on a genuine success would
+create a real SECOND task/transfer/shipment in MXI, not a harmless no-op.
+Fixed: a row whose last result was a genuine success shows a "Done" badge
+instead of a button at all, same reasoning `OrderWriteUps` already applies
+to an already-written line. A failed/tied/no-shipment-found result still
+offers "Retry."
+
+Tests: 299/299 passing (backend unchanged by this session — the new code
+is orchestration/UI, exercised via the pre-existing
+`runPinsRoutingForBn`/job-manager patterns rather than needing new pure
+functions to test). `tsc --noEmit` clean, `npm run build` clean. Not run
+against a real BackShopListing/live MXI session yet.
+
+## Session 2026-09-11 (third) — server still shutting down mid-run: three more real causes
+
+The 2026-09-10 heartbeat fix was live (today's logs carry its own new
+messages), and the suite was STILL dying mid-run. Diagnosed from
+`logs/launcher.log` + `logs/backend.log` rather than reasoned about. Three
+distinct causes, all confirmed by real timestamps, all now fixed.
+
+**Cause A — the startup grace was measured from the wrong moment.**
+`[11:45:31Z] launcher starting` → `[11:46:30Z] Backend is up` (59 seconds:
+the backend does a real MXI login at boot) → browser opened at 11:46:30.9
+→ `[11:46:35Z] Shutting down: no heartbeat ever reached the backend`. The
+60s `STARTUP_GRACE_MS` ran from LAUNCHER start, so a slow backend boot ate
+the entire grace and left the page ~5 seconds to load before the check
+fired. Worse, the `ms === null` branch had no tolerance of its own — it
+shut down the instant the grace lapsed. Fixed: the grace clock now starts
+when the BROWSER IS OPENED (`browserOpenedAt`), is 90s, and `ms === null`
+is held to the same long backstop as a stopped heartbeat instead of firing
+immediately.
+
+**Cause B — a 20-minute heartbeat gap on a still-open tab.**
+`[12:56:52Z] no heartbeat for 1203392ms (fallback safety net)` — 20.06
+minutes, consistent with the machine sleeping/locking over a break while
+the tab stayed open. Mitigated by the busy guard below, plus a
+`visibilitychange` ping in `heartbeat.ts` so the backend's last-heartbeat
+age is refreshed the instant the tab is visible again after a sleep.
+
+**Cause C — `pagehide` is not "the tab is gone", and it killed a live
+run.** `[13:08:56Z] Shutting down: frontend tab was closed`, while
+`backend.log` at `09:08:41` local (= 13:08:41Z, fifteen seconds earlier)
+shows a write-up runner actively processing part 90001200-1WT. `pagehide`
+also fires on a plain RELOAD, on navigating away, on a browser discarding
+a backgrounded tab, and from any ONE tab when the app is open in several.
+Yesterday's note calling it "a real, browser-guaranteed signal" was wrong
+and is corrected in place. Fixed two ways: a heartbeat now CLEARS
+`explicitlyClosed` server-side (so a reloaded page's own first ping
+cancels the pending shutdown), and the launcher requires the flag to
+survive `CLOSE_CONFIRM_MS` (45s) with no tab pinging back before acting.
+
+**The rule that actually matters, added this pass: never shut down while
+the backend says a job is running.** `/api/heartbeat-status` now reports
+`busy`/`busyWith`, the OR of all seven job registries' own `getActive*`
+getters (write-ups, ESD Finder, quotes, scrap, back-shop, invoice-price,
+pins — **a new job type must be added there too**). The launcher's loop
+checks this FIRST and returns early regardless of which signal fired. Two
+previous passes each swapped one ambiguous browser signal for another and
+each still killed a production run; no browser-derived signal can tell
+"the analyst is done" from "the analyst reloaded / switched tabs / locked
+the laptop", so the deciding question is now asked of the backend, which
+actually knows. Staying up too long costs idle RAM on the analyst's own
+machine; shutting down too early costs a half-written MXI order. Those
+aren't comparable, so this errs entirely in one direction.
+
+Verified live, not just read: started the real backend, confirmed
+`busy:false/busyWith:[]` is served, then confirmed `POST
+/api/heartbeat-closed` sets `explicitlyClosed:true` and a subsequent
+`POST /api/heartbeat` clears it back to `false` — the exact reload case
+that killed the 13:08 run. Tests 299/299, `tsc --noEmit` clean, `npm run
+build` clean. **Requires a restart of the suite to take effect** (the
+launcher script and both servers are all involved).
+
+## Session 2026-09-11 (fourth) — pins folded into the Run button; automatic DO NOT SHIP clearing
+
+Two follow-ups, both after the user corrected/clarified an earlier design.
+
+**Pins corrected: one "Run" press, one batched job — not a per-row
+button.** The previous session's per-pin-row "Run Pins process" button was
+NOT what the user wanted. Per explicit correction: "I want them looped in
+with the scrap process... when I push the 'run' button after the read, it
+simply runs the process setup for pins when it hits one of them. But I
+want all pins found to run in a single process." Reworked to mirror how
+the scrap batch already works (many serials, one job,
+`startInHouseScrap`'s own `parseSerialList`-normalised list):
+- `api/jobRunners/pinsRoutingRunner.ts` now takes `--bns` (a JSON array),
+  loops `runPinsRoutingForBn` over all of them in ONE browser session, and
+  emits a `result` envelope per BN — one BN failing doesn't stop the rest.
+- `api/pins/pinsJobManager.ts`'s `PinsJob` now holds `results: [...]`
+  (progressive, keyed by BN) instead of a single result.
+- `server.ts`'s `/api/pins/start` accepts `bns` via the same
+  `parseSerialList` normalisation `/api/scrap/start` already uses.
+- `BackshopRepairs.tsx`: the separate Pins card and its per-row buttons
+  are gone. Step 3 is now ONE "Review and run" card — scrap candidates
+  keep their checkboxes (each has a real note worth weighing); pins are
+  listed underneath with no checkbox (there's no note to weigh — a pin is
+  a pin) and always included, MINUS any that already succeeded in the
+  current pins run (`pinsAlreadySucceeded`/`pinsToRun` — same "never
+  re-offer an already-written line" reasoning as before, now computed
+  against the one job's own `.results` instead of a per-row map). ONE
+  "Run" button fires both `startInHouseScrap` (if anything's selected) and
+  the batched `startPinsRun` (if any pins remain to run); ONE confirm
+  dialog describes whichever of the two is actually about to happen.
+
+**DO NOT SHIP note — automatic clearing when usage is no longer zero.**
+Per explicit user direction: a CREATE_ORDER_ONLY order's "DO NOT SHIP
+ZERO TIMES AND CYCLES" note (`createOrderOnly.ts`) should come off on its
+own once that part's times/cycles are corrected — "the repair order is
+ready to be shipped out." Explicitly confirmed scope via follow-up
+questions: **removes the note only** (no auto-authorize/issue/dock — a
+materially bigger, less-reviewed action the user did not ask for), and
+**runs fully automatically** rather than on demand.
+
+New `writeUps/shared/doNotShipRecheck.ts`:
+- `findDoNotShipCandidates(db, targetEnv, limit)` — every order whose
+  LATEST `write_up_actions` row is still `order_created_do_not_ship` with
+  reason `ZERO_USAGE_DO_NOT_SHIP_REASON` specifically (not the separate
+  AWAITING RMA note — a vendor-membership rule, not a correctable data
+  condition, and out of scope by the user's own wording). Append-only
+  "latest row wins" query: once a `do_not_ship_note_cleared` row exists
+  for an order, that becomes its latest row and it stops appearing here on
+  the next pass — no separate "already processed" tracking needed. New
+  `do_not_ship_note_cleared` outcome added to `WriteUpActionInsert` in
+  db.ts. 6 tests against a real `:memory:` SQLite DB.
+- `recheckAndClearDoNotShip(client, db, targetEnv, candidate)` — re-reads
+  the part's Current Usage table and, only if it's now genuinely
+  `present_nonzero` (never on an inconclusive "no table found" read —
+  that's left alone, not guessed at either way), clears the External
+  Reference field (`completeCreateOrderOnly` / `verifyExternalReferenceCommitted`,
+  unchanged proven code, just called with an empty string instead of a
+  composed note) and records the outcome.
+- **The read step is a new COMBINATION, not independently live-verified**:
+  `openInventoryBySerial` (proven — already reaches InventoryDetails.jsp
+  from cold for the back-shop discovery pass) followed by
+  `readPartOwnDetails` (proven — already reads the Current Usage table
+  correctly once standing on that same page, per its own docstring: "this
+  function is already standing on InventoryDetails.jsp"). Each half is
+  separately proven; running them back-to-back for THIS purpose hasn't
+  been tried live. Recommend a first watched pass before trusting it
+  unattended.
+
+Wired into `server.ts` as a `setTimeout` chain on the server's own
+already-logged-in, server-lifetime `mxiClient` — first pass 10 minutes
+after boot (clear of the server's own startup login), then every 3 hours,
+capped at 50 orders per pass so a large backlog can't turn into an
+hours-long unattended MXI session in one go. Interpreted "fully automatic"
+as "runs on its own while the app/server is open" (which is already tied
+to a frontend tab being open, per the heartbeat work) rather than a
+standalone always-on OS service independent of the app — flagged here in
+case that reading is wrong. Timer is cleared on shutdown.
+
+Tests: 305/305 passing (up from 299), `tsc --noEmit` clean, `npm run
+build` clean, server boots cleanly with the new scheduler wired in
+(verified live). Neither the pins batching nor the DO NOT SHIP recheck's
+MXI-touching steps have been run against real MXI yet.
+
+## Session 2026-09-12 — real bug found live: openPinLineByBn's fallback never matched anything
+
+The user reported every pin failing with `locator.innerText: Timeout
+30000ms exceeded` waiting for `getByRole('link', { name: 'BN 398518',
+exact: true })`, and watching the live Playwright browser confirmed it
+never reached anything resembling a search step.
+
+Root cause, found by re-reading `pinRouting.ts`'s own docblock against its
+own code: the comment on `openPinLineByBn` already correctly documented
+that "the wrong-base recording instead clicked a bare '4114T06P03' link"
+(a bare PART NUMBER) as its real fallback entry point — but the CODE
+implemented `page.getByRole('link', { name: bn, exact: true })`, a bare
+BN link, a shape NEITHER pins recording ever shows existing directly on
+the ToDoList. The analysis was right; the implementation contradicted it.
+That fallback could never have matched anything — it just burned the full
+30s finding out, on every single pin.
+
+Fixed to match what the recording actually shows: a bare "4114T06P03"
+link (recording: `.nth(4)`, implying several exist on the page at once
+when multiple pins are open), disambiguated by ROW CONTENT instead of
+link text — every matching link's own row is checked for the target BN
+elsewhere in that row, same "scope to the row" pattern
+`scheduleWorkPackageForm.ts`'s `readCurrentLocationCode` already uses.
+The fuller "Repair PIN <desc> (PN: ..., BN: ...)" shape (which embeds the
+BN directly, no row-scoping needed) is still tried first. If NEITHER
+shape matches, this now throws immediately with a clear message instead
+of hanging on a 30s timeout.
+
+**Genuinely unresolved, flagged rather than guessed a third time**: the
+user's own live observation was that the automation "isn't going into the
+inventory search to find the part" — but neither pins recording shows an
+inventory/serial search step at all; both click a link directly on
+ToDoList. `pinRouting.ts` DOES already have a proven serial-search
+mechanism elsewhere (`openInventoryBySerial`, used by the back-shop
+discovery pass) — but that lands on `InventoryDetails.jsp`, and there is
+no evidence Create New Task / Schedule Work Package (what
+`runPinCorrectBaseFlow` needs next) are reachable from there rather than
+from the ToDoList's own ("Repair PIN...") link — swapping the entry
+mechanism wholesale risks fixing "find the row" while breaking "act on
+it." Asked the user directly rather than guessing which is real.
+
+## Session 2026-09-12 (second) — pins entry point rebuilt on the proven inventory-search mechanism
+
+Follow-up to the same day's first fix. Asked the user directly whether a
+search step was needed rather than guess a third time — answer: **yes**,
+and the two pins recordings this whole module was built from
+(`discovery-pins-correct-base-recording.ts`,
+`discovery-pins-wrong-base-recording.ts`) don't reflect the real process
+at all. Direct quote: "The recording was a little weird and didn't truly
+capture the whole process... the pin needs to be found by searching the
+batch number in the inventory search page to pull up its part line. This
+will not show up in a ToDoList like the recording had it, that's my bad."
+
+Replaced the entire ToDoList-link-click entry point
+(`openPinLineByBn`/`resolvePinCurrentBase`, both removed) with a single
+`openPinByBn`, built entirely from ALREADY-PROVEN production code rather
+than a new guess:
+- `mxiWriter/openInventoryBySerial.ts`'s `openInventoryBySerial` — reaches
+  InventoryDetails.jsp via the Inventory Search box, the exact mechanism
+  the user pointed at ("just like when scrapping a part out of the back
+  shop"), already used this same way by the back-shop discovery pass.
+- A NEW shared `mxiWriter/scrapFlowHelpers.ts` function,
+  `readCurrentLocationOnDetailsTab` — extracted from `writeInHouseScrap.ts`
+  (moved, not duplicated, so both callers share one implementation and
+  can't drift) — reads the item's "Location:" label off its Details tab,
+  working around a real, previously-found MXI quirk: the session
+  remembers whichever tab a PRIOR item left active, so a subsequent item
+  opened right after can silently land on a tab with no location at all.
+  `writeInHouseScrap.ts` itself now calls this same function instead of
+  its own inlined copy — pure refactor, its own behavior is unchanged
+  (verified: all 305 tests still pass, including its own).
+
+Deliberately scoped to ONLY the entry point. Everything downstream
+(`runPinCorrectBaseFlow`'s Create New Task / Schedule Work Package /
+Create Transfer, `runPinWrongBaseShipmentFlow`'s own internal "BN..."
+link click and Create Shipment) is UNCHANGED — still built from the same
+two now-confirmed-inaccurate recordings, and NOT re-verified. Since the
+entry point they showed turned out to be fictional, the rest deserves the
+same skepticism on the next live run, not silent trust just because nothing
+new contradicts it yet — flagged here rather than quietly re-guessed on
+top of an already-shaky foundation.
+
+Tests: 305/305 passing, `tsc --noEmit` clean, `npm run build` clean.
+
+## Session 2026-09-12 (third) — pins entry point rebuilt on a purpose-made recording
+
+Still failing after the previous fix. The user made a THIRD recording,
+`discovery-pins-start-recording.ts`, specifically to capture the real
+entry sequence and "reiterate on certain HTML tags" — with an explicit,
+important scoping instruction: authoritative only through "clicking into
+the part and the work package"; anything after that point that disagrees
+with the original two recordings defers to them.
+
+**The real entry sequence, now confirmed directly (not inferred):**
+Menu -> "Unserviceable Staging Clerk >" -> "Inventory Search" -> fill
+`aSerialNo_SERIAL` with "BN <n>" -> Search -> click the result row
+(recorded as a PLAIN "BN" match, NOT `exact: true` — the result link's
+real accessible name is not confirmed to be the exact full "BN <n>"
+string) -> "Open" tab -> "Open Work Packages" tab -> "Repair PIN
+<component> (PN: ...)" link.
+
+Two things this revealed:
+1. The "Open" -> "Open Work Packages" tab pair is EXACTLY the same
+   navigation `writeInHouseScrap.ts` already has proven, battle-tested
+   code for (`clickUntilUrlContains`, complete with a documented real race
+   -condition fix from 2026-08-25) — extracted to `scrapFlowHelpers.ts` so
+   pins reuse it directly instead of a third copy. `writeInHouseScrap.ts`
+   itself now imports it back; pure refactor, verified via the full test
+   suite (all 305 still pass).
+2. `runSerialSearch` (the actual search-box mechanism inside
+   `openInventoryBySerial.ts`) is now EXPORTED and reused directly, since
+   it's confirmed to work for a BN-prefixed identifier too — but pins use
+   their OWN result-row click (non-exact match on the BN) rather than
+   either of that file's existing openers, which both use `exact: true`
+   and were never proven against a BN-prefixed value specifically.
+
+Rebuilt `openPinByBn` (replacing the previous version) to: search, click
+the result (non-exact), read current location via
+`readCurrentLocationOnDetailsTab` (BEFORE switching tabs — order matters,
+since that read can itself force the Details tab active, which would
+undo an Open Work Packages tab reached first), then Open -> Open Work
+Packages -> "Repair PIN..." (prefix match — the component description
+varies per pin).
+
+**Deliberately left unchanged, per the user's own explicit scoping**:
+everything from "Create New Task" onward. The new recording shows a
+different ad-hoc task text ("Service as Required" vs the original's
+`PIN_ADHOC_TASK_NAME`) and a different continuation into Create Shipment
+(a "Component: ... " cell -> a link -> "Details" -> "Create Shipment",
+vs the original's direct "BN ..." link -> "Create Shipment") — both
+disagreements with the original two recordings, both deliberately NOT
+applied, per instruction. One thing the new recording DID incidentally
+confirm as already correct: the reason dropdown's raw encoded
+`#idDropdownReason` option value is DIFFERENT between the two recordings
+for the same semantic "REPAIR" choice (session-specific AES-encoded
+values) — confirming selecting by LABEL (already how this project's code
+works) rather than by raw value was the right call from the start.
+
+Tests: 305/305 passing, `tsc --noEmit` clean, `npm run build` clean.
+Still not run against real MXI.
+
+## Session 2026-09-12 (fourth) — two more real bugs found live
+
+Two failures reported after the entry-point rebuild, one on the first pin
+and one on the other two.
+
+**Bug 1 — strict-mode violation on the Unserviceable Staging Clerk menu
+click.** `navigateToPinAvailabilityTab` used a bare
+`/Unserviceable Staging Clerk/i` regex, which matches BOTH "Unserviceable
+Staging Clerk >" and "Unserviceable Staging Clerk Reports >" — Playwright
+strict mode rejects the ambiguity outright. This EXACT bug was already
+found and fixed once, in `openInventoryBySerial.ts`'s `runSerialSearch`
+(2026-08-23), with an anchored `/^Unserviceable Staging Clerk\s*>/i`
+pattern — but that fix was never applied to this second, separately-
+written occurrence. Fixed the same way. Swept the whole codebase for any
+other unanchored copy of this pattern — none found; every other site
+already uses the anchored form.
+
+**Bug 2 — a fabricated-by-analogy field that isn't in the proven flow.**
+Two real pins both timed out (30s) on `#idEditFieldScheduledLocation`
+inside `runPinCorrectBaseFlow`'s Schedule Work Package step. That field
+IS in `discovery-pins-correct-base-recording.ts` — but it does not appear
+ANYWHERE else in this codebase, and the already-production-proven
+in-house scrap flow's own Schedule Work Package step
+(`writeInHouseScrap.ts`) has no such field at all: it goes straight from
+clicking "Schedule Work Package" to "Select Repair Location", which opens
+the picker popup on its own. The general vendor-code engine's own form
+helpers (`scheduleWorkPackageForm.ts`) use a `#idEditField<Name>` naming
+convention for OTHER real fields (ChargeToAccount, PurchasingContact,
+ReturnToLocation) — plausible that this field name was pattern-matched
+from that convention rather than confirmed for pins specifically, though
+it did appear once in the recording, so this isn't pure fabrication either.
+Rather than guess in either direction again, made it OPTIONAL: filled when
+present (matching the recording) within a bounded 8s wait, silently
+skipped when genuinely absent (matching the proven scrap mechanism) —
+never a hard 30s block on a field whose real presence isn't settled
+either way.
+
+Tests: 305/305 passing, `tsc --noEmit` clean, `npm run build` clean.
+
+## Session 2026-09-12 (fifth) — real bug found via user-supplied live data: wrong columns read as U/S and In Repair
+
+The user reported a false tie ("CAK: 0, DAY: 0, GSP: 0, ORF: 0 — nothing
+written") and supplied the REAL Availability tab table for that exact
+moment, with its full real column layout: "Location | Owner | Restock
+Level | On Order | [Serviceable: Avail | Resvd | Xfer (SRV) | In Kit] |
+[Unserviceable: U/S | Quar | Await Insp | In Repair | Condemn | Xfer
+(U/S) | In Kit]" — a two-row grouped header, 15 cells per data row.
+
+Root cause: `readPinAvailabilityTable` took the FIRST TWO non-label cells
+in a row as U/S and In Repair. The real table has Owner, Restock Level,
+On Order, and four Serviceable columns in between — so it was reading
+Owner ("PSA") and Restock Level ("-"), neither numeric, both silently
+parsed as 0, for every base, every time. Cross-checked the fix against
+all four of the user's own real rows by hand before writing any code:
+CAK 3+28=31, DAY 86+0=86, GSP 44+56=100, ORF 116+0=116 — CAK should have
+won, not tied at zero.
+
+Fixed to not depend on a hardcoded column count: U/S and In Repair's
+DISTANCE FROM THE END of a row survives the leading columns' likely
+rowspan (Location/Owner/Restock Level/On Order plausibly span both header
+rows, which would break any ABSOLUTE left-counted index between the
+header row and a data row) — the trailing sub-columns are real per-row
+data with no rowspan of their own. `findAvailabilityColumnOffsets` now
+derives this offset ONCE from whichever live header row actually states
+both "U/S" and "In Repair", rather than trusting any hardcoded position;
+falls back to the user's own captured layout (7th/4th from the end) only
+if no such header row is found, logged loudly since that fallback is one
+historical example, not something read live.
+
+Extracted the offset math and cell-extraction into pure functions in
+`pinAvailability.ts` (`computeAvailabilityColumnOffsets`,
+`extractUsageFromRowCells`) specifically so this exact class of bug can be
+pinned in `npm test` — 4 new tests run the user's own real header and all
+four real rows end-to-end through `resolvePinDestination`, asserting CAK
+wins at 31 rather than a 0-0-0-0 tie.
+
+Tests: 309/309 passing (up from 305), `tsc --noEmit` clean, `npm run
+build` clean.
+
+## Session 2026-09-12 (sixth) — diagnosed from the actual log, not another guess: header search matched a nested-table wrapper
+
+Same "0-0-0-0 tie" symptom reported again after the previous fix. Checked
+`logs/backend.log` directly rather than guess again — confirmed the
+previous fix WAS live and running (no server restart needed; each pins
+run spawns a fresh process that reads current disk state every time) —
+and found the real, deeper cause in the log's own numbers.
+
+`findAvailabilityColumnOffsets`'s header search
+(`page.locator('tr').filter({hasText:'U/S'}).filter({hasText:'In
+Repair'})`) matched an OUTER WRAPPER row, not the real header — MXI's
+Availability tab nests the actual data table inside a layout table, and
+the wrapper row's own aggregate text includes the ENTIRE nested table's
+content concatenated together. Logged evidence: the "header row" this
+found had 240+ cells, deriving `usFromEnd: 232` / `inRepairFromEnd: 229`.
+Cross-checked against the SAME run's own logged CAK row (`cellTexts`, a
+correctly-sized ~14-cell real row, values 3 and 28 genuinely present) —
+applying offsets of 232/229 to a 14-cell array indexes off the end,
+returns `undefined`, and the existing `!== undefined` guard correctly
+defaulted that to 0 — for every base, all over again, via a different
+mechanism than the first bug.
+
+Fixed to use the exact same anchor-then-nearest-ancestor pattern already
+proven correct for the DATA rows (`labelCell.locator('xpath=ancestor::tr[1]')`):
+find one specific CELL whose own text is exactly "U/S", then take ITS
+nearest enclosing `<tr>` — a row found this way cannot be an outer
+wrapper, since it is defined as the closest row of a cell with that exact
+text, not any row merely containing the text somewhere in its (possibly
+deeply nested) descendants. Added a second line of defense too: a
+"header row" with more than 40 cells is now refused and falls back to
+the hardcoded example-table offsets rather than trusted, in case some
+other page ever fools this same way.
+
+Tests: 309/309 passing, `tsc --noEmit` clean, `npm run build` clean.
+
+## Session 2026-09-12 (seventh) — the exact step already flagged as unverified failed, as expected
+
+`runPinWrongBaseShipmentFlow`'s own entry step ("BN ..." link click) timed
+out live — exactly the step the previous session's own writeup flagged:
+"everything from Create New Task onward is UNCHANGED — still built from
+the original two recordings, whose accuracy beyond the entry point has
+not been re-confirmed."
+
+Two real, user-supplied recordings disagree on how to reach Create
+Shipment from here:
+1. `discovery-pins-wrong-base-recording.ts` (original, now-coded path):
+   a "BN ..." link, directly to Create Shipment.
+2. `discovery-pins-start-recording.ts` (the entry-fixing recording, same
+   verified-real session `openPinByBn`'s own entry logic now comes from):
+   a "Component: PIN ... (PN..." cell's own link, then "Details", then
+   Create Shipment.
+
+Rather than pick one by further guessing, both are now tried,
+presence-gated (nothing is clicked unless it's actually there, so trying
+one can't misfire into clicking something unintended if the page matches
+the other): recording 2's path first, since it shares session/state
+continuity with the already-confirmed entry sequence that recording 1's
+own entry point (since proven inaccurate) does not; recording 1's path as
+a bounded (8s, not the old unbounded 30s) fallback if the Component cell
+genuinely isn't there.
+
+Tests: 309/309 passing, `tsc --noEmit` clean, `npm run build` clean.
+
+## Session 2026-09-12 (eighth) — committed to the entry-fixing recording's continuation, fallback removed
+
+Per explicit user correction: the hybrid built in session seven (try
+discovery-pins-start-recording.ts's "Component: ... " cell path, fall back
+to discovery-pins-wrong-base-recording.ts's "BN ..." link path) was wrong
+to treat as two co-equal possibilities. The user's own words: "Do the
+entry-fixing recording because that uses the correct HTML, just some of my
+inputs weren't correct." That recording's HTML is trustworthy; the
+ORIGINAL "BN ..." link recording is the one that doesn't reflect the real
+page, not an equally-valid alternate path.
+
+`runPinWrongBaseShipmentFlow` now uses ONLY the Component-cell -> Details
+-> Create Shipment path, with a single 15s bounded wait (widened from the
+previous 8s split across two attempts, since there's only one path to wait
+for now) and a clear failure message if it isn't there. No fallback
+branch remains.
+
+Tests: 309/309 passing, `tsc --noEmit` clean, `npm run build` clean.
+
+## Session 2026-09-12 (ninth) — real bug found by diffing against the recording: typed the whole target string instead of the station code
+
+"Filled Ship To with 'CAK/DOCK' but no matching autocomplete suggestion
+appeared" — diffed against discovery-pins-wrong-base-recording.ts's own
+successful sequence line by line rather than guessing. It fills only the
+bare station code, then clicks the resulting suggestion:
+
+```
+await page.locator('#idFieldShipTo').fill('DAY');
+await page.getByText('DAY/DOCK').click();
+```
+
+The code was filling the full `"<base>/DOCK"` string before searching for
+a suggestion — the field's autocomplete is evidently keyed on the station
+code alone, so searching the full target string matches nothing. Fixed to
+fill only `destinationBase`, matching the recording exactly; the
+suggestion click (searching for the full "<base>/DOCK" text) is unchanged
+since that part already matched the recording.
+
+(That same recording also shows an earlier click into a separate
+'#idFieldShipToLink' popup with its own search box, abandoned mid-way with
+nothing selected — not used, same "exploratory dead end before the real
+sequence" shape already documented elsewhere in this project.)
+
+Tests: 309/309 passing, `tsc --noEmit` clean, `npm run build` clean.
+
+## Session 2026-09-12 (tenth) — Ship To autocomplete confirmation removed per explicit direction
+
+Same failure recurred after filling only the station code. Per explicit
+user instruction: stop checking for an autocomplete suggestion at all —
+fill the field with the full "<destinationBase>/DOCK" string directly and
+trust it, no confirmation click. The suggestion-search/click block is
+removed; `runPinWrongBaseShipmentFlow` now fills `#idFieldShipTo` with the
+full target string and moves straight on to the date fields.
+
+Tests: 309/309 passing, `tsc --noEmit` clean, `npm run build` clean.
+
+## Session 2026-09-12 (eleventh) — driven live for real, with explicit permission: two real bugs fixed, one real blocker found and not a code bug
+
+Per explicit user permission ("I give you full permission to test this
+yourself and adjust bugs as they come up until you achieve a successful
+run"), drove the real pins routing flow directly against real production
+MXI (BN 398511) via a series of throwaway diagnostic scripts (deleted
+after use, per this project's own convention) rather than guessing again.
+
+**Bug 1 — `#idShipByDate` genuinely does not exist.** Inspecting the real
+Create Shipment page's DOM directly showed MXI renders this as a composite
+date/time WIDGET: `idShipByDate_$DATE$`, `_$TIME$`, `_$TIMEZONE_DISPLAY$`,
+`_$TIMEZONE$`, `_$DEFAULT_TIME_TO_END_OF_DAY$` — five real inputs sharing
+one base id as a prefix, none of them the bare id the code was guessing at
+(flagged as an unconfirmed inference from the start — see the 2026-09-10
+"pins back-shop routing" session). `fillMxiDateField` now targets the real
+`_$DATE$` subfield via an attribute selector (avoids CSS-escaping the
+literal `$` characters); the TIME/TIMEZONE subfields are left alone.
+
+**Bug 2 — the Reason dropdown's real label is "REPAIR (Repair Return)",
+not "REPAIR".** `selectOption({label})` requires an exact match; reading
+every real `<option>` on `#idDropdownReason` live confirmed the full text.
+Fixed to the full literal label — the same convention writeVendorScrap.ts
+already uses for this identical control (`'SCRAP (Scrapped)'`, `'SCRPV
+(Vendor Scrapped)'`), just not yet matched here.
+
+**Real blocker found, NOT a code bug**: after both fixes, MXI itself
+rejected the shipment with "The ship from location must have a supply
+location." Read directly off the page: BN 398511's own current location
+reads "IN TRANSIT", not a normal station code — it has read this way on
+EVERY attempt today going back to this morning's very first run, before
+any of today's fixes existed. The most likely explanation: an earlier
+attempt already got far enough to submit a real Create Shipment for this
+part before hitting one of the bugs just fixed, and every retry since has
+been failing for that reason, not a new one. None of today's diagnostic
+runs got past this same validation error, so nothing further was
+submitted — no duplicate shipment risk from this session's own testing.
+
+**Deliberately stopped here rather than dig further into a real,
+already-disturbed production record.** This needs the analyst to check
+BN 398511's actual shipment status directly in MXI (or the flow should be
+re-verified against a different, untouched pin) before more automated
+attempts run against it specifically — a judgment call outside what
+diagnosing a code bug can resolve.
+
+Tests: 309/309 passing, `tsc --noEmit` clean, `npm run build` clean.

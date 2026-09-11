@@ -32,6 +32,10 @@ export interface EsdWriteOrderResult {
   orderNumber: string
   status: 'success' | 'failed' | 'skipped'
   errorMessage: string | null
+  /** Present only when this order's notes contained a detected inbound AWB and its ESD write succeeded — see backend's esdWriteRunner.ts. */
+  inboundAwb?: string | null
+  inboundAwbStatus?: 'success' | 'failed' | 'skipped' | 'no_inbound_shipment_found' | null
+  inboundAwbError?: string | null
 }
 
 export interface EsdCompareResultRow {
@@ -42,8 +46,12 @@ export interface EsdCompareResultRow {
   currentStatus: string | null
   vendorNotes: string | null
   orderStatus: string | null
-  /** Vendor row's own Outbound AWB, if any — display/detection only, see backend's mxiWriter/awbInboundSelectors.ts. */
+  /** Vendor row's own Outbound AWB (what WE gave the vendor) — no longer displayed, see inboundAwb below. */
   outboundAwb: string | null
+  /** The vendor's OWN AWB, detected in Vendor Notes (12 digits near the keyword "AWB") — this is what gets written into the inbound shipment. Null if absent or ambiguous. */
+  inboundAwb: string | null
+  /** True when Vendor Notes contained two or more different 12-digit AWB candidates — inboundAwb is null because of that ambiguity, not because nothing was found. */
+  inboundAwbAmbiguous: boolean
   classification: EsdClassification | null
   extractedBaseDate: string | null
   bufferDaysApplied: number | null

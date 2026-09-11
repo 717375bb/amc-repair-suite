@@ -16,16 +16,24 @@ async function pace(page: Page): Promise<void> {
  * user direction: "If it finds an AWB in report, add it to the Inbound...
  * according to discovery-awb-inbound-recording.ts."
  *
- * **UNVERIFIED AGAINST REAL MXI — this entire module has never been run
- * live.** Every other write path in this codebase (ESD field, Notes to
- * Receiver, Invoice Price Writer's price/reauthorization fields) required
- * at least one real, watched smoke test before being trusted — several
- * caught real corruption/reliability bugs that reading the recording alone
- * never would have (see CLAUDE.md's Phase 2c section, PHASE2_MXI_WRITER_SPEC.md).
- * This module should get the exact same treatment before it is ever wired
- * into an unattended/batch path: run `npm run mxi:write-inbound-awb`
- * (mxiWriteInboundAwb.ts) once, watched, against a known stage order with a
- * real inbound shipment, and independently re-verify in a plain browser.
+ * **STILL UNVERIFIED AGAINST REAL MXI — this entire module has never been
+ * run live**, even though it is no longer isolated: per a further explicit
+ * user direction (2026-09-10, correcting the original Outbound-AWB-based
+ * display to a vendor-supplied Inbound AWB detected in Vendor Notes — see
+ * inference/inboundAwb.ts), `writeInboundAwb` below is now called from
+ * api/jobRunners/esdWriteRunner.ts's real batch write flow whenever a
+ * detected AWB is present, not just from the standalone
+ * mxiWriteInboundAwb.ts CLI. Every other write path in this codebase (ESD
+ * field, Notes to Receiver, Invoice Price Writer's price/reauthorization
+ * fields) required at least one real, watched smoke test before being
+ * trusted in a batch/unattended run — several caught real corruption/
+ * reliability bugs that reading the recording alone never would have (see
+ * CLAUDE.md's Phase 2c section, PHASE2_MXI_WRITER_SPEC.md). This module
+ * has NOT yet had that test, despite now being reachable from a batch
+ * path: run `npm run mxi:write-inbound-awb` (mxiWriteInboundAwb.ts) once,
+ * watched, against a known stage order with a real inbound shipment, and
+ * independently re-verify in a plain browser, before trusting a real
+ * production batch run to exercise this path unattended.
  *
  * What the recording (`backend/discovery-awb-inbound-recording.ts`,
  * gitignored, never committed) actually shows, read literally rather than

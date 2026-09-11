@@ -3,6 +3,8 @@ import Database from 'better-sqlite3';
 import path from 'node:path';
 import { insertMxiWrite } from '../../db/db.js';
 import { classifyRowAction } from '../../inference/classifyRowAction.js';
+import { resolveInboundAwbFromNotes } from '../../inference/inboundAwb.js';
+import { writeInboundAwb } from '../../mxiWriter/awbInboundSelectors.js';
 import { createReadyMxiClient } from '../../mxiWriter/cliMxiClient.js';
 import type { MxiEnv } from '../../mxiWriter/config.js';
 import { assembleNoteText, toMxiDateFormat } from '../../mxiWriter/esdFormatting.js';
@@ -39,6 +41,16 @@ interface EsdWriteEnvelope {
   status?: 'success' | 'failed' | 'skipped';
   errorMessage?: string | null;
   message?: string;
+  /**
+   * CLAUDE_CODE_PROMPT (AWB -> Inbound shipment, correction, 2026-09-10) —
+   * present only when this order's (possibly analyst-edited) notes
+   * contained a detected inbound AWB and the ESD write above succeeded.
+   * Optional/additive on the existing 'order-result' envelope rather than
+   * a new envelope type, so this is a backward-compatible extension.
+   */
+  inboundAwb?: string | null;
+  inboundAwbStatus?: 'success' | 'failed' | 'skipped' | 'no_inbound_shipment_found' | null;
+  inboundAwbError?: string | null;
 }
 
 function emit(envelope: EsdWriteEnvelope): void {
@@ -298,11 +310,69 @@ async function main(): Promise<void> {
         approvedBy: 'esd-finder-ui',
       });
 
+      // CLAUDE_CODE_PROMPT (AWB -> Inbound shipment, correction, 2026-09-10)
+      // — per explicit user direction: a 12-digit number tied to the
+      // keyword "AWB" in Vendor Notes is the vendor's OWN inbound AWB and
+      // should be written into the order's inbound shipment. Deliberately
+      // a SEPARATE step and a SEPARATE audit row from the ESD write above
+      // (different MXI screen entirely — Receipt & Returns, not Schedule
+      // Work Package), and only attempted once that write has already
+      // succeeded, since a failed ESD write can leave the page in an
+      // unconfirmed state this shouldn't build on. `ambiguous` (two
+      // different 12-digit candidates found) is treated the same as "not
+      // found" here — never guessed between them.
+      //
+      // **awbInboundSelectors.ts's own writeInboundAwb has never been run
+      // against real MXI** (see that module's docstring) — this wiring
+      // makes it reachable from the batch write flow for the first time.
+      // Per this project's own established discipline for every other MXI
+      // writer, this needs one real, watched smoke test (`npm run
+      // mxi:write-inbound-awb` against a known order with a real inbound
+      // shipment) before this path should be trusted unattended.
+      let inboundAwbEnvelopeFields: Pick<EsdWriteEnvelope, 'inboundAwb' | 'inboundAwbStatus' | 'inboundAwbError'> = {};
+      if (result.status === 'success') {
+        const inboundAwbDetection = resolveInboundAwbFromNotes(effectiveNotes);
+        if (inboundAwbDetection.awb) {
+          log.info(
+            { orderNumber: row.order_number, inboundAwb: inboundAwbDetection.awb },
+            'detected inbound AWB in vendor notes — attempting to write it to the inbound shipment',
+          );
+          const awbResult = await writeInboundAwb(client, row.order_number, inboundAwbDetection.awb);
+          insertMxiWrite(db, {
+            esdInferenceId: row.id,
+            orderNumber: row.order_number,
+            targetEnv: env,
+            action: 'approved_inbound_awb_write',
+            inferredEsd: null,
+            // No DB-level status for 'no_inbound_shipment_found' — recorded
+            // as 'skipped' with the real reason in errorMessage instead of
+            // widening writeStatus's own enum for one caller.
+            writeStatus: awbResult.status === 'no_inbound_shipment_found' ? 'skipped' : awbResult.status,
+            errorMessage:
+              awbResult.status === 'no_inbound_shipment_found'
+                ? `Detected AWB ${inboundAwbDetection.awb} in vendor notes, but this order has no inbound shipment (Ship To .../DOCK) yet.`
+                : awbResult.errorMessage,
+            approvedBy: 'esd-finder-ui',
+          });
+          inboundAwbEnvelopeFields = {
+            inboundAwb: inboundAwbDetection.awb,
+            inboundAwbStatus: awbResult.status,
+            inboundAwbError: awbResult.errorMessage,
+          };
+        } else if (inboundAwbDetection.ambiguous) {
+          log.warn(
+            { orderNumber: row.order_number },
+            'vendor notes contain two or more different 12-digit AWB candidates — not writing any of them',
+          );
+        }
+      }
+
       emit({
         type: 'order-result',
         orderNumber: row.order_number,
         status: result.status,
         errorMessage: result.errorMessage,
+        ...inboundAwbEnvelopeFields,
       });
     }
   } finally {

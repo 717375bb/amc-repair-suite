@@ -1,12 +1,54 @@
 import type { Page } from 'playwright';
 import { createLogger } from '../logging/logger.js';
+import { looksLikeDetailsTab, parseCurrentLocation } from './inHouseScrapParsing.js';
 
 const log = createLogger('scrap');
 
 const CLICK_DELAY_MS = 750;
+/** Shared by readCurrentLocationOnDetailsTab and clickUntilUrlContains below — both wait on a tab actually becoming active. */
+const TAB_CLICK_TIMEOUT_MS = 30_000;
+const TAB_NAV_TIMEOUT_MS = 20_000;
 
 export async function pace(page: Page): Promise<void> {
   await page.waitForTimeout(CLICK_DELAY_MS);
+}
+
+/**
+ * Arms a `page.waitForEvent('popup')` wait SAFELY.
+ *
+ * REAL BUG FOUND AND FIXED (2026-09-12, live failure): the established
+ * pattern in this codebase for "click something that opens a popup" is:
+ *
+ *   const popupPromise = page.waitForEvent('popup');
+ *   await page.getByRole('link', { name: '...' }).click();
+ *   const popup = await popupPromise;
+ *
+ * If the click itself is slow (its own actionability wait) and the popup
+ * genuinely never opens, `popupPromise` can REJECT (Playwright's own 30s
+ * default) before the code ever reaches `await popupPromise` — no handler
+ * is attached to it yet at that moment. Node treats that as a genuinely
+ * UNHANDLED promise rejection and crashes the entire process outright
+ * (`triggerUncaughtException`), bypassing every try/catch anywhere else in
+ * the codebase, including the pins batch runner's own per-BN try/catch —
+ * this is exactly what turned one pin's ordinary, expected failure into
+ * the whole batch stopping dead, confirmed live: runPinCorrectBaseFlow's
+ * `Select Repair Location` popup wait crashed the runner mid-batch, and
+ * the BN queued after it never even started.
+ *
+ * Fixed by attaching a no-op `.catch()` to the promise THE INSTANT it's
+ * created — this satisfies Node's unhandled-rejection tracking immediately
+ * (a promise only needs ONE handler attached before it settles, not before
+ * every consumer awaits it), while the ORIGINAL promise returned here still
+ * rejects normally for whoever awaits it afterward. Behavior for the
+ * caller is unchanged either way; only the crash risk is removed.
+ */
+export function armPopupWait(page: Page): Promise<Page> {
+  const popupPromise = page.waitForEvent('popup');
+  popupPromise.catch(() => {
+    /* handled here only to satisfy Node's unhandled-rejection check; the
+       real rejection still reaches whoever awaits popupPromise itself */
+  });
+  return popupPromise;
 }
 
 /**
@@ -239,4 +281,103 @@ export async function pickLocationInPopup(popup: Page, candidates: string[]): Pr
     '[location-picker] no expected repair location present in the picker, even after searching',
   );
   return null;
+}
+
+/**
+ * Reads an inventory item's current location off its own Details tab —
+ * moved here from writeInHouseScrap.ts (2026-09-12) so the pins back-shop
+ * routing tool (pinRouting.ts) can reuse the EXACT same, already-proven
+ * mechanism rather than a second copy that could drift, per explicit user
+ * direction that pins are found "just like when scrapping a part out of
+ * the back shop" — i.e. via the same Inventory Search
+ * (openInventoryBySerial), not the ToDoList link-click the pins
+ * recordings' own (confirmed incomplete/inaccurate) capture showed.
+ *
+ * ROOT CAUSE THIS WORKS AROUND (found live, 2026-08-25, in-house scrap):
+ * MXI remembers the ACTIVE TAB for the session. Opening an item after a
+ * PRIOR item left the session on `aTab=Open.OpenChecks` restores that
+ * same tab — and the Details content, the only place the location is
+ * stated, is never rendered at all. This is also why a serial processed
+ * FIRST in a batch used to succeed while every one after it failed.
+ * Detects that (`looksLikeDetailsTab`) and explicitly re-selects "Details"
+ * before reading, rather than trusting whatever tab happens to be active.
+ *
+ * Returns currentLocation: '' (not a guess) when no location label is
+ * found even after that — `parseCurrentLocation` is anchored on the
+ * "Location:" label with no loose fallback, since a real production
+ * capture proved a loose bare-token fallback can read a DIFFERENT item's
+ * location off the same page (a search-results grid also containing
+ * "PNS/STORE"). `onDetailsTab` is returned too so a caller's own failure
+ * log can say whether the tab was ever successfully confirmed active, not
+ * just that the location came back empty.
+ */
+export interface CurrentLocationRead {
+  currentLocation: string;
+  onDetailsTab: boolean;
+}
+
+export async function readCurrentLocationOnDetailsTab(page: Page, identifier: string): Promise<CurrentLocationRead> {
+  let bodyText = await page.locator('body').innerText();
+  if (!looksLikeDetailsTab(bodyText)) {
+    log.info(
+      { identifier, url: page.url() },
+      '[location] details tab not active (MXI restored a previous tab) — selecting it explicitly',
+    );
+    await clickIfPresent(page, page.getByRole('link', { name: 'Details', exact: true }), TAB_CLICK_TIMEOUT_MS);
+    try {
+      // Content-aware wait for the location LABEL itself, not a fixed delay.
+      await page.waitForFunction(
+        () => /Location:\s*[A-Za-z]{3}\/[A-Za-z0-9]+/.test(document.body?.innerText ?? ''),
+        undefined,
+        { timeout: TAB_NAV_TIMEOUT_MS, polling: 250 },
+      );
+    } catch {
+      /* reported below via the empty-string return, with the real page state already logged by the caller */
+    }
+    bodyText = await page.locator('body').innerText();
+  }
+  return { currentLocation: parseCurrentLocation(bodyText), onDetailsTab: looksLikeDetailsTab(bodyText) };
+}
+
+/**
+ * Clicks a tab link and CONFIRMS the page actually moved to it (checked via
+ * URL marker, with one retry) — moved here from writeInHouseScrap.ts
+ * (2026-09-12) so the pins back-shop routing tool can reuse this exact,
+ * already-proven mechanism instead of a second copy.
+ *
+ * REAL BUG THIS EXISTS TO FIX (2026-08-25, in-house scrap): a plain
+ * `clickIfPresent` only waits for the link to become VISIBLE and its
+ * return value used to be discarded — so on a slow page (measured ~19s
+ * for a part-detail page to render under load) the tab was never actually
+ * switched, the flow read whatever tab was already active instead, and a
+ * genuinely-present item was reported as having nothing there. Now
+ * positively confirms the URL itself changed before treating the click as
+ * real.
+ */
+export async function clickUntilUrlContains(
+  page: Page,
+  locator: ReturnType<Page['getByRole']>,
+  marker: string,
+  label: string,
+  identifier: string,
+): Promise<boolean> {
+  if (page.url().includes(marker)) return true;
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const clicked = await clickIfPresent(page, locator, TAB_CLICK_TIMEOUT_MS);
+    if (!clicked) {
+      log.warn({ identifier, label, attempt, url: page.url() }, '[tab-nav] tab link never became visible');
+      continue;
+    }
+    try {
+      await page.waitForURL((url) => url.href.includes(marker), { timeout: TAB_NAV_TIMEOUT_MS });
+      return true;
+    } catch {
+      log.warn(
+        { identifier, label, attempt, url: page.url(), expected: marker },
+        '[tab-nav] clicked the tab but the URL never reached it — retrying',
+      );
+    }
+  }
+  return page.url().includes(marker);
 }

@@ -1,21 +1,19 @@
 import type { Page } from 'playwright';
 import type { MxiClient } from './mxiClient.js';
 import {
+  armPopupWait,
   clickIfPresent,
+  clickUntilUrlContains,
   closePopupQuietly,
   enterPasswordIfPrompted,
   pace,
   pickLocationInPopup,
+  readCurrentLocationOnDetailsTab,
   repairLocationCandidates,
 } from './scrapFlowHelpers.js';
 import { openInventoryBySerial } from './openInventoryBySerial.js';
 import { evaluateBaseStation } from '../writeUps/shared/approvedLocations.js';
-import {
-  looksLikeDetailsTab,
-  parseCurrentLocation,
-  pickWorkPackageNameFieldIndex,
-  toScrapWorkPackageName,
-} from './inHouseScrapParsing.js';
+import { pickWorkPackageNameFieldIndex, toScrapWorkPackageName } from './inHouseScrapParsing.js';
 import { createLogger } from '../logging/logger.js';
 
 const log = createLogger('scrap');
@@ -45,42 +43,9 @@ const TAB_NAV_TIMEOUT_MS = 20_000;
  */
 const OPTIONAL_CLICK_TIMEOUT_MS = 15_000;
 
-/**
- * Clicks a tab link and CONFIRMS the page actually moved to it, retrying
- * once. Returns whether the target tab was genuinely reached.
- *
- * Exists because the two callers below used to discard clickIfPresent's
- * return value entirely, so a click that never happened was
- * indistinguishable from one that did — and the next read then blamed the
- * part rather than the navigation.
- */
-async function clickUntilUrlContains(
-  page: Page,
-  locator: ReturnType<Page['getByRole']>,
-  marker: string,
-  label: string,
-  serialNumber: string,
-): Promise<boolean> {
-  if (page.url().includes(marker)) return true;
-
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    const clicked = await clickIfPresent(page, locator, TAB_CLICK_TIMEOUT_MS);
-    if (!clicked) {
-      log.warn({ serialNumber, label, attempt, url: page.url() }, '[in-house scrap] tab link never became visible');
-      continue;
-    }
-    try {
-      await page.waitForURL((url) => url.href.includes(marker), { timeout: TAB_NAV_TIMEOUT_MS });
-      return true;
-    } catch {
-      log.warn(
-        { serialNumber, label, attempt, url: page.url(), expected: marker },
-        '[in-house scrap] clicked the tab but the URL never reached it — retrying',
-      );
-    }
-  }
-  return page.url().includes(marker);
-}
+// clickUntilUrlContains moved to scrapFlowHelpers.ts (2026-09-12) so the
+// pins back-shop routing tool can reuse this exact, already-proven
+// tab-navigation mechanism — see that function's own docblock.
 
 /** Description written into the scheduled work package, per the recording. */
 export const INHOUSE_SCHEDULE_DESCRIPTION = 'scrap as NREP';
@@ -190,32 +155,15 @@ export async function writeInHouseScrap(
     // This is also the real explanation for the earlier "first serial
     // succeeds, every one after it fails" report — the first serial left
     // the session sitting on the Open tab.
-    let bodyText = await page.locator('body').innerText();
-    if (!looksLikeDetailsTab(bodyText)) {
-      log.info(
-        { serialNumber, url: page.url() },
-        '[in-house scrap] details tab not active (MXI restored a previous tab) — selecting it explicitly',
-      );
-      await clickIfPresent(page, page.getByRole('link', { name: 'Details', exact: true }), TAB_CLICK_TIMEOUT_MS);
-      try {
-        // Wait for the location LABEL itself, not for a fixed delay — the
-        // content-aware discipline used everywhere else in this suite.
-        await page.waitForFunction(
-          () => /Location:\s*[A-Za-z]{3}\/[A-Za-z0-9]+/.test(document.body?.innerText ?? ''),
-          undefined,
-          { timeout: TAB_NAV_TIMEOUT_MS, polling: 250 },
-        );
-      } catch {
-        /* reported below, with the real page state */
-      }
-      bodyText = await page.locator('body').innerText();
-    }
-
-    const currentLocation = parseCurrentLocation(bodyText);
+    //
+    // Moved into scrapFlowHelpers.ts (2026-09-12) so the pins back-shop
+    // routing tool can reuse this exact, already-proven mechanism instead
+    // of a second copy — see that function's own docblock.
+    const { currentLocation, onDetailsTab } = await readCurrentLocationOnDetailsTab(page, serialNumber);
     const candidates = repairLocationCandidates(currentLocation);
     if (candidates.length === 0) {
       log.warn(
-        { serialNumber, url: page.url(), onDetailsTab: looksLikeDetailsTab(bodyText) },
+        { serialNumber, url: page.url(), onDetailsTab },
         '[in-house scrap] no base station readable even after selecting the Details tab',
       );
       return {
@@ -519,7 +467,7 @@ export async function writeInHouseScrap(
     await page.getByRole('link', { name: 'Schedule Work Package' }).click();
     await pace(page);
 
-    const schedulePopupPromise = page.waitForEvent('popup');
+    const schedulePopupPromise = armPopupWait(page);
     await page.getByRole('link', { name: 'Select Repair Location' }).click();
     schedulePopup = await schedulePopupPromise;
     await schedulePopup.waitForLoadState('domcontentloaded');
@@ -553,7 +501,7 @@ export async function writeInHouseScrap(
     await page.getByRole('link', { name: 'Create Transfer' }).click();
     await pace(page);
 
-    const transferPopupPromise = page.waitForEvent('popup');
+    const transferPopupPromise = armPopupWait(page);
     await page.getByRole('link', { name: 'Select Local Location' }).click();
     transferPopup = await transferPopupPromise;
     await transferPopup.waitForLoadState('domcontentloaded');

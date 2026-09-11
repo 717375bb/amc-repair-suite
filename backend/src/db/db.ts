@@ -496,7 +496,21 @@ export interface MxiWriteInsert {
   // is a free-text column at the SQL level (see schema below) — no
   // migration needed, same pattern this project already uses for
   // write_up_actions.outcome.
-  action: 'approved_write' | 'approved_note_only_write' | 'approved_manual_override_write' | 'rejected';
+  // CLAUDE_CODE_PROMPT (AWB -> Inbound shipment, correction, 2026-09-10) —
+  // 'approved_inbound_awb_write' added for the separate action of writing
+  // a vendor-supplied AWB (detected in Vendor Notes, see inference/
+  // inboundAwb.ts) into the order's inbound shipment Waybill Number —
+  // genuinely distinct from every write above, both in WHAT gets written
+  // (a different MXI screen/field entirely, not the ESD field or Notes to
+  // Receiver) and in WHEN (only attempted after that same row's ESD write
+  // already succeeded, as its own separate audit row referencing the same
+  // esd_inference_id).
+  action:
+    | 'approved_write'
+    | 'approved_note_only_write'
+    | 'approved_manual_override_write'
+    | 'approved_inbound_awb_write'
+    | 'rejected';
   inferredEsd: string | null;
   writeStatus: 'success' | 'failed' | 'skipped';
   errorMessage: string | null;
@@ -722,7 +736,19 @@ export interface WriteUpActionInsert {
     // against a live page — see pinsRoutingCli.ts). An analyst completes
     // the shipment by hand; this row exists so what was computed and
     // handed off is auditable.
-    | 'pending_manual';
+    | 'pending_manual'
+    // CLAUDE_CODE_PROMPT (DO NOT SHIP auto-clear, 2026-09-11) — per
+    // explicit user direction: a CREATE_ORDER_ONLY order's DO NOT SHIP
+    // note (createOrderOnly.ts's ZERO_USAGE_DO_NOT_SHIP_REASON) is
+    // automatically removed once that part's Current Usage is no longer
+    // all-zero. This row is what makes an order STOP being a candidate for
+    // the next periodic recheck (see writeUps/shared/doNotShipRecheck.ts —
+    // it queries for the LATEST write_up_actions row per order_number
+    // still reading 'order_created_do_not_ship'; a row of this new outcome
+    // becomes that latest row instead, the same append-only "latest row is
+    // truth" pattern used elsewhere in this project, e.g. esdWriteRunner's
+    // "already succeeded" check).
+    | 'do_not_ship_note_cleared';
   stationCode: string | null;
   routedLocation: string | null;
   filledFieldsJson: string | null;

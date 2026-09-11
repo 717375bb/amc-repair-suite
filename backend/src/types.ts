@@ -85,14 +85,31 @@ export interface InferenceRecord {
   vendorNotes: string | null;
   orderStatus: string | null;
   /**
-   * CLAUDE_CODE_PROMPT (AWB -> Inbound shipment, 2026-09-09) — carried
-   * through purely for display/detection in the ESD Finder review table
-   * ("this order has an AWB in the report"). Deliberately NOT wired into
-   * any automatic write path yet — see mxiWriter/awbInboundSelectors.ts's
-   * own docstring for why that writer needs a first live watched test
-   * before anything reads this field to trigger a real MXI write.
+   * CLAUDE_CODE_PROMPT (AWB -> Inbound shipment, 2026-09-09) — the
+   * OUTBOUND AWB read straight off the vendor's own report column (what WE
+   * gave the vendor). Per explicit user correction (2026-09-10), this is
+   * NOT what should display or get written as the inbound shipment's own
+   * AWB — see inboundAwb below for that. Kept for its own sake (still a
+   * real value from the report), just no longer the review table's AWB
+   * display.
    */
   outboundAwb: string | null;
+  /**
+   * CLAUDE_CODE_PROMPT (AWB -> Inbound shipment, correction, 2026-09-10) —
+   * per explicit user direction: "I wanted the AWB's to display from the
+   * vendor in Vendor Notes, only if present. Any string of 12 numbers and
+   * the keyword 'AWB' means that string of numbers should be written into
+   * the inbound shipment line." Derived from vendorNotes via
+   * inference/inboundAwb.ts's resolveInboundAwbFromNotes — the vendor's
+   * OWN stated AWB for shipping the part back to us, which is what
+   * actually belongs on the inbound shipment (mxiWriter/
+   * awbInboundSelectors.ts's writeInboundAwb). Null when absent OR when
+   * more than one distinct 12-digit candidate was found near "AWB" in the
+   * notes (see inboundAwbAmbiguous) — never guessed between them.
+   */
+  inboundAwb: string | null;
+  /** True when vendorNotes contained two or more DIFFERENT 12-digit numbers each plausibly tied to "AWB" — inboundAwb is null in this case specifically because of the ambiguity, not because nothing was found. */
+  inboundAwbAmbiguous: boolean;
   classification: EsdClassification | null;
   extractedBaseDate: string | null;
   bufferDaysApplied: number | null;

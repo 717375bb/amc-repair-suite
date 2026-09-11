@@ -34,8 +34,16 @@ export interface BackShopFinding {
    * 'unreadable' is deliberately its own outcome rather than being folded
    * into no_scrap_note: a part we could not read must never be presented as
    * a part with nothing to say.
+   *
+   * CLAUDE_CODE_PROMPT (pins on the back-shop listing, 2026-09-11) —
+   * 'pins_process' added per explicit user direction: pins (PN 4114T06P03,
+   * see backShop/pinRouting.ts) are never scrapped, so they were falling
+   * into 'no_scrap_note' and looking identical to a part with genuinely
+   * nothing to do — invisible as something needing action. Detected from
+   * the sheet row alone (no MXI read needed, since a pin's scrap note is
+   * never relevant), before the scrap-note check runs at all.
    */
-  outcome: ScrapRecommendation | 'unreadable';
+  outcome: ScrapRecommendation | 'unreadable' | 'pins_process';
   /** The part note, verbatim, so the analyst confirms against MXI's words. */
   note: string | null;
   /** Why it was not recommended, or why it could not be read. */

@@ -351,10 +351,13 @@ function WriteStatusCell({ result, jobDone }: { result: EsdWriteOrderResult | un
   }
   if (result.status === 'success') {
     return (
-      <span className="flex items-center gap-1.5 text-xs font-medium text-success">
-        <CheckCircle2 size={13} />
-        Written — verified
-      </span>
+      <div>
+        <span className="flex items-center gap-1.5 text-xs font-medium text-success">
+          <CheckCircle2 size={13} />
+          Written — verified
+        </span>
+        <InboundAwbStatusLine result={result} />
+      </div>
     )
   }
   if (result.status === 'skipped') {
@@ -377,6 +380,25 @@ function WriteStatusCell({ result, jobDone }: { result: EsdWriteOrderResult | un
       )}
     </div>
   )
+}
+
+/**
+ * Only rendered when the ESD write above succeeded AND a detected inbound
+ * AWB was actually attempted (esdWriteRunner.ts sets inboundAwbStatus only
+ * in that case) — a row with no detected AWB shows nothing extra here.
+ */
+function InboundAwbStatusLine({ result }: { result: EsdWriteOrderResult }) {
+  if (!result.inboundAwbStatus) return null
+  if (result.inboundAwbStatus === 'success') {
+    return <p className="mt-0.5 text-xs text-success">Inbound AWB {result.inboundAwb} written</p>
+  }
+  if (result.inboundAwbStatus === 'no_inbound_shipment_found') {
+    return <p className="mt-0.5 text-xs text-muted">AWB {result.inboundAwb} detected — no inbound shipment yet</p>
+  }
+  if (result.inboundAwbStatus === 'skipped') {
+    return <p className="mt-0.5 text-xs text-muted">AWB {result.inboundAwb} not written — {result.inboundAwbError ?? 'already set to a different value'}</p>
+  }
+  return <p className="mt-0.5 text-xs text-danger">AWB {result.inboundAwb} write failed — {result.inboundAwbError ?? 'unknown error'}</p>
 }
 
 // ---------------------------------------------------------------------------
@@ -867,8 +889,8 @@ function ReviewState({
                   <th className="px-5 py-3 font-medium">Inferred ESD</th>
                   <th className="px-5 py-3 font-medium">Confidence</th>
                   <th className="px-5 py-3 font-medium">Notes to Receiver</th>
-                  <th className="px-5 py-3 font-medium" title="Vendor row's Outbound AWB, if any. Detected here for now — writing it into MXI's Inbound shipment is not yet wired into this batch run.">
-                    AWB
+                  <th className="px-5 py-3 font-medium" title="The vendor's own AWB, detected in Vendor Notes (a 12-digit number near the keyword AWB). Shown only when found — written into MXI's inbound shipment on write.">
+                    Inbound AWB
                   </th>
                   {hasWriteRun && <th className="px-5 py-3 font-medium">Write status</th>}
                 </tr>
@@ -926,7 +948,15 @@ function ReviewState({
                         />
                       </td>
                       <td className="px-5 py-3">
-                        {row.outboundAwb ? <Badge tone="neutral">{row.outboundAwb}</Badge> : <span className="text-muted">—</span>}
+                        {row.inboundAwb ? (
+                          <Badge tone="neutral">{row.inboundAwb}</Badge>
+                        ) : row.inboundAwbAmbiguous ? (
+                          <span className="text-xs text-muted" title="Vendor Notes mention two or more different 12-digit numbers near 'AWB' — not guessing which one is real.">
+                            multiple found
+                          </span>
+                        ) : (
+                          <span className="text-muted">—</span>
+                        )}
                       </td>
                       {hasWriteRun && (
                         <td className="px-5 py-3">

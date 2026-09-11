@@ -4,6 +4,7 @@ import { createReadyMxiClient } from '../../mxiWriter/cliMxiClient.js';
 import { openPartDetailsBySerial } from '../../mxiWriter/openInventoryBySerial.js';
 import { readPartScrapNote } from '../../backShop/readPartScrapNote.js';
 import { judgeScrapNote, noScrapNoteReason } from '../../backShop/scrapNoteJudgement.js';
+import { isPinPartNumber, PIN_PART_NUMBER } from '../../backShop/pinRouting.js';
 import { evaluateBaseStation } from '../../writeUps/shared/approvedLocations.js';
 import type { BackShopRow } from '../../backShop/backShopRows.js';
 import type { BackShopFinding } from '../backShop/backShopJobManager.js';
@@ -88,6 +89,23 @@ async function main(): Promise<void> {
         baseApproved: base.approved,
         routedTo: base.approved ? base.routedTo : null,
       };
+
+      // CLAUDE_CODE_PROMPT (pins on the back-shop listing, 2026-09-11) —
+      // per explicit user direction: pins are never scrapped, so reading a
+      // scrap note for one is pointless (and would have surfaced as
+      // no_scrap_note, indistinguishable from a part with genuinely
+      // nothing to do). Detected from the sheet row alone, before any MXI
+      // navigation — cheap, and matches evaluateBaseStation's own
+      // sheet-data-only check just above. See backShop/pinRouting.ts for
+      // the actual Pins process this routes the analyst toward.
+      if (isPinPartNumber(row.partNumber)) {
+        finding.outcome = 'pins_process';
+        finding.reason =
+          `PN ${PIN_PART_NUMBER} follows the Pins process, not a scrap decision — run ` +
+          `"npm run pins:route -- ${row.serialNumber}" to route it.`;
+        emit({ type: 'finding', finding });
+        continue;
+      }
 
       const opened = await openPartDetailsBySerial(page, client.todoListUrl, row.serialNumber, row.partNumber);
       if (opened.status !== 'opened') {

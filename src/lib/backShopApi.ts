@@ -42,7 +42,8 @@ export interface BackShopListing {
   skippedIncomplete: number
 }
 
-export type BackShopOutcome = 'scrap_recommended' | 'scrap_negated' | 'no_scrap_note' | 'unreadable'
+/** 'pins_process' — PN 4114T06P03 (see backend's backShop/pinRouting.ts), never scrapped, routed to the Pins process instead of a scrap decision. */
+export type BackShopOutcome = 'scrap_recommended' | 'scrap_negated' | 'no_scrap_note' | 'unreadable' | 'pins_process'
 
 export interface BackShopFinding {
   partNumber: string

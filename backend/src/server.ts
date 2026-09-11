@@ -28,6 +28,7 @@ import {
 } from './api/backShop/backShopJobManager.js';
 import { fileModifiedAt, findSyncedBackShopListing } from './backShop/backShopListingLocation.js';
 import { parseBackShopListing } from './backShop/backShopListingParser.js';
+import { getActivePinsJob, getPinsJob, startPinsRoutingJob } from './api/pins/pinsJobManager.js';
 import {
   craOptions,
   eligibilityOf,
@@ -51,6 +52,7 @@ import {
 } from './api/invoicePriceWriter/ingestion.js';
 import { registerAuthRoutes, requireSession, type AuthedRequest } from './api/authRoutes.js';
 import { createMaintenanceRecordsDraft } from './writeUps/shared/maintenanceRecordsDraft.js';
+import { runDoNotShipRecheckPass } from './writeUps/shared/doNotShipRecheck.js';
 import { reportCorporateCaCert } from './security/corporateCaCert.js';
 import { parseFlexibleDate } from './inference/dateUtils.js';
 import { formatISO } from 'date-fns';
@@ -196,19 +198,68 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
   // run-suite-hidden.cjs now treats as the primary shutdown trigger. The
   // heartbeat timeout itself was widened to a long fallback for the
   // abnormal case where pagehide never fires (a crash, a forced kill).
+  //
+  // CLAUDE_CODE_PROMPT (third pass, 2026-09-11) — that fix was ALSO not
+  // enough, and the logs say so plainly: at 2026-09-11T13:08:56Z the
+  // launcher shut down on "frontend tab was closed" while backend.log
+  // showed a write-up runner actively processing part 90001200-1WT
+  // fifteen seconds earlier. `pagehide` is NOT the unambiguous "the tab is
+  // gone" signal the comment above claims — it also fires on a plain page
+  // RELOAD (F5), on navigating away, on a browser discarding a background
+  // tab, and from ANY one tab when the app is open in several. Every one
+  // of those is a false positive that kills a live production run.
+  //
+  // Two changes, below and in run-suite-hidden.cjs:
+  //  1. A heartbeat CLEARS explicitlyClosed. A reload's first ping (or any
+  //     other still-open tab's ping) therefore cancels a pending shutdown
+  //     on its own, and the orchestrator waits out a grace window rather
+  //     than acting the instant the flag appears.
+  //  2. `busy` below reports whether ANY job is actually running. The
+  //     orchestrator refuses to shut down while it's true, whatever signal
+  //     fired. The cost of staying up too long is some idle RAM on the
+  //     analyst's own machine; the cost of shutting down too early is a
+  //     half-written MXI order. Those are not comparable, so this errs
+  //     entirely in one direction.
   let explicitlyClosed = false;
   app.post('/api/heartbeat', (_req, res) => {
     lastHeartbeatAt = Date.now();
+    // A live tab is pinging — whatever earlier `pagehide` fired (a reload,
+    // a second tab closing) did not mean the app was done being used.
+    explicitlyClosed = false;
     res.json({ ok: true });
   });
   app.post('/api/heartbeat-closed', (_req, res) => {
     explicitlyClosed = true;
     res.json({ ok: true });
   });
+  /**
+   * Every job registry in this app, asked the same question: is anything
+   * running right now? Each one owns its own activeRunId, so "busy" is
+   * just the OR of all of them — a new job type must be added here too,
+   * or the launcher could shut down on top of it.
+   */
+  function anyJobRunning(): { busy: boolean; busyWith: string[] } {
+    const busyWith = [
+      getActiveJob() ? 'write-ups' : null,
+      getActiveEsdJob() ? 'esd-finder' : null,
+      getActiveQuoteJob() ? 'quotes' : null,
+      getActiveScrapJob() ? 'scrap' : null,
+      getActiveBackShopJob() ? 'back-shop' : null,
+      getActiveInvoicePriceJob() ? 'invoice-price' : null,
+      getActivePinsJob() ? 'pins' : null,
+    ].filter((name): name is string => name !== null);
+    return { busy: busyWith.length > 0, busyWith };
+  }
+
   app.get('/api/heartbeat-status', (_req, res) => {
+    const { busy, busyWith } = anyJobRunning();
     res.json({
       msSinceLastHeartbeat: lastHeartbeatAt === null ? null : Date.now() - lastHeartbeatAt,
       explicitlyClosed,
+      // See the heartbeat block's own comment above: the launcher refuses
+      // to shut down while this is true, whichever signal fired.
+      busy,
+      busyWith,
     });
   });
 
@@ -1360,6 +1411,63 @@ export function createApp(db: DatabaseType, mxiClient: MxiClient, authDb: Databa
     res.json({ ok: true });
   });
 
+  // CLAUDE_CODE_PROMPT (Back Shop "Run Pins process" button, 2026-09-11) —
+  // per explicit user direction: a real button instead of copying a CLI
+  // command by hand. Runs the same runPinsRoutingForBn() the standalone
+  // CLI (cli/pinsRoutingCli.ts) uses — see pinsJobManager.ts's own
+  // docblock for why this has no cancel route, unlike the jobs above.
+  app.post('/api/pins/start', requireSession, (req, res) => {
+    const env = parseRequiredEnv(req, res);
+    if (!env) return;
+
+    // Per explicit user direction (2026-09-11): every pin found in one
+    // discovery pass is submitted together, one job — same list-of-serials
+    // shape as the in-house scrap batch (parseSerialList).
+    const bns = parseSerialList(String(req.body?.bns ?? ''));
+    if (bns.length === 0) {
+      res.status(400).json({ error: 'At least one BN is required.' });
+      return;
+    }
+
+    const session = (req as AuthedRequest).session!;
+    const mxiCredential = getMxiCredentialForUser(authDb, session.userId);
+    const result = startPinsRoutingJob({ env, bns }, mxiCredential);
+    if (!result.ok) {
+      if (result.conflictRunId) {
+        res.status(409).json({ error: 'A pins routing job is already running.', activeRunId: result.conflictRunId });
+      } else {
+        res.status(400).json({ error: result.error });
+      }
+      return;
+    }
+    res.status(202).json({ runId: result.runId, env, bns });
+  });
+
+  app.get('/api/pins/active-job', requireSession, (_req, res) => {
+    const job = getActivePinsJob();
+    res.json({ activeRunId: job?.runId ?? null });
+  });
+
+  app.get('/api/pins/runs/:runId', requireSession, (req, res) => {
+    const job = getPinsJob(req.params.runId);
+    if (!job) {
+      res.status(404).json({ error: `No pins run found for runId "${req.params.runId}".` });
+      return;
+    }
+    res.json({
+      runId: job.runId,
+      bns: job.bns,
+      status: job.status,
+      startedAt: job.startedAt,
+      completedAt: job.completedAt,
+      fatalError: job.fatalError,
+      phase: job.phase,
+      env: job.env,
+      results: job.results,
+      totalRequested: job.totalRequested,
+    });
+  });
+
   app.get('/pending-esd-updates', requireAutomationKey, (_req, res) => {
     const rows = getPendingEsdUpdates(db);
     res.json(
@@ -1492,8 +1600,45 @@ async function main(): Promise<void> {
     log.info({ port, mxiEnv: config.env }, 'ESD approval API listening');
   });
 
+  // CLAUDE_CODE_PROMPT (DO NOT SHIP auto-clear, 2026-09-11) — per explicit
+  // user direction: "fully automatic, runs by itself" rather than an
+  // analyst-triggered check. Runs on the server's own already-logged-in,
+  // server-lifetime mxiClient (the one thing above NOT to reuse for a
+  // per-request job — see createApp's own comment on that client — but
+  // exactly right here: this is server-owned maintenance, not a specific
+  // analyst's env-scoped job). Interpreted as "runs on its own while the
+  // app is open" — this server's own lifetime is already tied to a
+  // frontend tab being open (see the hidden-launcher heartbeat work) — not
+  // as a standalone always-on OS service independent of the app; flagged
+  // here in case that reading is wrong.
+  //
+  // First pass waits past normal startup so it never competes with the
+  // server's own boot-time MXI login; each pass afterward is capped
+  // (DO_NOT_SHIP_RECHECK_LIMIT) so a large backlog can't turn into an
+  // hours-long unattended MXI session in one go — the next pass picks up
+  // whatever's left, since a cleared order naturally drops out of
+  // findDoNotShipCandidates's own query.
+  const DO_NOT_SHIP_RECHECK_INITIAL_DELAY_MS = 10 * 60_000;
+  const DO_NOT_SHIP_RECHECK_INTERVAL_MS = 3 * 60 * 60_000;
+  const DO_NOT_SHIP_RECHECK_LIMIT = 50;
+  let doNotShipRecheckTimer: ReturnType<typeof setTimeout> | undefined;
+  const runDoNotShipRecheckPassSafely = async (): Promise<void> => {
+    try {
+      await runDoNotShipRecheckPass(mxiClient, db, config.env, DO_NOT_SHIP_RECHECK_LIMIT);
+    } catch (err) {
+      // A failed pass must never crash the server or stop future passes —
+      // the next scheduled run tries again on its own.
+      log.error({ err }, '[do-not-ship-recheck] scheduled pass failed');
+    }
+  };
+  doNotShipRecheckTimer = setTimeout(function scheduleDoNotShipRecheck() {
+    void runDoNotShipRecheckPassSafely();
+    doNotShipRecheckTimer = setTimeout(scheduleDoNotShipRecheck, DO_NOT_SHIP_RECHECK_INTERVAL_MS);
+  }, DO_NOT_SHIP_RECHECK_INITIAL_DELAY_MS);
+
   const shutdown = async (): Promise<void> => {
     log.info('Shutting down...');
+    if (doNotShipRecheckTimer) clearTimeout(doNotShipRecheckTimer);
     httpServer.close();
     await mxiClient.shutdown();
     db.close();

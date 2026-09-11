@@ -26,6 +26,7 @@ import {
   type BackShopRow,
 } from '../lib/backShopApi'
 import { startInHouseScrap } from '../lib/scrapApi'
+import { getActivePinsJob, getPinsRun, startPinsRun, type PinsRoutingRunResult, type PinsRunStatusResponse } from '../lib/pinsApi'
 
 /**
  * Back Shop — the daily in-house scrap list.
@@ -51,6 +52,38 @@ function serialKey(row: { serialNumber: string }): string {
   return row.serialNumber.toUpperCase()
 }
 
+/** One pin's own result within the (possibly still-running) batched pins job, if it's reported back yet. */
+function PinsResultLine({ result }: { result: PinsRoutingRunResult | undefined }) {
+  if (!result) return null
+  if (result.status === 'success') {
+    const detail =
+      result.path === 'correct_base' ? `transferred to ${result.locationUsed}` : `shipped to ${result.destination}/DOCK`
+    return (
+      <p className="mt-1.5 flex items-center gap-1.5 text-xs font-medium text-success">
+        <CheckCircle2 size={13} />
+        Done — {detail} ({result.currentLocation} was the starting location)
+      </p>
+    )
+  }
+  if (result.status === 'tied') {
+    return (
+      <p className="mt-1.5 text-xs text-warning">
+        Two or more back shops are tied for the lowest total — nothing was written.{' '}
+        {result.totals && Object.entries(result.totals).map(([base, total]) => `${base}: ${total}`).join(', ')}
+      </p>
+    )
+  }
+  if (result.status === 'destination_not_found') {
+    return <p className="mt-1.5 text-xs text-warning">{result.errorMessage}</p>
+  }
+  return (
+    <p className="mt-1.5 flex items-center gap-1.5 text-xs font-semibold text-danger">
+      <AlertTriangle size={13} />
+      Failed — {result.errorMessage ?? 'unknown error'}
+    </p>
+  )
+}
+
 export default function BackshopRepairs() {
   const [env, setEnv] = useState<MxiEnv>('production')
   const [listing, setListing] = useState<BackShopListing | null>(null)
@@ -59,10 +92,24 @@ export default function BackshopRepairs() {
   const [craFilter, setCraFilter] = useState<string>('all')
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [error, setError] = useState<string | null>(null)
-  const [showScrapConfirm, setShowScrapConfirm] = useState(false)
+  // Per explicit user direction (2026-09-11): pins are "looped in with the
+  // scrap process" — ONE Run action handles both a selected scrap batch
+  // and every pin found, not two separate buttons. showRunConfirm gates
+  // that single combined action.
+  const [showRunConfirm, setShowRunConfirm] = useState(false)
   const [showCancelConfirm, setShowCancelConfirm] = useState(false)
   const [cancelling, setCancelling] = useState(false)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+
+  // Pins batch job — plain page-local polling rather than the shared
+  // tracked-run system, since this is started and watched from the same
+  // card it was launched from, not a long-running job an analyst would
+  // navigate away from and check on later (see lib/pinsApi.ts's own
+  // docblock). ONE job covers every pin found in this discovery pass.
+  const [activePinsRunId, setActivePinsRunId] = useState<string | null>(null)
+  const [pinsRun, setPinsRun] = useState<PinsRunStatusResponse | null>(null)
+  const [pinsStarting, setPinsStarting] = useState(false)
+  const isPinsRunning = !!activePinsRunId && !isTerminal(pinsRun?.status)
 
   const { runId, run, startTracking, cancel: cancelRun, clear: clearRun } = useBackShopRun()
   const { startTracking: startScrapTracking } = useScrapRun()
@@ -96,8 +143,46 @@ export default function BackshopRepairs() {
       .catch(() => {
         /* a missing active job is not an error worth showing */
       })
+    // Same re-attach, for a pins run — a page reload mid-run would
+    // otherwise show an idle button while the job kept going server-side.
+    void getActivePinsJob()
+      .then(({ activeRunId }) => {
+        if (activeRunId) setActivePinsRunId(activeRunId)
+      })
+      .catch(() => {
+        /* a missing active job is not an error worth showing */
+      })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Poll while a pins run is tracked and not yet terminal — same shape as
+  // trackedRun.tsx's own polling loop, just page-local (see the state
+  // declarations above for why this isn't the shared system).
+  useEffect(() => {
+    if (!activePinsRunId) return
+    let stopped = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+
+    const tick = async () => {
+      try {
+        const next = await getPinsRun(activePinsRunId)
+        if (stopped) return
+        setPinsRun(next)
+        if (isTerminal(next.status)) return
+      } catch {
+        // Keep polling through a transient failure rather than abandoning
+        // a live run — a genuinely gone run resolves to a terminal status
+        // soon enough, same reasoning as trackedRun.tsx.
+      }
+      if (!stopped) timer = setTimeout(() => void tick(), 2000)
+    }
+
+    void tick()
+    return () => {
+      stopped = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [activePinsRunId])
 
   const handleUpload = async (file: File | null | undefined) => {
     if (!file) return
@@ -125,6 +210,24 @@ export default function BackshopRepairs() {
   const negated = findings.filter((f) => f.outcome === 'scrap_negated')
   const noNote = findings.filter((f) => f.outcome === 'no_scrap_note')
   const unreadable = findings.filter((f) => f.outcome === 'unreadable')
+  // Pins (PN 4114T06P03) are never scrapped, so they never had a scrap note
+  // to find — kept in their own section rather than lumped into "Not
+  // recommended," which would otherwise make them look identical to a part
+  // with genuinely nothing to do (the exact problem this was built to fix).
+  const pinsProcess = findings.filter((f) => f.outcome === 'pins_process')
+
+  // Never re-offered to run again once it has genuinely succeeded.
+  // Neither runPinCorrectBaseFlow nor runPinWrongBaseShipmentFlow check
+  // "is this already done" before acting, so re-submitting a pin whose
+  // last attempt succeeded would create a real second task/transfer/
+  // shipment in MXI, not a harmless no-op — same reasoning OrderWriteUps
+  // already applies to an already-written line. Pins have no checkbox
+  // selection (per explicit user direction, all found pins run together),
+  // so this exclusion is what keeps a second "Run" press safe.
+  const pinsAlreadySucceeded = new Set(
+    (pinsRun?.results ?? []).filter((r) => r.status === 'success').map((r) => r.bn.toUpperCase()),
+  )
+  const pinsToRun = pinsProcess.filter((f) => !pinsAlreadySucceeded.has(serialKey(f)))
 
   // Every scrap-recommended part at an approved base starts selected, per
   // the ask ("default to select all parts that are scrap-recommended").
@@ -162,20 +265,36 @@ export default function BackshopRepairs() {
     }
   }
 
-  const handleScrapConfirmed = async () => {
-    setShowScrapConfirm(false)
+  // Per explicit user direction (2026-09-11): ONE "Run" press handles both
+  // the selected scrap batch and every pin found — "looped in with the
+  // scrap process" rather than a separate button. The two are still
+  // mechanically distinct jobs (a scrap batch and a pins batch, each with
+  // its own MXI session), just started together from this one confirm.
+  const handleRunConfirmed = async () => {
+    setShowRunConfirm(false)
     setError(null)
     try {
-      // Handed to the Scrap tab's job, which owns every scrap in this app.
-      // Its own guards (already-scrapped check, approved-base check) still
-      // run — this selection is a request, not an authority.
-      const { runId: scrapRunId } = await startInHouseScrap(
-        selectedFindings.map((f) => f.serialNumber).join('\n'),
-        env,
-      )
-      startScrapTracking(scrapRunId)
+      if (selectedFindings.length > 0) {
+        // Handed to the Scrap tab's job, which owns every scrap in this
+        // app. Its own guards (already-scrapped check, approved-base
+        // check) still run — this selection is a request, not an
+        // authority.
+        const { runId: scrapRunId } = await startInHouseScrap(
+          selectedFindings.map((f) => f.serialNumber).join('\n'),
+          env,
+        )
+        startScrapTracking(scrapRunId)
+      }
+      if (pinsToRun.length > 0) {
+        setPinsStarting(true)
+        const { runId } = await startPinsRun(pinsToRun.map((f) => f.serialNumber), env)
+        setPinsRun(null)
+        setActivePinsRunId(runId)
+      }
     } catch (err) {
       reportError(err)
+    } finally {
+      setPinsStarting(false)
     }
   }
 
@@ -325,54 +444,118 @@ export default function BackshopRepairs() {
           {!isDiscovering && findings.length > 0 && (
             <p className="text-sm text-text">
               {recommended.length} scrap-recommended, {negated.length} whose note says not to, {noNote.length} with no
-              scrap note, {unreadable.length} that could not be read.
+              scrap note, {unreadable.length} that could not be read, {pinsProcess.length} pin{pinsProcess.length === 1 ? '' : 's'} routed to the Pins process instead.
             </p>
           )}
           {run?.fatalError && <p className="mt-2 text-sm text-danger">{run.fatalError}</p>}
         </div>
       </Card>
 
-      {/* ---------------- Step 3: review and scrap ---------------- */}
-      {recommended.length > 0 && (
+      {/*
+        ---------------- Step 3: review and run ----------------
+        Per explicit user direction (2026-09-11): ONE Run action for both
+        the scrap batch and every pin found — pins are "looped in with the
+        scrap process" rather than reviewed/run separately. Scrap
+        candidates keep their own checkboxes (each has a real note worth
+        weighing); pins don't (there's no note to weigh — a pin is a pin)
+        and always run when found, minus any that already succeeded.
+      */}
+      {(recommended.length > 0 || pinsProcess.length > 0) && (
         <Card>
           <CardHeader
-            title="3. Scrap candidates"
-            description="Each part's own note in MXI is quoted below. Untick anything you don't want scrapped."
+            title="3. Review and run"
+            description="Scrap candidates are pre-selected — untick anything you don't want scrapped. Pins found always run; there's no note to review for one."
             action={
-              <PrimaryButton onClick={() => setShowScrapConfirm(true)} disabled={selectedFindings.length === 0}>
-                <PlayCircle size={16} /> Scrap {selectedFindings.length} selected
+              <PrimaryButton
+                onClick={() => setShowRunConfirm(true)}
+                disabled={(selectedFindings.length === 0 && pinsToRun.length === 0) || isPinsRunning || pinsStarting}
+              >
+                <PlayCircle size={16} />
+                Run
+                {selectedFindings.length > 0 && ` ${selectedFindings.length} scrap`}
+                {selectedFindings.length > 0 && pinsToRun.length > 0 && ' +'}
+                {pinsToRun.length > 0 && ` ${pinsToRun.length} pin${pinsToRun.length === 1 ? '' : 's'}`}
               </PrimaryButton>
             }
           />
-          <div className="divide-y divide-border">
-            {recommended.map((f) => (
-              <label key={serialKey(f)} className="flex cursor-pointer items-start gap-3 px-5 py-3 hover:bg-bg">
-                <input
-                  type="checkbox"
-                  className="mt-1"
-                  checked={selected.has(serialKey(f))}
-                  onChange={() => toggle(serialKey(f))}
-                />
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm font-medium text-text">
-                      {f.partNumber} / {f.serialNumber}
-                    </span>
-                    {f.baseApproved ? (
-                      <Badge tone="accent">
-                        {f.location} → {f.routedTo}
-                      </Badge>
-                    ) : (
-                      <Badge tone="warning">{f.location} — not an approved base</Badge>
-                    )}
-                    {f.cra && <span className="text-xs text-muted">{f.cra}</span>}
-                  </div>
-                  {f.partName && <p className="text-xs text-muted">{f.partName}</p>}
-                  <p className="mt-1 text-xs text-muted">“{f.note}”</p>
-                </div>
-              </label>
-            ))}
-          </div>
+          {recommended.length > 0 && (
+            <div className="border-t border-border">
+              <p className="px-5 pt-3 text-xs font-medium uppercase tracking-wide text-muted">Scrap candidates</p>
+              <div className="divide-y divide-border">
+                {recommended.map((f) => (
+                  <label key={serialKey(f)} className="flex cursor-pointer items-start gap-3 px-5 py-3 hover:bg-bg">
+                    <input
+                      type="checkbox"
+                      className="mt-1"
+                      checked={selected.has(serialKey(f))}
+                      onChange={() => toggle(serialKey(f))}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-sm font-medium text-text">
+                          {f.partNumber} / {f.serialNumber}
+                        </span>
+                        {f.baseApproved ? (
+                          <Badge tone="accent">
+                            {f.location} → {f.routedTo}
+                          </Badge>
+                        ) : (
+                          <Badge tone="warning">{f.location} — not an approved base</Badge>
+                        )}
+                        {f.cra && <span className="text-xs text-muted">{f.cra}</span>}
+                      </div>
+                      {f.partName && <p className="text-xs text-muted">{f.partName}</p>}
+                      <p className="mt-1 text-xs text-muted">“{f.note}”</p>
+                    </div>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+          {pinsProcess.length > 0 && (
+            <div className="border-t border-border">
+              <p className="px-5 pt-3 text-xs font-medium uppercase tracking-wide text-muted">
+                Pins (PN 4114T06P03) — never scrapped, routed separately
+              </p>
+              {isPinsRunning && pinsRun?.phase && <p className="px-5 pt-1 text-xs text-muted">{pinsRun.phase}</p>}
+              {pinsRun?.fatalError && (
+                <p className="flex items-center gap-1.5 px-5 pt-1 text-xs font-semibold text-danger">
+                  <AlertTriangle size={13} />
+                  {pinsRun.fatalError}
+                </p>
+              )}
+              <div className="divide-y divide-border">
+                {pinsProcess.map((f) => {
+                  const bnKey = serialKey(f)
+                  const rowResult = pinsRun?.results.find((r) => r.bn.toUpperCase() === bnKey)
+                  const succeeded = rowResult?.status === 'success'
+                  // Reported for in this run, but no result back yet.
+                  const stillRunning =
+                    isPinsRunning && !!pinsRun?.bns.some((bn) => bn.toUpperCase() === bnKey) && !rowResult
+                  return (
+                    <div key={bnKey} className="px-5 py-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-sm font-medium text-text">
+                          {f.partNumber} / {f.serialNumber}
+                        </span>
+                        <Badge tone="accent">Pins process</Badge>
+                        {succeeded && <Badge tone="accent">Done</Badge>}
+                        {stillRunning && (
+                          <span className="flex items-center gap-1.5 text-xs text-muted">
+                            <Loader2 size={12} className="animate-spin" />
+                            Running...
+                          </span>
+                        )}
+                        {f.cra && <span className="text-xs text-muted">{f.cra}</span>}
+                      </div>
+                      {f.partName && <p className="text-xs text-muted">{f.partName}</p>}
+                      <PinsResultLine result={rowResult} />
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
         </Card>
       )}
 
@@ -424,18 +607,25 @@ export default function BackshopRepairs() {
         </Card>
       )}
 
-      {showScrapConfirm && (
+      {showRunConfirm && (
         <ConfirmDialog
-          title={`Scrap ${selectedFindings.length} part${selectedFindings.length === 1 ? '' : 's'} in ${env}?`}
-          message={
-            `${selectedFindings.map((f) => f.serialNumber).join(', ')} will be scheduled and transferred for scrap ` +
-            `in ${env}, one at a time. This cannot be undone. If one fails, the rest still run — each reports its ` +
-            `own result on the Scrap tab, including the base it was sent to.`
-          }
-          confirmLabel={`Yes, scrap in ${env}`}
+          title={`Run in ${env}?`}
+          message={[
+            selectedFindings.length > 0 &&
+              `${selectedFindings.map((f) => f.serialNumber).join(', ')} will be scheduled and transferred for ` +
+                `scrap in ${env}, one at a time. This cannot be undone. If one fails, the rest still run — each ` +
+                `reports its own result on the Scrap tab.`,
+            pinsToRun.length > 0 &&
+              `${pinsToRun.map((f) => f.serialNumber).join(', ')} will be routed through the Pins process in ` +
+                `${env}, all together in one job. This writes to real MXI and cannot be undone. This path has not ` +
+                `yet had a first live test — watch it closely.`,
+          ]
+            .filter(Boolean)
+            .join(' ')}
+          confirmLabel={`Yes, run in ${env}`}
           cancelLabel="Never mind"
-          onConfirm={() => void handleScrapConfirmed()}
-          onCancel={() => setShowScrapConfirm(false)}
+          onConfirm={() => void handleRunConfirmed()}
+          onCancel={() => setShowRunConfirm(false)}
         />
       )}
 
